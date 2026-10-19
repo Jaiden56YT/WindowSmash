@@ -34,9 +34,7 @@
 #include <stdarg.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
-#ifndef __APPLE__
-#include <sys/random.h>
-#endif
+#include <sys/random.h>   /* getentropy on macOS too */
 #ifdef __APPLE__
 #include <sys/sysctl.h>
 #include <sys/proc.h>
@@ -48,6 +46,16 @@
 #include <unistd.h>
 
 #include <windows.h>
+
+#ifdef __APPLE__
+#define ST_CTIM st_ctimespec
+#define ST_ATIM st_atimespec
+#define ST_MTIM st_mtimespec
+#else
+#define ST_CTIM st_ctim
+#define ST_ATIM st_atim
+#define ST_MTIM st_mtim
+#endif
 
 /* macOS has no gettid, no clock_nanosleep and no pthread_condattr_setclock. Its condition
  * variables take absolute deadlines on CLOCK_REALTIME, so the timed waits use that clock there. */
@@ -1095,7 +1103,9 @@ HANDLE CreateFileA(LPCSTR path, DWORD access, DWORD share, void *security, DWORD
     }
     struct stat st;
     if (!fstat(fd, &st) && S_ISDIR(st.st_mode)) { close(fd); last_error = ERROR_ACCESS_DENIED; return INVALID_HANDLE_VALUE; }
+#ifdef __linux__
     if (flags & FILE_FLAG_RANDOM_ACCESS) posix_fadvise(fd, 0, 0, POSIX_FADV_RANDOM);
+#endif
     Obj *o = new_obj(H_FILE);
     o->fd = fd;
     return o;
@@ -1180,9 +1190,9 @@ BOOL GetFileTime(HANDLE h, FILETIME *created, FILETIME *accessed, FILETIME *writ
     Obj *o = obj_of(h, H_FILE);
     struct stat st;
     if (!o || fstat(o->fd, &st)) return fail_errno();
-    if (created) *created = filetime_of(st.st_ctim);
-    if (accessed) *accessed = filetime_of(st.st_atim);
-    if (written) *written = filetime_of(st.st_mtim);
+    if (created) *created = filetime_of(st.ST_CTIM);
+    if (accessed) *accessed = filetime_of(st.ST_ATIM);
+    if (written) *written = filetime_of(st.ST_MTIM);
     return TRUE;
 }
 
@@ -1243,8 +1253,8 @@ static BOOL find_next(Obj *o, WIN32_FIND_DATAA *data) {
             data->dwFileAttributes = S_ISDIR(st.st_mode) ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
             data->nFileSizeHigh = (DWORD)((u64)st.st_size >> 32);
             data->nFileSizeLow = (DWORD)st.st_size;
-            data->ftCreationTime = data->ftLastWriteTime = filetime_of(st.st_mtim);   /* (no birth time in stat) */
-            data->ftLastAccessTime = filetime_of(st.st_atim);
+            data->ftCreationTime = data->ftLastWriteTime = filetime_of(st.ST_MTIM);   /* (no birth time in stat) */
+            data->ftLastAccessTime = filetime_of(st.ST_ATIM);
         } else data->dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
         return TRUE;
     }

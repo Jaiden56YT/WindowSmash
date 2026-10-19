@@ -370,6 +370,9 @@ static LONG WINAPI on_fault(EXCEPTION_POINTERS *e) {
 #include <semaphore.h>
 #include <signal.h>
 #include <sys/syscall.h>
+#ifdef __APPLE__
+#define _XOPEN_SOURCE 700   /* the macOS ucontext routines need it */
+#endif
 #include <ucontext.h>
 
 int rt_ww_fault(void *address);        /* (linux/win32.c) a write the fallback write watch takes */
@@ -407,6 +410,7 @@ static void host_frame(const char *indent, void *pc) {   /* "[module +offset]" *
     } else out("%s[%#llx]\n", indent, (u64)pc);
 }
 
+#ifdef __linux__   /* (other threads' stacks come through tgkill and a realtime signal: Linux only, for now) */
 /* Another thread's frames: it is interrupted and records its own stack. */
 #define SIG_BACKTRACE (SIGRTMIN + 2)
 static void *bt_frames[96];
@@ -445,6 +449,9 @@ void rt_backtrace_thread(HANDLE thread, int max_frames) {
     }
     pthread_mutex_unlock(&lock);
 }
+#else
+void rt_backtrace_thread(HANDLE thread, int max_frames) { (void)thread; (void)max_frames; }
+#endif
 
 /* A host fault inside recompiled code is a guest fault: report where, and what it touched.
  * (Writes to pages the fallback write watch protects are not faults: they are noted and go on.) */
@@ -488,13 +495,17 @@ static void install_signals(void) {
     sigaction(SIGBUS, &sa, NULL);
     sigaction(SIGILL, &sa, NULL);
     sigaction(SIGFPE, &sa, NULL);
+#ifdef __linux__
     memset(&sa, 0, sizeof sa);
     sa.sa_sigaction = on_backtrace_signal;
     sa.sa_flags = SA_SIGINFO | SA_RESTART | SA_ONSTACK;
     sigemptyset(&sa.sa_mask);
     sigaction(SIG_BACKTRACE, &sa, NULL);
+#endif
     signal(SIGPIPE, SIG_IGN);
+#ifdef __linux__
     sem_init(&bt_done, 0, 0);
+#endif
     rt_thread_signal_stack();
     void *warm[4];
     backtrace(warm, 4);   /* (its first call loads the unwinder: not inside a signal handler) */

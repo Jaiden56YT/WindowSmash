@@ -271,6 +271,8 @@ def stage_d3d_headers():
                    for p in glob.glob(os.path.join(D3D_SOURCE, pat)))
     if "dxgi.h" not in names:
         raise SystemExit(f"SSBU_D3D_HEADERS has no dxgi.h: {D3D_SOURCE}")
+    if os.path.exists(os.path.join(D3D_SOURCE, "_mingw_unicode.h")):   # (d3dcompiler.h includes it)
+        names.append("_mingw_unicode.h")
     for name in names:
         shutil.copy(os.path.join(D3D_SOURCE, name), os.path.join(D3D_STAGE, name))
 

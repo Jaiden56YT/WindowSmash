@@ -117,7 +117,11 @@ static inline PVOID InterlockedCompareExchangePointer(PVOID volatile *p, PVOID e
 }
 static inline PVOID InterlockedExchangePointer(PVOID volatile *p, PVOID v) { return __atomic_exchange_n(p, v, RT_SC); }
 #define MemoryBarrier() __atomic_thread_fence(__ATOMIC_SEQ_CST)
+#if defined(__aarch64__)
+#define YieldProcessor() __builtin_arm_yield()
+#else
 #define YieldProcessor() __builtin_ia32_pause()
+#endif
 
 /* ---- locks and condition variables ------------------------------------------------------- */
 typedef struct SRWLOCK { pthread_rwlock_t l; } SRWLOCK, *PSRWLOCK;
