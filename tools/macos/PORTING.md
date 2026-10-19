@@ -119,5 +119,8 @@ The fallback is a native Metal backend behind `runtime/gpu_backend.h`.
   - `pthread_setname_np` (around line 470): macOS takes only the name.
   - `sysconf(_SC_NPROCESSORS_ONLN)` (around line 789): exists on macOS.
   - `sys/syscall.h` is still included; it's harmless on macOS but should be guarded.
-- **Not yet started:** the crash handler's x86 register reads (`runtime/host.c`,
-  `runtime/linux/profile.c`) and the Linux build driver for macOS.
+- **Done (untested):** the crash handler in `runtime/host.c` reads the program counter and
+  write flag through `fault_context`, with the arm64 and x86-64 macOS layouts. `gettid` is
+  replaced by `rt_tid`.
+- **Still to do:** `runtime/linux/profile.c` (the sampling profiler) reads x86 registers, the
+  macOS build driver, and the graphics path.

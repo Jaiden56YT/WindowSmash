@@ -373,6 +373,29 @@ static LONG WINAPI on_fault(EXCEPTION_POINTERS *e) {
 #include <ucontext.h>
 
 int rt_ww_fault(void *address);        /* (linux/win32.c) a write the fallback write watch takes */
+
+/* The thread id, and a fault's program counter and write flag: these differ on macOS. */
+#ifdef __APPLE__
+#include <pthread.h>
+static pid_t rt_tid(void) { uint64_t id = 0; pthread_threadid_np(NULL, &id); return (pid_t)id; }
+static void fault_context(void *ucv, u64 *pc, int *is_write) {
+    ucontext_t *uc = ucv;
+#if defined(__aarch64__)
+    *pc = (u64)uc->uc_mcontext->__ss.__pc;
+    *is_write = (int)((uc->uc_mcontext->__es.__esr >> 6) & 1);   /* ESR's WnR bit: a write */
+#else
+    *pc = (u64)uc->uc_mcontext->__ss.__rip;
+    *is_write = (uc->uc_mcontext->__es.__err & 2) != 0;
+#endif
+}
+#else
+static pid_t rt_tid(void) { return gettid(); }
+static void fault_context(void *ucv, u64 *pc, int *is_write) {
+    ucontext_t *uc = ucv;
+    *pc = (u64)uc->uc_mcontext.gregs[REG_RIP];
+    *is_write = (uc->uc_mcontext.gregs[REG_ERR] & 2) != 0;
+}
+#endif
 void rt_thread_signal_stack(void);
 
 static void host_frame(const char *indent, void *pc) {   /* "[module +offset]" */
@@ -426,10 +449,12 @@ void rt_backtrace_thread(HANDLE thread, int max_frames) {
 /* A host fault inside recompiled code is a guest fault: report where, and what it touched.
  * (Writes to pages the fallback write watch protects are not faults: they are noted and go on.) */
 static void on_fault(int sig, siginfo_t *si, void *ucv) {
-    ucontext_t *uc = ucv;
-    if (sig == SIGSEGV && (uc->uc_mcontext.gregs[REG_ERR] & 2) && rt_ww_fault(si->si_addr)) return;
+    u64 pc;
+    int is_write;
+    fault_context(ucv, &pc, &is_write);
+    if (sig == SIGSEGV && is_write && rt_ww_fault(si->si_addr)) return;
     static volatile pid_t reporter;
-    pid_t me = gettid(), none = 0;
+    pid_t me = rt_tid(), none = 0;
     if (reporter == me) _exit(6);   /* (a fault while reporting one) */
     if (!__atomic_compare_exchange_n(&reporter, &none, me, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) for (;;) pause();   /* (one report at a time) */
     char name[96], report[MAX_PATH];
@@ -438,10 +463,9 @@ static void on_fault(int sig, siginfo_t *si, void *ucv) {
     out("\n*** host exception (signal %d: %s) during %s", sig, sig == SIGSEGV ? "access violation" : sig == SIGBUS ? "bus error" :
         sig == SIGILL ? "illegal instruction" : sig == SIGFPE ? "arithmetic" : "?", phase);
     if (sig == SIGSEGV || sig == SIGBUS)
-        out(": %s address %s", uc->uc_mcontext.gregs[REG_ERR] & 2 ? "writing" : "reading", rt_describe((u64)si->si_addr, name, sizeof name));
+        out(": %s address %s", is_write ? "writing" : "reading", rt_describe((u64)si->si_addr, name, sizeof name));
     out("\n");
-    u64 pc = (u64)uc->uc_mcontext.gregs[REG_RIP];
-    out("host pc %#llx (thread %d %s):\n", pc, (int)gettid(), rt_thread_description(gettid()));
+    out("host pc %#llx (thread %d %s):\n", pc, (int)rt_tid(), rt_thread_description(rt_tid()));
     host_frame("  ", (void *)pc);
     void *frames[64];
     int n = backtrace(frames, 64), from = 0;
