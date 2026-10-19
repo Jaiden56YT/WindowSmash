@@ -36,7 +36,16 @@ OUT = os.path.abspath(arg("--out", os.path.join(REPO, "build-macos")))
 JOBS = int(arg("--jobs", str(max(4, (os.cpu_count() or 8) - 2))))
 GEN = os.path.join(OUT, "gen")
 
-RUNTIME_INCLUDES = INCLUDES + ["-I", os.path.join(RUNTIME, "linux", "include"), "-I", GEN]
+# DXVK's headers (windows_base.h and the rest of include/native): the runtime's Windows headers
+# include them. Get them with `git clone --depth 1 https://github.com/doitsujin/dxvk` and point
+# SSBU_DXVK_HEADERS at its include/native folder.
+DXVK_HEADERS = os.environ.get("SSBU_DXVK_HEADERS", "")
+if DXVK_HEADERS and not os.path.isdir(DXVK_HEADERS):
+    raise SystemExit(f"SSBU_DXVK_HEADERS is not a folder: {DXVK_HEADERS}")
+if not DXVK_HEADERS or not os.path.exists(os.path.join(DXVK_HEADERS, "windows", "windows_base.h")):
+    raise SystemExit("set SSBU_DXVK_HEADERS to DXVK's include/native folder (it must hold windows/windows_base.h)")
+RUNTIME_INCLUDES = INCLUDES + ["-I", os.path.join(RUNTIME, "linux", "include"), "-I", GEN,
+                               "-I", os.path.join(DXVK_HEADERS, "windows"), "-I", os.path.join(DXVK_HEADERS, "directx")]
 RUNTIME_DEFINES = ["-D_REENTRANT", "-DSSBU_HAVE_OPUS", "-DSSBU_HAVE_VPX", "-DSSBU_HAVE_SDL2"]
 
 
