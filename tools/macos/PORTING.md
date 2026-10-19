@@ -104,3 +104,20 @@ The fallback is a native Metal backend behind `runtime/gpu_backend.h`.
 2. Futex replacement: `__ulock` (works now) or `os_sync` (needs 14.4 and cleaner API)?
 3. Graphics: MoltenVK-based DXVK first, as planned, or go straight to Metal?
 4. Fixed-address linking on macOS: does the program need the same addresses as on Linux?
+
+## Status log
+
+- **Done (untested):** Futex condition variables use `__ulock` on macOS (`runtime/linux/win32.c`).
+- **Done (untested):** Write watch uses the mprotect fallback on macOS. The userfaultfd and
+  PAGEMAP_SCAN code is under `#ifndef __APPLE__`, with stubs for the rest of the file.
+- **Still Linux-only in `runtime/linux/win32.c`:**
+  - `sys/random.h` and `getrandom` (around line 1222): use `getentropy` on macOS.
+  - `/proc/self/maps` in `VirtualQuery` (around line 755): needs Mach `vm_region` on macOS.
+  - `/proc/self/status` (around line 1246): needs a macOS equivalent.
+  - `MAP_FIXED_NOREPLACE` (around line 688) and `MAP_NORESERVE` (lines 565, 688): check the
+    macOS SDK.
+  - `pthread_setname_np` (around line 470): macOS takes only the name.
+  - `sysconf(_SC_NPROCESSORS_ONLN)` (around line 789): exists on macOS.
+  - `sys/syscall.h` is still included; it's harmless on macOS but should be guarded.
+- **Not yet started:** the crash handler's x86 register reads (`runtime/host.c`,
+  `runtime/linux/profile.c`) and the Linux build driver for macOS.

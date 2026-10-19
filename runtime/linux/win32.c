@@ -804,12 +804,14 @@ void GetSystemInfo(SYSTEM_INFO *info) {
 #endif
 /* (linux/fs.h of 6.7; the sysroot's headers predate it) */
 struct rt_page_region { u64 start, end, categories; };
+#ifndef __APPLE__   /* userfaultfd and PAGEMAP_SCAN are Linux 6.7's; macOS has the fallback only */
 struct rt_pm_scan_arg {
     u64 size, flags, start, end, walk_end, vec, vec_len, max_pages, category_inverted, category_mask, category_anyof_mask, return_mask;
 };
 #define RT_PAGEMAP_SCAN _IOWR('f', 16, struct rt_pm_scan_arg)
 #define RT_PM_SCAN_WP_MATCHING (1 << 0)
 #define RT_PAGE_IS_WRITTEN (1 << 1)
+#endif   /* __APPLE__ */
 
 enum { WW_NONE, WW_SCAN, WW_PROTECT };
 static int ww_mode = -1;
@@ -827,6 +829,7 @@ static struct WatchArea *area_of(u64 lo, u64 hi) {
     return NULL;
 }
 
+#ifndef __APPLE__
 static int uffd_protect(u64 lo, u64 hi, int on) {
     struct uffdio_writeprotect wp = {{lo, hi - lo}, on ? UFFDIO_WRITEPROTECT_MODE_WP : 0};
     return ioctl(uffd, UFFDIO_WRITEPROTECT, &wp);
@@ -873,12 +876,21 @@ static int scan_works(void) {
     munmap(p, 2 * PAGE);
     return ok;
 }
+#else
+static int uffd_protect(u64 lo, u64 hi, int on) { (void)lo; (void)hi; (void)on; return -1; }
+static long scan(u64 lo, u64 hi, int reset, struct rt_page_region *vec, u64 nvec, u64 max_pages, u64 *walk_end) {
+    (void)lo; (void)hi; (void)reset; (void)vec; (void)nvec; (void)max_pages; *walk_end = lo; return -1;
+}
+#endif
 
 static void ww_init(void) {
     if (ww_mode >= 0) return;
     ww_mode = WW_PROTECT;
     const char *force = getenv("SSBU_WRITE_WATCH");   /* "protect": the fallback, for testing */
     if (force && !strcmp(force, "protect")) return;
+#ifdef __APPLE__
+    return;   /* no userfaultfd on macOS: the mprotect fallback */
+#else
     uffd = (int)syscall(SYS_userfaultfd, O_CLOEXEC | O_NONBLOCK | UFFD_USER_MODE_ONLY);
     if (uffd < 0) uffd = (int)syscall(SYS_userfaultfd, O_CLOEXEC | O_NONBLOCK);
     if (uffd < 0) return;
@@ -892,6 +904,7 @@ static void ww_init(void) {
         return;
     }
     ww_mode = WW_SCAN;
+#endif
 }
 
 const char *rt_ww_mode(void) {
@@ -909,6 +922,7 @@ static void ww_register(u64 base, u64 size) {
     a->base = base;
     a->size = size;
     madvise((void *)(uintptr_t)base, size, MADV_NOHUGEPAGE);   /* (page-sized reports, not 2 MB ones) */
+#ifndef __APPLE__
     if (ww_mode == WW_SCAN) {
         struct uffdio_register reg = {{base, size}, UFFDIO_REGISTER_MODE_WP, 0};
         if (ioctl(uffd, UFFDIO_REGISTER, &reg)) {
@@ -916,6 +930,7 @@ static void ww_register(u64 base, u64 size) {
             ww_mode = WW_PROTECT;
         }
     }
+#endif
     nareas++;
 }
 
