@@ -47,14 +47,19 @@ if not DXVK_HEADERS or not os.path.exists(os.path.join(DXVK_HEADERS, "windows", 
 # The D3D11/DXGI headers (d3d11.h, dxgi.h) are not in DXVK's repo: DXVK fills include/native/directx
 # from Microsoft's DirectX-Headers. Clone https://github.com/Microsoft/DirectX-Headers and set
 # SSBU_D3D_HEADERS to its include/directx folder (the one that holds d3d11.h).
-D3D_HEADERS = os.environ.get("SSBU_D3D_HEADERS", "")
-if not D3D_HEADERS or not os.path.exists(os.path.join(D3D_HEADERS, "d3d11.h")):
-    raise SystemExit("set SSBU_D3D_HEADERS to the include/directx folder of Microsoft's DirectX-Headers (it must hold d3d11.h)")
+#
+# Only the d3d*.h and dxgi*.h files are used. The folder is copied into gen/d3d (stage_d3d_headers),
+# never put on the include path as a whole: a full C runtime (MinGW's stdio.h, string.h, ...)
+# would shadow the macOS ones.
+D3D_SOURCE = os.environ.get("SSBU_D3D_HEADERS", "")
+if not D3D_SOURCE or not os.path.exists(os.path.join(D3D_SOURCE, "d3d11.h")):
+    raise SystemExit("set SSBU_D3D_HEADERS to a folder that holds d3d11.h and dxgi.h (e.g. MinGW-w64's x86_64-w64-mingw32/include)")
+D3D_STAGE = os.path.join(GEN, "d3d")
 # SDL2 (sdl2-compat) keeps its headers in include/SDL2, and the code includes <SDL.h>.
 SDL_INCLUDE = os.path.join(DEPS["sdl2"], "include", "SDL2") if DEPS.get("sdl2") else ""
 RUNTIME_INCLUDES = INCLUDES + ["-I", os.path.join(RUNTIME, "linux", "include"), "-I", GEN,
                                "-I", os.path.join(DXVK_HEADERS, "windows"), "-I", os.path.join(DXVK_HEADERS, "directx"),
-                               "-I", D3D_HEADERS, "-I", SDL_INCLUDE]
+                               "-I", D3D_STAGE, "-I", SDL_INCLUDE]
 RUNTIME_DEFINES = ["-D_REENTRANT", "-DSSBU_HAVE_OPUS", "-DSSBU_HAVE_VPX", "-DSSBU_HAVE_SDL2"]
 
 
@@ -258,9 +263,22 @@ def overlay_font_header():
         print(f"wrote a blank {header} (the debug overlay will show no text)")
 
 
+def stage_d3d_headers():
+    """Copy SSBU_D3D_HEADERS' d3d*.h and dxgi*.h into gen/d3d (see the note at the top)."""
+    import glob
+    os.makedirs(D3D_STAGE, exist_ok=True)
+    names = sorted(os.path.basename(p) for pat in ("d3d*.h", "dxgi*.h")
+                   for p in glob.glob(os.path.join(D3D_SOURCE, pat)))
+    if "dxgi.h" not in names:
+        raise SystemExit(f"SSBU_D3D_HEADERS has no dxgi.h: {D3D_SOURCE}")
+    for name in names:
+        shutil.copy(os.path.join(D3D_SOURCE, name), os.path.join(D3D_STAGE, name))
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     check()   # the SDK, clang and Homebrew packages; stops if any is missing
+    stage_d3d_headers()
     overlay_font_header()
     if "--runtime-only" not in sys.argv:
         if not modules():
