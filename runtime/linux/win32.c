@@ -16,8 +16,11 @@
 #include <execinfo.h>
 #include <fcntl.h>
 #include <fnmatch.h>
+#ifndef __APPLE__
 #include <linux/futex.h>
 #include <linux/userfaultfd.h>
+#endif
+#include <errno.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <sys/ioctl.h>
@@ -58,8 +61,10 @@ DWORD rt_win32_error(int err) {
 static BOOL fail_errno(void) { last_error = rt_win32_error(errno); return FALSE; }
 
 /* ---- locks and condition variables ------------------------------------------------------- */
+#ifndef __APPLE__   /* glibc's pthread_mutex_t layout; macOS's differs (see tools/macos/PORTING.md) */
 _Static_assert(offsetof(CRITICAL_SECTION, OwningThread) == offsetof(pthread_mutex_t, __data.__owner) && sizeof(CRITICAL_SECTION) == sizeof(pthread_mutex_t),
                "CRITICAL_SECTION's OwningThread is glibc's mutex owner");
+#endif
 
 void InitializeCriticalSection(CRITICAL_SECTION *cs) {
     pthread_mutexattr_t a;
@@ -69,9 +74,40 @@ void InitializeCriticalSection(CRITICAL_SECTION *cs) {
     pthread_mutexattr_destroy(&a);
 }
 
+#ifdef __APPLE__
+/* macOS has no futex. __ulock_wait / __ulock_wake (the calls libdispatch and libc++ use
+ * internally) give the same compare-and-wait on an address. They're private, so they're
+ * declared here. Untested on a Mac: see tools/macos/PORTING.md, item 2. */
+#define FUTEX_WAIT_PRIVATE 0
+#define FUTEX_WAKE_PRIVATE 1
+extern int __ulock_wait(uint32_t operation, void *addr, uint64_t value, uint32_t timeout_us);
+extern int __ulock_wake(uint32_t operation, void *addr, uint64_t wake_value);
+#define UL_COMPARE_AND_WAIT 1u
+#define ULF_WAKE_ALL 0x00000100u
+#define ULF_NO_ERRNO 0x01000000u   /* return -errno instead of setting errno */
+
+static long futex(volatile int *addr, int op, int val, const struct timespec *timeout) {
+    if (op == FUTEX_WAIT_PRIVATE) {
+        uint32_t us = 0;   /* 0: wait without a timeout */
+        if (timeout) {
+            uint64_t t = (uint64_t)timeout->tv_sec * 1000000u + (uint64_t)timeout->tv_nsec / 1000u;
+            us = t > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)(t ? t : 1);
+        }
+        int r = __ulock_wait(UL_COMPARE_AND_WAIT | ULF_NO_ERRNO, (void *)addr, (uint64_t)(uint32_t)val, us);
+        if (r == 0) return 0;
+        errno = r < 0 ? -r : EINTR;
+        return -1;
+    }
+    /* FUTEX_WAKE_PRIVATE: one waiter, or all of them for a large count (as futex does). */
+    int r = __ulock_wake(UL_COMPARE_AND_WAIT | ULF_NO_ERRNO | (val > 1 ? ULF_WAKE_ALL : 0u), (void *)addr, 0);
+    if (r < 0 && r != -ENOENT) { errno = -r; return -1; }   /* ENOENT: nobody was waiting */
+    return 0;
+}
+#else
 static long futex(volatile int *addr, int op, int val, const struct timespec *timeout) {
     return syscall(SYS_futex, addr, op, val, timeout, NULL, 0);
 }
+#endif
 
 void WakeConditionVariable(CONDITION_VARIABLE *cv) {
     __atomic_add_fetch(&cv->seq, 1, __ATOMIC_SEQ_CST);

@@ -37,7 +37,11 @@ macOS has neither userfaultfd nor `/proc`. Plan: always use `WW_PROTECT` on macO
 `runtime/linux/win32.c` implements `WakeConditionVariable`, `WakeAllConditionVariable` and
 `SleepConditionVariableCS` with a raw `syscall(SYS_futex, ...)`. macOS has no futex.
 
-Options:
+Status: done in `runtime/linux/win32.c` under `#ifdef __APPLE__`, using `__ulock_wait` and
+`__ulock_wake` (untested; not compiled here because DXVK's headers aren't in this sandbox).
+The Linux path is unchanged. The `pthread_mutex_t` layout check is also guarded for macOS.
+
+Other options considered:
 - `os_sync_wait_on_address` / `os_sync_wake_by_address_*` (macOS 14.4 and later). Public, but
   the target is macOS 13 in `toolchain_macos.py` now.
 - `__ulock_wait` / `__ulock_wake`: private, but used widely and works on macOS 13 and later.
