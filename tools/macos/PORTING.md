@@ -122,5 +122,7 @@ The fallback is a native Metal backend behind `runtime/gpu_backend.h`.
 - **Done (untested):** the crash handler in `runtime/host.c` reads the program counter and
   write flag through `fault_context`, with the arm64 and x86-64 macOS layouts. `gettid` is
   replaced by `rt_tid`.
-- **Still to do:** `runtime/linux/profile.c` (the sampling profiler) reads x86 registers, the
-  macOS build driver, and the graphics path.
+- **Done (compiles):** the sampling profiler is stubbed out on macOS in
+  `runtime/macos/profile_stub.c`. The macOS build should use this file instead of
+  `runtime/linux/profile.c`. Porting the profiler is later work.
+- **Still to do:** the macOS build driver and the graphics path.
