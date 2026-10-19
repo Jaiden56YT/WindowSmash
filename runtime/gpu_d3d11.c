@@ -1444,6 +1444,13 @@ static int read_guarded(void *dst, u64 g, u32 n) {
     rt_probing = 0;
     return ok;
 }
+#elif defined(__APPLE__)
+#include <mach/mach.h>
+static int read_guarded(void *dst, u64 g, u32 n) {   /* (vm_read_overwrite fails where a read would fault) */
+    vm_size_t got = 0;
+    kern_return_t kr = vm_read_overwrite(mach_task_self(), (vm_address_t)g, n, (vm_address_t)dst, &got);
+    return kr == KERN_SUCCESS && got == n;
+}
 #else   /* (Linux: process_vm_readv fails with EFAULT where a read would fault) */
 static int read_guarded(void *dst, u64 g, u32 n) {
     struct iovec to = {dst, n}, from = {P(void, g), n};

@@ -551,6 +551,7 @@ void rt_fiber_trampoline(void);
  * stacks, restore the other context's and return into it. A new fiber's stack is prepared to
  * "return" into the trampoline, which calls rt_fiber_entry(fiber in r12) and marks the end of
  * the stack for unwinders. */
+#if defined(__x86_64__)
 __asm__(
     ".text\n"
     ".globl rt_fiber_switch\n"
@@ -588,6 +589,58 @@ __asm__(
     "    ud2\n"
     "    .cfi_endproc\n"
     ".size rt_fiber_trampoline, .-rt_fiber_trampoline\n");
+#elif defined(__aarch64__)
+/* arm64: the same switch, saving x19-x30, d8-d15, fpcr and fpsr in a 176-byte frame. A new
+ * fiber's x19 is the Fiber, and the trampoline passes it to rt_fiber_entry. */
+#if defined(__APPLE__)
+#define FIBER_SYM(s) "_" #s
+#else
+#define FIBER_SYM(s) #s
+#endif
+__asm__(
+    ".text\n"
+    ".globl " FIBER_SYM(rt_fiber_switch) "\n"
+    FIBER_SYM(rt_fiber_switch) ":\n"
+    "    sub sp, sp, #176\n"
+    "    stp x19, x20, [sp, #0]\n"
+    "    stp x21, x22, [sp, #16]\n"
+    "    stp x23, x24, [sp, #32]\n"
+    "    stp x25, x26, [sp, #48]\n"
+    "    stp x27, x28, [sp, #64]\n"
+    "    stp x29, x30, [sp, #80]\n"
+    "    stp d8, d9, [sp, #96]\n"
+    "    stp d10, d11, [sp, #112]\n"
+    "    stp d12, d13, [sp, #128]\n"
+    "    stp d14, d15, [sp, #144]\n"
+    "    mrs x2, fpcr\n"
+    "    mrs x3, fpsr\n"
+    "    stp x2, x3, [sp, #160]\n"
+    "    mov x2, sp\n"
+    "    str x2, [x0]\n"
+    "    mov sp, x1\n"
+    "    ldp x2, x3, [sp, #160]\n"
+    "    msr fpcr, x2\n"
+    "    msr fpsr, x3\n"
+    "    ldp x19, x20, [sp, #0]\n"
+    "    ldp x21, x22, [sp, #16]\n"
+    "    ldp x23, x24, [sp, #32]\n"
+    "    ldp x25, x26, [sp, #48]\n"
+    "    ldp x27, x28, [sp, #64]\n"
+    "    ldp x29, x30, [sp, #80]\n"
+    "    ldp d8, d9, [sp, #96]\n"
+    "    ldp d10, d11, [sp, #112]\n"
+    "    ldp d12, d13, [sp, #128]\n"
+    "    ldp d14, d15, [sp, #144]\n"
+    "    add sp, sp, #176\n"
+    "    ret\n"
+    ".globl " FIBER_SYM(rt_fiber_trampoline) "\n"
+    FIBER_SYM(rt_fiber_trampoline) ":\n"
+    "    mov x0, x19\n"
+    "    bl " FIBER_SYM(rt_fiber_entry) "\n"
+    "    brk #0\n");
+#else
+#error "fibers need an x86-64 or arm64 context switch"
+#endif
 
 __attribute__((used)) void rt_fiber_entry(Fiber *f) {
     f->fn(f->param);
@@ -618,6 +671,7 @@ LPVOID CreateFiberEx(SIZE_T commit, SIZE_T reserve, DWORD flags, LPFIBER_START_R
     f->stack = stack;
     f->stack_size = size + 0x10000;
     u64 *sp = (u64 *)(((uintptr_t)(stack + size + 0x10000) - 128) & ~(uintptr_t)15);
+#if defined(__x86_64__)
     sp -= 8;   /* control words, r15, r14, r13, r12, rbx, rbp, return address: 16-aligned after the ret */
     u32 mxcsr = 0x1F80;
     u16 fpcw = 0x037F;
@@ -628,6 +682,19 @@ LPVOID CreateFiberEx(SIZE_T commit, SIZE_T reserve, DWORD flags, LPFIBER_START_R
     sp[4] = (u64)(uintptr_t)f;   /* r12 */
     sp[5] = 0; sp[6] = 0;
     sp[7] = (u64)(uintptr_t)rt_fiber_trampoline;
+#elif defined(__aarch64__)
+    sp -= 22;   /* the switch's 176-byte frame (see rt_fiber_switch): x19 is the fiber, x30 the trampoline */
+    memset(sp, 0, 22 * sizeof *sp);
+    sp[0] = (u64)(uintptr_t)f;                      /* x19 */
+    sp[11] = (u64)(uintptr_t)rt_fiber_trampoline;   /* x30 (at 88) */
+    u64 fpcr, fpsr;
+    __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+    __asm__ volatile("mrs %0, fpsr" : "=r"(fpsr));
+    sp[20] = fpcr;   /* (at 160) */
+    sp[21] = fpsr;   /* (at 168) */
+#else
+#error "fibers need an x86-64 or arm64 context switch"
+#endif
     f->sp = sp;
     return f;
 }
