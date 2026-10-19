@@ -110,15 +110,12 @@ The fallback is a native Metal backend behind `runtime/gpu_backend.h`.
 - **Done (untested):** Futex condition variables use `__ulock` on macOS (`runtime/linux/win32.c`).
 - **Done (untested):** Write watch uses the mprotect fallback on macOS. The userfaultfd and
   PAGEMAP_SCAN code is under `#ifndef __APPLE__`, with stubs for the rest of the file.
-- **Still Linux-only in `runtime/linux/win32.c`:**
-  - `sys/random.h` and `getrandom` (around line 1222): use `getentropy` on macOS.
-  - `/proc/self/maps` in `VirtualQuery` (around line 755): needs Mach `vm_region` on macOS.
-  - `/proc/self/status` (around line 1246): needs a macOS equivalent.
-  - `MAP_FIXED_NOREPLACE` (around line 688) and `MAP_NORESERVE` (lines 565, 688): check the
-    macOS SDK.
-  - `pthread_setname_np` (around line 470): macOS takes only the name.
-  - `sysconf(_SC_NPROCESSORS_ONLN)` (around line 789): exists on macOS.
-  - `sys/syscall.h` is still included; it's harmless on macOS but should be guarded.
+- **Done (untested):** the rest of `win32.c` that's Linux-only: `getentropy` for `getrandom`,
+  `sysctl` (P_TRACED) for the debugger check, `pthread_setname_np` on the calling thread only,
+  and fallbacks for `MAP_NORESERVE`, `MAP_STACK` and `MAP_FIXED_NOREPLACE` (VirtualAlloc
+  already checks the address it gets).
+- **Still Linux-only in `runtime/linux/win32.c`:** `VirtualQuery` reads `/proc/self/maps`. On
+  macOS it needs `mach_vm_region`. The rest of the file should now compile for macOS.
 - **Done (untested):** the crash handler in `runtime/host.c` reads the program counter and
   write flag through `fault_context`, with the arm64 and x86-64 macOS layouts. `gettid` is
   replaced by `rt_tid`.

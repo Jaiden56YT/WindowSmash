@@ -22,10 +22,25 @@
 #endif
 #include <errno.h>
 #include <signal.h>
+#ifndef MAP_NORESERVE
+#define MAP_NORESERVE 0   /* (a hint: not on macOS) */
+#endif
+#ifndef MAP_STACK
+#define MAP_STACK 0
+#endif
+#ifndef MAP_FIXED_NOREPLACE
+#define MAP_FIXED_NOREPLACE 0   /* callers check the address they got (VirtualAlloc) */
+#endif
 #include <stdarg.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#ifndef __APPLE__
 #include <sys/random.h>
+#endif
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#include <sys/proc.h>
+#endif
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -467,7 +482,11 @@ HRESULT SetThreadDescription(HANDLE thread, PCWSTR description) {
     set_description(tid, text);
     char shortname[16];
     snprintf(shortname, sizeof shortname, "%s", text);
+#ifdef __APPLE__   /* macOS names only the calling thread */
+    if (thread == PSEUDO_THREAD) pthread_setname_np(shortname);
+#else
     pthread_setname_np(thread == PSEUDO_THREAD ? pthread_self() : rt_thread_pthread(thread), shortname);
+#endif
     return S_OK;
 }
 
@@ -1234,7 +1253,11 @@ BOOL FindClose(HANDLE h) { return CloseHandle(h); }
 
 /* ---- the process -------------------------------------------------------------------------- */
 errno_t rand_s(unsigned int *value) {
+#ifdef __APPLE__
+    return getentropy(value, sizeof *value) == 0 ? 0 : EIO;
+#else
     return getrandom(value, sizeof *value, 0) == (ssize_t)sizeof *value ? 0 : EIO;
+#endif
 }
 
 void ExitProcess(UINT code) {
@@ -1257,6 +1280,15 @@ USHORT CaptureStackBackTrace(ULONG skip, ULONG count, PVOID *frames, PULONG hash
 
 void OutputDebugStringA(LPCSTR text) { fputs(text, stderr); }
 
+#ifdef __APPLE__
+BOOL IsDebuggerPresent(void) {
+    struct kinfo_proc info;
+    size_t size = sizeof info;
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()};
+    if (sysctl(mib, 4, &info, &size, NULL, 0) != 0) return FALSE;
+    return (info.kp_proc.p_flag & P_TRACED) != 0;
+}
+#else
 BOOL IsDebuggerPresent(void) {
     FILE *f = fopen("/proc/self/status", "r");
     char line[256];
@@ -1266,3 +1298,4 @@ BOOL IsDebuggerPresent(void) {
     if (f) fclose(f);
     return tracer != 0;
 }
+#endif
