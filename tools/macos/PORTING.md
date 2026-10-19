@@ -125,4 +125,7 @@ The fallback is a native Metal backend behind `runtime/gpu_backend.h`.
 - **Done (compiles):** the sampling profiler is stubbed out on macOS in
   `runtime/macos/profile_stub.c`. The macOS build should use this file instead of
   `runtime/linux/profile.c`. Porting the profiler is later work.
-- **Still to do:** the macOS build driver and the graphics path.
+- **Draft (untested):** `tools/macos/build_macos.py` compiles the runtime and the game, then
+  links if SSBU_VKD3D_MAC and SSBU_DXVK_MAC are set. It needs `gen/overlay_font.h` from the
+  Windows build.
+- **Still to do:** vkd3d-shader and DXVK for macOS, and the macOS link flags.
