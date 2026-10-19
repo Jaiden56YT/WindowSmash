@@ -226,15 +226,28 @@ def link():
     return True
 
 
+def overlay_font_header():
+    """gen/overlay_font.h: the debug overlay's glyphs. The Windows build draws them with GDI
+    (tools/linux/make_overlay_font.c); until that header is copied in, a blank one builds the
+    runtime, and the debug overlay shows no text."""
+    os.makedirs(GEN, exist_ok=True)
+    header = os.path.join(GEN, "overlay_font.h")
+    if not os.path.exists(header):
+        cells = 192 * 144   # ATLAS_W x ATLAS_H in make_overlay_font.c
+        with open(header, "w", newline="\n") as f:
+            f.write("/* placeholder: blank glyphs (copy the Windows build's overlay_font.h to replace) */\n")
+            f.write(f"static const unsigned char overlay_font[{cells}] = {{0}};\n")
+        print(f"wrote a blank {header} (the debug overlay will show no text)")
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     check()   # the SDK, clang and Homebrew packages; stops if any is missing
-    if not modules():
-        raise SystemExit(f"no recompiled game in {os.path.join(PORT, 'build')} (tools/recomp.py all)")
-    overlay = os.path.join(GEN, "overlay_font.h")
-    if not os.path.exists(overlay):
-        raise SystemExit(f"{overlay} is missing: copy the overlay_font.h the Windows build makes into it (see the module docstring)")
-    print(f"game tree: {PORT}")
+    overlay_font_header()
+    if "--runtime-only" not in sys.argv:
+        if not modules():
+            raise SystemExit(f"no recompiled game in {os.path.join(PORT, 'build')} (tools/recomp.py all)")
+        print(f"game tree: {PORT}")
     if not compile_all(runtime_jobs(), "runtime"):
         return False
     if "--runtime-only" in sys.argv:
