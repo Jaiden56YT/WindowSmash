@@ -44,8 +44,17 @@ if DXVK_HEADERS and not os.path.isdir(DXVK_HEADERS):
     raise SystemExit(f"SSBU_DXVK_HEADERS is not a folder: {DXVK_HEADERS}")
 if not DXVK_HEADERS or not os.path.exists(os.path.join(DXVK_HEADERS, "windows", "windows_base.h")):
     raise SystemExit("set SSBU_DXVK_HEADERS to DXVK's include/native folder (it must hold windows/windows_base.h)")
+# The D3D11/DXGI headers (d3d11.h, dxgi.h) are not in DXVK's repo: DXVK fills include/native/directx
+# from Microsoft's DirectX-Headers. Clone https://github.com/Microsoft/DirectX-Headers and set
+# SSBU_D3D_HEADERS to its include/directx folder (the one that holds d3d11.h).
+D3D_HEADERS = os.environ.get("SSBU_D3D_HEADERS", "")
+if not D3D_HEADERS or not os.path.exists(os.path.join(D3D_HEADERS, "d3d11.h")):
+    raise SystemExit("set SSBU_D3D_HEADERS to the include/directx folder of Microsoft's DirectX-Headers (it must hold d3d11.h)")
+# SDL2 (sdl2-compat) keeps its headers in include/SDL2, and the code includes <SDL.h>.
+SDL_INCLUDE = os.path.join(DEPS["sdl2"], "include", "SDL2") if DEPS.get("sdl2") else ""
 RUNTIME_INCLUDES = INCLUDES + ["-I", os.path.join(RUNTIME, "linux", "include"), "-I", GEN,
-                               "-I", os.path.join(DXVK_HEADERS, "windows"), "-I", os.path.join(DXVK_HEADERS, "directx")]
+                               "-I", os.path.join(DXVK_HEADERS, "windows"), "-I", os.path.join(DXVK_HEADERS, "directx"),
+                               "-I", D3D_HEADERS, "-I", SDL_INCLUDE]
 RUNTIME_DEFINES = ["-D_REENTRANT", "-DSSBU_HAVE_OPUS", "-DSSBU_HAVE_VPX", "-DSSBU_HAVE_SDL2"]
 
 

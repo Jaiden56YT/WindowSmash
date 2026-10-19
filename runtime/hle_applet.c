@@ -3,6 +3,7 @@
  * text box here; the others don't exist, so each behaves as if the player opened it and
  * immediately backed out. */
 #define _CRT_SECURE_NO_WARNINGS
+#include <unistd.h>   /* pipe, close, read, isatty (macOS doesn't pull these in through the Windows headers) */
 #include "host.h"
 #include "gpu_backend.h"
 

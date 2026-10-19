@@ -49,6 +49,16 @@
 
 #include <windows.h>
 
+/* macOS has no gettid, no clock_nanosleep and no pthread_condattr_setclock. Its condition
+ * variables take absolute deadlines on CLOCK_REALTIME, so the timed waits use that clock there. */
+#ifdef __APPLE__
+static pid_t gettid_compat(void) { uint64_t id = 0; pthread_threadid_np(NULL, &id); return (pid_t)id; }
+#define COND_CLOCK CLOCK_REALTIME
+#else
+#define gettid_compat() ((pid_t)syscall(SYS_gettid))
+#define COND_CLOCK CLOCK_MONOTONIC
+#endif
+
 typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
@@ -223,7 +233,9 @@ static Obj *new_obj(int type) {
     pthread_mutex_init(&o->m, NULL);
     pthread_condattr_t a;
     pthread_condattr_init(&a);
+#ifndef __APPLE__
     pthread_condattr_setclock(&a, CLOCK_MONOTONIC);
+#endif
     pthread_cond_init(&o->cv, &a);
     pthread_condattr_destroy(&a);
     return o;
@@ -266,8 +278,16 @@ static u64 monotonic_ns(void) {
 }
 
 static void sleep_until_ns(u64 t) {
+#ifdef __APPLE__
+    for (u64 now; (now = monotonic_ns()) < t;) {
+        u64 d = t - now;
+        struct timespec ts = {(time_t)(d / 1000000000ull), (long)(d % 1000000000ull)};
+        nanosleep(&ts, NULL);
+    }
+#else
     struct timespec ts = {(time_t)(t / 1000000000ull), (long)(t % 1000000000ull)};
     while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR) {}
+#endif
 }
 
 /* A timer: sleeps until it is due (then disarms it) or ms have passed. */
@@ -296,7 +316,7 @@ DWORD WaitForSingleObject(HANDLE h, DWORD ms) {
     if (!o || (o->type != H_THREAD && o->type != H_EVENT)) { last_error = ERROR_INVALID_HANDLE; return WAIT_FAILED; }
     struct timespec until;
     if (ms != INFINITE) {
-        clock_gettime(CLOCK_MONOTONIC, &until);
+        clock_gettime(COND_CLOCK, &until);
         until.tv_sec += ms / 1000;
         until.tv_nsec += (long)(ms % 1000) * 1000000L;
         if (until.tv_nsec >= 1000000000L) { until.tv_sec++; until.tv_nsec -= 1000000000L; }
@@ -393,7 +413,7 @@ static void forget_description(pid_t tid) {
     pthread_mutex_unlock(&descs_lock);
 }
 
-DWORD GetCurrentThreadId(void) { return (DWORD)gettid(); }
+DWORD GetCurrentThreadId(void) { return (DWORD)gettid_compat(); }
 DWORD GetCurrentProcessId(void) { return (DWORD)getpid(); }
 HANDLE GetCurrentThread(void) { return PSEUDO_THREAD; }
 HANDLE GetCurrentProcess(void) { return PSEUDO_PROCESS; }
@@ -409,7 +429,7 @@ void rt_thread_signal_stack(void) {
 
 static void *thread_start(void *arg) {
     Obj *o = arg;
-    o->tid = gettid();
+    o->tid = gettid_compat();
     rt_thread_signal_stack();
     DWORD code = o->fn(o->param);
     (void)code;
@@ -461,7 +481,7 @@ BOOL DuplicateHandle(HANDLE src_process, HANDLE src, HANDLE dst_process, HANDLE 
     if (src == PSEUDO_THREAD) {   /* a real handle for the calling thread */
         Obj *o = new_obj(H_THREAD);
         o->thread = pthread_self();
-        o->tid = gettid();
+        o->tid = gettid_compat();
         *dst = o;
         return TRUE;
     }
@@ -477,7 +497,7 @@ HRESULT SetThreadDescription(HANDLE thread, PCWSTR description) {
     size_t n = 0;
     for (; description[n] && n + 1 < sizeof text; n++) text[n] = description[n] < 128 ? (char)description[n] : '?';
     text[n] = 0;
-    pid_t tid = thread == PSEUDO_THREAD ? gettid() : rt_thread_tid(thread);
+    pid_t tid = thread == PSEUDO_THREAD ? gettid_compat() : rt_thread_tid(thread);
     if (!tid) return E_INVALIDARG;
     set_description(tid, text);
     char shortname[16];
@@ -491,7 +511,7 @@ HRESULT SetThreadDescription(HANDLE thread, PCWSTR description) {
 }
 
 BOOL SetThreadPriority(HANDLE thread, int priority) {
-    pid_t tid = thread == PSEUDO_THREAD ? gettid() : rt_thread_tid(thread);
+    pid_t tid = thread == PSEUDO_THREAD ? gettid_compat() : rt_thread_tid(thread);
     if (!tid) return FALSE;
     int nice = priority <= THREAD_PRIORITY_LOWEST ? 5 : priority == THREAD_PRIORITY_BELOW_NORMAL ? 2 : 0;
     setpriority(PRIO_PROCESS, (id_t)tid, nice);   /* (raising priority needs privileges: left as it is) */
@@ -940,7 +960,9 @@ static void ww_register(u64 base, u64 size) {
     a->dirty = calloc(1, pages / 8 + 1);
     a->base = base;
     a->size = size;
+#ifdef MADV_NOHUGEPAGE
     madvise((void *)(uintptr_t)base, size, MADV_NOHUGEPAGE);   /* (page-sized reports, not 2 MB ones) */
+#endif
 #ifndef __APPLE__
     if (ww_mode == WW_SCAN) {
         struct uffdio_register reg = {{base, size}, UFFDIO_REGISTER_MODE_WP, 0};

@@ -18,11 +18,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifdef _MSC_VER
+/* The x86 counter (TSC) and CPUID exist only on x86. On arm64 (Apple silicon) they are absent:
+ * clock_tsc() returns 0 and cpuid_ext_edx() returns 0, so clock_steady stays 0 and the system
+ * timer is used, as the header describes for a CPU without an invariant TSC. */
+#if defined(_MSC_VER)
 #include <intrin.h>
-#else
+#define SSBU_CLOCK_X86 1
+#elif defined(__x86_64__) || defined(__i386__)
 #include <cpuid.h>
 #include <x86intrin.h>
+#define SSBU_CLOCK_X86 1
 #endif
 
 typedef struct ClockScale { uint64_t tsc0, ns0, mul; } ClockScale;   /* ns = ns0 + (tsc - tsc0) * mul / 2^32 */
@@ -36,12 +41,16 @@ static double clock_read_ns;   /* what a system timer read took, at start */
 /* The CPU's counter, read in order (plain RDTSC may run ahead of earlier loads: a thread could
  * then see a time before one it had just read from another thread - as the system timer never does). */
 static inline uint64_t clock_tsc(void) {
+#ifdef SSBU_CLOCK_X86
     if (clock_has_rdtscp) {
         unsigned aux;
         return __rdtscp(&aux);
     }
     _mm_lfence();
     return __rdtsc();
+#else
+    return 0;   /* (no TSC here; clock_steady is 0, so this is never used) */
+#endif
 }
 
 static uint64_t qpc_ns(void) {
@@ -53,15 +62,18 @@ static uint64_t qpc_ns(void) {
 
 /* CPUID's extended leaf's EDX (0 where there is none) */
 static unsigned cpuid_ext_edx(unsigned leaf) {
-#ifdef _MSC_VER
+#if defined(_MSC_VER)
     int r[4];
     __cpuid(r, (int)0x80000000);
     if ((unsigned)r[0] < leaf) return 0;
     __cpuid(r, (int)leaf);
     return (unsigned)r[3];
-#else
+#elif defined(SSBU_CLOCK_X86)
     unsigned a, b, c, d;
     return __get_cpuid(leaf, &a, &b, &c, &d) ? d : 0;
+#else
+    (void)leaf;
+    return 0;
 #endif
 }
 
