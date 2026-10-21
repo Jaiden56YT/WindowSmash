@@ -414,7 +414,7 @@ struct InstalledRow: View {
                         .font(.caption).foregroundStyle(.green)
                 }
                 if mod.enabled && mod.skipped > 0 {
-                    Label("\(mod.skipped) file\(mod.skipped == 1 ? "" : "s") not loaded: a new costume slot (c08 and up) or a file costume slots share - not supported yet, so it may look wrong",
+                    Label("\(mod.skipped) file\(mod.skipped == 1 ? "" : "s") not loaded: in a folder the game doesn't have (a new costume slot whose config.json doesn't list it) or a file costume slots share - so it may look wrong",
                           systemImage: "exclamationmark.triangle.fill")
                         .font(.caption).foregroundStyle(.orange)
                 }

@@ -32,16 +32,22 @@ data.arc is the image's last file; the RomFS's own tables follow it. `apply` wri
     whose files are in its folder (fighter/mario/model/body/c00/x.nutexb: fighter/mario/c00): new
     entries at the end of the file table's tables (Table: the counts the game reads grow, no entry
     it has moves), the directory's run of files copied to the end with the new ones after it;
+  - a new costume slot (c08 and up) is made from the mod's config.json, as ARCropolis does: its
+    directories (new-dir-infos, new-dir-infos-base), paths that are the game's files
+    (share-to-vanilla, share-to-added), the directories' files (new-dir-files) - the mod's own in
+    a folder of the new directory's, the rest copies of the files they share, as the game's own
+    extra costumes are; its character select entry comes from the mod's ui_chara_db.prcxml;
+  - every new path is added to data.arc's search section too (Search: the game lists a folder's
+    files with it - a costume's model, fighter/mario/model/body/c08/ - and finds none otherwise);
   - ARCropolis' patch files are merged into the file they patch, each turned-on mod's in order:
     .xmsbt into an .msbt (text: msbt.py), .prcx and .prcxml into a .prc (params: prc.py) - into a
     mod's whole file if one has it, else the game's (a regional file: each region's own);
   - a stream: file (music) is stored whole, its stream data entries pointed at it;
   - the RomFS's tables come after data.arc's new end, with its new size;
 and romfs.cfg is switched to it (the game as it is: romfs_vanilla.cfg, kept).
-Limits, as against ARCropolis on a Switch: a file in a folder the game doesn't have (a new
-costume slot, c08 and up: a directory of its own, and the game's fighter and UI params told of
-it) is skipped and listed; and a file two paths share (one costume's texture another reuses)
-changes for both.
+Limits, as against ARCropolis on a Switch: a file in a folder the game doesn't have, with no
+config.json telling of its directory, is skipped and listed; and a file two paths share (one
+costume's texture another reuses) changes for both.
 """
 import argparse
 import hashlib
@@ -301,6 +307,17 @@ TABLES = ("hash_to_path", "paths", "info_indices", "dir_hash_to_info", "dirs", "
 OWN_FILE = 0x1000000      # an info-to-data entry's last field for a file in its directory's own folder
 SHARED_INFO = 0x300000    # a file info's flags for a copy of another directory's file (a costume sharing c00's)
 REGIONAL_INFO = 0x18000   # a file info's flags for a file with one data per region or language
+SLOT = re.compile(r"/c\d\d(?=/|$)")   # a costume slot in a directory's path (fighter/mario/c08, .../c08/camera)
+
+
+def config_hash(value):
+    """A path in config.json, or a hash40 of one ("0x..." or a number): (hash40, the path or None)."""
+    if isinstance(value, int):
+        return value & LOW40, None
+    value = value.strip()
+    if value.lower().startswith("0x"):
+        return int(value, 16) & LOW40, None
+    return hash40(value), value
 
 
 class Table:
@@ -315,7 +332,16 @@ class Table:
     a path and an info index (their tables have no extra part), and an info, an info-to-data and a
     data after the extra ones, their counts grown - no entry the game has moves. A directory's files
     are a run of infos (its start and count), so a directory that gets files has its run copied to
-    the end, the new files after it."""
+    the end, the new files after it.
+
+    A mod's new directories (ARCropolis' config.json: a new costume slot, fighter/mario/c08 and its
+    camera/c08, kirbycopy/c08 ...) are made as the game's own extra costumes are (c06 is mostly
+    c00's): a directory (dirs, and its hash in dir_hash_to_info, sorted), in its parent's children
+    (the parent's run of child hashes copied to the end, the new one after it), a folder of its own
+    (an extra folder: the header's 0x40) whose chunk holds the mod's files (and whose range of data
+    entries has one for each of the directory's files, empty for one it shares, as the game's
+    folders have), and a file info for each file it doesn't have of its own, a copy of the file it shares (share-to-vanilla): flags with
+    SHARED_INFO, and an info-to-data whose last field names the shared file's info index."""
 
     def __init__(self, arc):
         self.arc = arc
@@ -336,6 +362,15 @@ class Table:
         self.added = {}      # folder -> [(data index, stored bytes, size, flags)], in the order they go
         self.new_files = {}  # directory -> [(path, bytes)]
         self.new_paths = []  # (hash40, path index)
+        self.dirs_by_hash = None
+        self.new_dirs = {}      # a new directory -> the existing one it is made like (its flags, its files' flags)
+        self.based = set()      # new directories that are another's (new-dir-infos-base: its folder and files)
+        self.new_children = {}  # directory -> [child hash40 | index << 40] it gets
+        self.listed = {}        # directory -> [(hash40, path)]: the files config.json gives it (new-dir-files)
+        self.listed_in = {}     # file hash40 -> the directory config.json gives it to
+        self.shares = {}        # new path hash40 -> (path, the hash40 of the file it is)
+        self.notes = []         # what was left out, for the log
+        self.path_names = []    # the new paths (for the search section)
 
     def count(self, table):
         return len(self.tabs[table]) // self.size[table]
@@ -359,7 +394,9 @@ class Table:
         return index
 
     def path_index(self, path):
-        h = hash40(path)
+        return self.path_index_of(hash40(path))
+
+    def path_index_of(self, h):
         start, count = struct.unpack_from("<2I", self.head, self.arc.bucket_table + (h % self.arc.buckets) * 8)
         lo, hi = start, start + count
         while lo < hi:
@@ -397,7 +434,89 @@ class Table:
         stored = game_compress(raw) if flags & 3 else raw
         self.replaced.setdefault(folder, {})[data] = (stored, len(raw), flags)
 
-    # ---- new files ----
+    # ---- new files and directories ----
+    def dir_index(self, h):
+        """A directory's index from its path's hash40 (a new one's too), or None."""
+        if self.dirs_by_hash is None:
+            self.dirs_by_hash = {v & LOW40: v >> 40 for (v,) in struct.iter_unpack("<Q", self.tabs["dir_hash_to_info"])}
+        return self.dirs_by_hash.get(h)
+
+    def like_dir(self, path):
+        """The game's directory a new one is made like: the same path with another costume slot
+        (c00 first: fighter/mario/c08 -> fighter/mario/c00), else Luigi's c00 (as ARCropolis)."""
+        if SLOT.search(path):
+            for k in range(8):
+                d = self.dir_index(hash40(SLOT.sub(f"/c0{k}", path, count=1)))
+                if d is not None and d not in self.new_dirs:
+                    return d
+        return self.dir_index(hash40("fighter/luigi/c00"))
+
+    def add_dir(self, path, base=None):
+        """A directory the game doesn't have (config.json's new-dir-infos), and its parents; with a
+        `base` (new-dir-infos-base), one that is the base's: its folder, files and children.
+        Returns its index, or None (the base or a parent can't be made)."""
+        path = path.strip("/")
+        h = hash40(path)
+        d = self.dir_index(h)
+        if d is not None:
+            return d
+        parent = path.rsplit("/", 1)[0] if "/" in path else ""
+        p = None
+        if parent:
+            p = self.dir_index(hash40(parent))
+            if p is None:
+                p = self.add_dir(parent)
+            if p is None:
+                return None
+        like = self.dir_index(hash40(base.strip("/"))) if base else self.like_dir(path)
+        if like is None:
+            self.notes.append(f"{path}: its base {base} isn't a directory of the game's")
+            return None
+        lpath, _name, _parent, re1, re2, start, n, cstart, ccount, flags = self.entry("dirs", like, "<QQQ7I")
+        if base:
+            folder = lpath >> 40
+        else:   # (a folder of its own, its chunk empty until the mod's files are laid in it)
+            lfo = self.entry("folder_offsets", lpath >> 40, "<QIIIII")
+            folder = self.append("folder_offsets", "<QIIIII", 0, 0, 0, 0, 0, lfo[5] if n else 0xFFFFFF)
+            start, n, cstart, ccount = 0, 0, 0, 0
+        d = self.append("dirs", "<QQQ7I", h | folder << 40, hash40(path.rsplit("/", 1)[-1]), hash40(parent) if parent else 0,
+                        re1, re2, start, n, cstart, ccount, flags)
+        self.append("dir_hash_to_info", "<Q", h | d << 40)
+        self.dirs_by_hash[h] = d
+        self.new_dirs[d] = like
+        if base:
+            self.based.add(d)
+        if p is not None:
+            self.new_children.setdefault(p, []).append(h | d << 40)
+        return d
+
+    def use_config(self, config):
+        """ARCropolis' config.json (the turned-on mods', merged): new directories made now; files
+        shared and given to directories when the files are committed."""
+        for path in config.get("new-dir-infos", []):
+            if self.add_dir(path) is None:
+                self.notes.append(f"new directory {path} not made")
+        for path, base in sorted(config.get("new-dir-infos-base", {}).items()):
+            if self.add_dir(path, base) is None:
+                self.notes.append(f"new directory {path} not made")
+        for key in ("share-to-vanilla", "share-to-added"):
+            for target, news in config.get(key, {}).items():
+                th, _ = config_hash(target)
+                for new in [news] if isinstance(news, str) else news:
+                    nh, np = config_hash(new)
+                    if np:   # (a path entry needs the path's own parts: a bare hash can't be one)
+                        self.shares.setdefault(nh, (np, th))
+        for dpath, files in config.get("new-dir-files", {}).items():
+            d = self.dir_index(config_hash(dpath.strip("/") if isinstance(dpath, str) else dpath)[0])
+            if d is None:
+                if files:
+                    self.notes.append(f"new-dir-files: {dpath} isn't a directory")
+                continue
+            for f in files:
+                fh, fp = config_hash(f)
+                self.listed.setdefault(d, []).append((fh, fp))
+                self.listed_in.setdefault(fh, d)
+
     def directories_of(self, parent):
         """The directories whose files are in folder `parent` (a hash40 of "a/b/c/"): (directory,
         whether it has a file there of its own, not another directory's)."""
@@ -412,59 +531,223 @@ class Table:
                 for i in range(start, start + n):
                     found = self.parents.setdefault(path_parent[info_path[i]], {})
                     found[d] = found.get(d, False) or ii_dir[info_index[i]] == d
+            for d, files in self.listed.items():   # (a new directory's files, as config.json gives them)
+                for _h, path in files:
+                    if path and "/" in path:
+                        self.parents.setdefault(hash40(path.rsplit("/", 1)[0] + "/"), {}).setdefault(d, True)
         return self.parents.get(parent, {})
 
     def add_file(self, path, raw):
-        """Add a file the game doesn't have to the directory whose files are in its folder; returns
-        None, or why it can't be added."""
+        """Add a file the game doesn't have to its directory (the one config.json gives it to, else
+        the one whose files are in its folder); returns None, or why it can't be added."""
         if "/" not in path or ":" in path:
             return "not in a folder of data.arc's"
-        folder_path = path.rsplit("/", 1)[0] + "/"
-        found = self.directories_of(hash40(folder_path))
-        own = sorted(d for d, mine in found.items() if mine) or sorted(found)
-        if not own:
-            return f"a folder the game doesn't have ({folder_path}: a new costume slot or folder)"
-        self.new_files.setdefault(own[0], []).append((path, raw))
+        d = self.listed_in.get(hash40(path))
+        if d is None:
+            folder_path = path.rsplit("/", 1)[0] + "/"
+            found = self.directories_of(hash40(folder_path))
+            own = sorted(d for d, mine in found.items() if mine) or sorted(found)
+            if not own:
+                return f"a folder the game doesn't have ({folder_path}: a new costume slot needs the mod's config.json)"
+            d = own[0]
+        self.new_files.setdefault(d, []).append((path, raw))
         return None
 
+    def new_path(self, path, ii):
+        """A path entry for a new file, naming file info index `ii`."""
+        leaf = path.rsplit("/", 1)[1]
+        ext = leaf.rsplit(".", 1)[1] if "." in leaf else ""
+        h = hash40(path)
+        p = self.append("paths", "<4Q", h | ii << 40, hash40(ext) | 0xFFFFFF << 40, hash40(path.rsplit("/", 1)[0] + "/"),
+                        hash40(leaf))
+        self.new_paths.append((h, p))
+        self.path_names.append(path)
+        return p
+
+    def file_flags(self, d):
+        """extension hash40 -> a file info's flags of one of the directory's own files (or of the
+        directory a new one is made like), None -> any of them."""
+        out = {}
+        for dd in (d, self.new_dirs.get(d)):
+            if dd is None:
+                continue
+            _dp, _n, _p, _r1, _r2, start, n, _cs, _cc, _fl = self.entry("dirs", dd, "<QQQ7I")
+            for i in range(start, start + n):
+                p, ii, _td, fflags = self.entry("infos", i, "<4I")
+                if self.entry("info_indices", ii, "<2I")[0] == dd and not fflags & SHARED_INFO:
+                    out.setdefault(self.entry("paths", p, "<4Q")[1] & LOW40, fflags)
+                    out.setdefault(None, fflags)
+            if out:
+                break
+        return out
+
     def commit_files(self):
-        """The added files' entries: each directory's run of infos copied to the end, its new files after."""
+        """The added files' and directories' entries: each directory that gets files has its run of
+        infos copied to the end, its new files after (the mod's own, in its folder's chunk, and
+        copies of the files it shares); then the new directories in their parents' children."""
+        regions = self.arc.regions
+        own = {}   # hash40 -> (directory, path, bytes, path index, info index index)
         for d in sorted(self.new_files):
+            for path, raw in sorted(self.new_files[d]):
+                ii = self.append("info_indices", "<2I", d, 0)
+                own[hash40(path)] = (d, path, raw, self.new_path(path, ii), ii)
+        shared = {}   # hash40 -> (path index, info index index) of a new path that is another file
+        for nh, (np, th) in sorted(self.shares.items()):
+            if nh in own or self.path_index_of(nh) is not None:
+                continue   # (the mod's own file, or the game's, wins)
+            if th in own:
+                tii = own[th][4]
+            elif th in shared:
+                tii = shared[th][1]
+            else:
+                tp = self.path_index_of(th)
+                if tp is None:
+                    self.notes.append(f"{np}: the file it shares isn't the game's or the mod's")
+                    continue
+                tii = self.entry("paths", tp, "<Q")[0] >> 40
+            shared[nh] = (self.new_path(np, tii), tii)
+
+        # each directory's new files, in order (the listed ones by path, then the rest)
+        plans = {}
+        for d in sorted(set(self.new_files) | set(self.listed)):
+            _dp, _n, _p, _r1, _r2, start, n, _cs, _cc, _fl = self.entry("dirs", d, "<QQQ7I")
+            have = {self.entry("paths", self.entry("infos", i, "<4I")[0], "<Q")[0] & LOW40 for i in range(start, start + n)}
+            plan = []
+            for h, path in sorted(set(self.listed.get(d, ())), key=lambda x: (x[1] or "", x[0])):
+                if h in have:
+                    continue
+                if h in own and own[h][0] == d:
+                    plan.append(("own", h))
+                elif h in own or h in shared:
+                    plan.append(("share", h))
+                elif path and self.path_index_of(h) is not None:
+                    plan.append(("share", h))   # (a file of the game's, listed in the directory as it is)
+                else:
+                    self.notes.append(f"{path or hex(h)}: listed in a new directory, but the mod doesn't have it")
+                    continue
+                have.add(h)
+            plan += [("own", hash40(path)) for path, _raw in sorted(self.new_files.get(d, ())) if hash40(path) not in have]
+            if plan:
+                plans[d] = plan
+
+        # the mod's own files' data, in each directory's order: a directory that is another's (its
+        # folder that one's) gets a folder of its own for them. A new directory's folder has a data
+        # entry for each of its files, in their order (its range: start, count), as the game's own
+        # folders have - empty for a file it shares
+        place = {}   # hash40 -> (folder, data, info-to-data, flags)
+        for d, plan in plans.items():
             dir_path, name, parent, re1, re2, start, n, cstart, ccount, flags = self.entry("dirs", d, "<QQQ7I")
+            fresh = d in self.new_dirs and d not in self.based and n == 0
+            if not fresh and not any(kind == "own" for kind, _h in plan):
+                continue
             folder = dir_path >> 40
+            if d in self.based:
+                res = self.entry("folder_offsets", folder, "<QIIIII")[5]
+                folder = self.append("folder_offsets", "<QIIIII", 0, 0, 0, 0, 0, res)
+                self.put("dirs", d, "<QQQ7I", (dir_path & LOW40) | folder << 40, name, parent, re1, re2, start, n, cstart, ccount, flags)
+                self.based.discard(d)
+                self.new_dirs.setdefault(d, None)
+            sibling = self.file_flags(d)
+            first = None
+            for kind, h in plan:
+                if kind != "own":
+                    if fresh:
+                        data = self.append("datas", "<4I", 0, 0, 0, 0)
+                        first = data if first is None else first
+                    continue
+                path, raw = own[h][1], own[h][2]
+                ext = path.rsplit("/", 1)[1].rsplit(".", 1)[1] if "." in path.rsplit("/", 1)[1] else ""
+                fflags = sibling.get(hash40(ext), sibling.get(None, 0x1000 if ext in ("nutexb", "eff") else 0x10))
+                stored = game_compress(raw)
+                data = self.append("datas", "<4I", 0, len(stored), len(raw), 3)
+                first = data if first is None else first
+                to_data = self.append("info_to_datas", "<3I", folder, data, OWN_FILE)
+                self.added.setdefault(folder, []).append((data, stored, len(raw), 3))
+                place[h] = (folder, data, to_data, fflags & ~(SHARED_INFO | REGIONAL_INFO))
+            fo = list(self.entry("folder_offsets", folder, "<QIIIII"))
+            if d in self.new_dirs and fo[2] == 0 and fo[3] == 0:
+                fo[3] = first   # (its first data entry)
+                self.put("folder_offsets", folder, "<QIIIII", *fo)
+
+        own_ii = {o[4]: h for h, o in own.items()}
+        like_runs = {}   # directory -> {info index index: (flags, info-to-data)} of its run
+
+        def copy_of(tii, d):
+            """A copy in directory `d` of the file at info index index `tii`: (flags, info-to-data
+            entries), as the game's costumes copy c00's - from the entry the directory `d` is made
+            like has for it (else the file's own): its own file shared (SHARED_INFO, the last field
+            the info index index), a file it reads from its folder's dependency (the folder entry's
+            last field) as it is, one from another folder shared; None for a mod's file in no
+            directory."""
+            if tii in own_ii:
+                if own_ii[tii] not in place:
+                    return None
+                folder, data, _td, fflags = place[own_ii[tii]]
+                return fflags | SHARED_INFO, [(folder, data, tii)]
+            like = self.new_dirs.get(d)
+            if like is not None and like not in like_runs:
+                _lp, _n, _p, _r1, _r2, lstart, ln, _cs, _cc, _fl = self.entry("dirs", like, "<QQQ7I")
+                like_runs[like] = {}
+                for i in range(lstart, lstart + ln):
+                    _p, ii, td, fflags = self.entry("infos", i, "<4I")
+                    like_runs[like].setdefault(ii, (fflags, td))
+            fflags, td = like_runs.get(like, {}).get(tii) or self.entry("infos", self.entry("info_indices", tii, "<2I")[1], "<4I")[3:1:-1]
+            run = [self.entry("info_to_datas", td + r, "<3I") for r in range(regions + 1 if fflags & 0x8000 else 1)]
+            dep = self.entry("folder_offsets", self.entry("dirs", d, "<Q")[0] >> 40, "<QIIIII")[5]
+            if run[0][2] >> 24 == 1 or (run[0][2] >> 24 == 3 and run[0][0] != dep):
+                return fflags | SHARED_INFO, [(run[0][0], run[0][1], tii)] * len(run)
+            return fflags, run   # (already another's, or its folder's dependency's: the same entries)
+
+        for d, plan in plans.items():
+            dir_path, name, parent, re1, re2, start, n, cstart, ccount, flags = self.entry("dirs", d, "<QQQ7I")
             new_start = self.count("infos")
-            sibling = {}   # extension -> a file info's flags of one of the directory's own files
             for i in range(start, start + n):
                 p, ii, to_data, fflags = self.entry("infos", i, "<4I")
                 moved = self.append("infos", "<4I", p, ii, to_data, fflags)
                 in_dir, info = self.entry("info_indices", ii, "<2I")
                 if info == i:
                     self.put("info_indices", ii, "<2I", in_dir, moved)
-                if in_dir == d and not fflags & SHARED_INFO:
-                    ext = self.entry("paths", p, "<4Q")[1] & LOW40
-                    sibling.setdefault(ext, fflags)
-                    sibling.setdefault(None, fflags)
-            files = self.new_files[d]
-            for path, raw in files:
-                leaf = path.rsplit("/", 1)[1]
-                ext = leaf.rsplit(".", 1)[1] if "." in leaf else ""
-                h = hash40(path)
-                p = self.count("paths")
-                ii = self.count("info_indices")
-                info = self.count("infos")
+            for kind, h in plan:
+                if kind == "own":
+                    _d, _path, _raw, p, ii = own[h]
+                    _folder, _data, to_data, fflags = place[h]
+                    info = self.append("infos", "<4I", p, ii, to_data, fflags)
+                    self.put("info_indices", ii, "<2I", d, info)
+                    continue
+                p, tii = shared[h] if h in shared else (own[h][3], own[h][4]) if h in own else (None, None)
+                if p is None:
+                    p = self.path_index_of(h)
+                    tii = self.entry("paths", p, "<Q")[0] >> 40
+                copy = copy_of(tii, d)
+                if copy is None:
+                    continue
+                fflags, run = copy
                 to_data = self.count("info_to_datas")
-                data = self.count("datas")
-                self.append("paths", "<4Q", h | ii << 40, hash40(ext) | 0xFFFFFF << 40, hash40(path.rsplit("/", 1)[0] + "/"),
-                            hash40(leaf))
-                self.append("info_indices", "<2I", d, info)
-                self.append("infos", "<4I", p, ii, to_data, sibling.get(hash40(ext), sibling.get(None, 0x10)) & ~(SHARED_INFO | REGIONAL_INFO))
-                self.append("info_to_datas", "<3I", folder, data, OWN_FILE)
-                stored = game_compress(raw)
-                self.append("datas", "<4I", 0, len(stored), len(raw), 3)
-                self.added.setdefault(folder, []).append((data, stored, len(raw), 3))
-                self.new_paths.append((h, p))
-            self.put("dirs", d, "<QQQ7I", dir_path, name, parent, re1, re2, new_start, n + len(files), cstart, ccount, flags)
+                for e in run:
+                    self.append("info_to_datas", "<3I", *e)
+                self.append("infos", "<4I", p, tii, to_data, fflags)
+            count = self.count("infos") - new_start
+            self.put("dirs", d, "<QQQ7I", dir_path, name, parent, re1, re2, new_start, count, cstart, ccount, flags)
+            folder = dir_path >> 40
+            if d in self.new_dirs and d not in self.based:   # (a new folder counts its directory's files)
+                fo = list(self.entry("folder_offsets", folder, "<QIIIII"))
+                fo[4] = count - len(self.added.get(folder, ()))
+                self.put("folder_offsets", folder, "<QIIIII", *fo)
+        for h, o in own.items():
+            if h not in place:
+                self.notes.append(f"{o[1]}: in no directory")
         self.new_files = {}
+
+        # new directories in their parents' children: the parent's run copied to the end, the new after
+        for p in sorted(self.new_children):
+            dir_path, name, parent, re1, re2, start, n, cstart, ccount, flags = self.entry("dirs", p, "<QQQ7I")
+            kids = [self.entry("child_hashes", i, "<Q")[0] for i in range(cstart, cstart + ccount)] + self.new_children[p]
+            new_start = self.count("child_hashes")
+            for k in kids:
+                self.append("child_hashes", "<Q", k)
+            self.put("dirs", p, "<QQQ7I", dir_path, name, parent, re1, re2, start, n, new_start, len(kids), flags)
+        self.new_children = {}
+
         if self.new_paths:   # each bucket's paths sorted by hash, the new ones among them
             old = self.tabs["hash_to_path"]
             new = bytearray()
@@ -487,11 +770,19 @@ class Table:
         """The table, its counts as its tables have grown."""
         fs = list(struct.unpack_from("<22I", self.head, 0))
         assert self.count("hash_to_path") == self.count("paths")
+        assert self.count("dirs") == self.count("dir_hash_to_info")
         fs[1] = self.count("paths")
         fs[2] = self.count("info_indices")
+        fs[3] = self.count("dirs")
+        fs[5] = self.count("child_hashes")
+        fs[16] = self.count("folder_offsets") - fs[4] - fs[9]   # 0x40: extra folders
         fs[19] = self.count("infos") - fs[6] - fs[10]          # 0x4C: extra infos
         fs[20] = self.count("info_to_datas") - fs[7] - fs[10]  # 0x50: extra info-to-datas
         fs[21] = self.count("datas") - fs[8] - fs[10]          # 0x54: extra datas
+        # (the game finds a directory by a binary search of its hash)
+        self.tabs["dir_hash_to_info"] = bytearray(b"".join(sorted(
+            (self.tabs["dir_hash_to_info"][i:i + 8] for i in range(0, len(self.tabs["dir_hash_to_info"]), 8)),
+            key=lambda e: int.from_bytes(e, "little") & LOW40)))
         struct.pack_into("<I", self.head, self.arc.bucket_table - 8, fs[1])   # (the buckets' entry count)
         fs[0] = len(self.head) + sum(len(v) for v in self.tabs.values()) + len(self.extra)
         struct.pack_into("<22I", self.head, 0, *fs)
@@ -582,6 +873,113 @@ class Table:
         return sorted(set(out))
 
 
+def mod_config(tree, names):
+    """The turned-on mods' config.json (ARCropolis'), merged in their order: new-dir-infos,
+    new-dir-infos-base, share-to-vanilla, share-to-added, new-dir-files (what a mod adding a costume
+    slot has, as the reslotter writes it; the rest of ARCropolis' keys are for its own unsharing)."""
+    out = {"new-dir-infos": [], "new-dir-infos-base": {}, "share-to-vanilla": {}, "share-to-added": {}, "new-dir-files": {}}
+    for name in names:
+        path = os.path.join(tree.mods, name, "config.json")
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, encoding="utf-8-sig") as f:
+                cfg = json.load(f)
+        except (OSError, ValueError) as e:
+            raise Error(f"{name}: its config.json can't be read ({e})")
+        out["new-dir-infos"] += [d for d in cfg.get("new-dir-infos", []) if d not in out["new-dir-infos"]]
+        out["new-dir-infos-base"].update(cfg.get("new-dir-infos-base", {}))
+        for key in ("share-to-vanilla", "share-to-added", "new-dir-files"):
+            for k, v in (cfg.get(key) or {}).items():
+                have = out[key].setdefault(k, [])
+                have += [x for x in ([v] if isinstance(v, str) else v) if x not in have]
+    return out
+
+
+NO_CHILD = 0xFFFFFF
+SEARCH_FOLDER = 0x400000   # a search path entry's parent index for a folder (a folder's child folder)
+
+
+class Search:
+    """data.arc's search section (the header's sixth field: zstd-compressed as the file table is):
+    every path by folder - folders (a lookup by hash, sorted), paths (a lookup by hash, sorted, to a
+    place in a list of path indices) - each folder's files and folders a linked list of paths. The
+    game lists a folder's files with it (a costume's model: fighter/mario/model/body/c08/), so a
+    mod's new paths are added to it as ARCropolis adds them (a new folder made, its parents too).
+
+    A folder: its path (hash40, its index the number of its folders), its parent's (index: the
+    number of its files), its name, and its first child (the low 32 bits of the last field, the
+    number of children above them). A path: its own (index: the next in its folder's list), its
+    folder's (index SEARCH_FOLDER for a folder), its name, its extension."""
+
+    def __init__(self, read, at):
+        offset, _decomp, comp, _ = struct.unpack("<4I", read(at, 16))
+        s = unzstd(read(at + offset, comp), "data.arc's search section")
+        _size, nf, ni, npaths = struct.unpack_from("<QIII", s, 0)
+        o = 0x14
+        parts = []
+        for count, size in ((nf, 8), (nf, 32), (ni, 8), (ni, 4), (npaths, 32)):
+            parts.append(bytearray(s[o:o + count * size]))
+            o += count * size
+        self.folder_lookup, self.folders, self.path_lookup, self.indices, self.paths = parts
+        self.folder_at = {v & LOW40: v >> 40 for (v,) in struct.iter_unpack("<Q", self.folder_lookup)}
+        self.path_at = {v & LOW40: v >> 40 for (v,) in struct.iter_unpack("<Q", self.path_lookup)}
+        self.added = 0
+
+    def add_path(self, entry, h):
+        """A path entry at the end of the paths, and its place in the path indices; returns that place."""
+        p = len(self.paths) // 32
+        self.paths += struct.pack("<4Q", *entry)
+        at = len(self.indices) // 4
+        self.indices += struct.pack("<I", p)
+        self.path_lookup += struct.pack("<Q", h | at << 40)
+        self.path_at[h] = at
+        return at
+
+    def link(self, folder, entry, h, is_folder):
+        """A path first in a folder's list of children; the folder's counts grown."""
+        path, parent, name, ext = struct.unpack_from("<4Q", self.folders, folder * 32)
+        at = self.add_path((entry[0] | (ext & NO_CHILD) << 40,) + tuple(entry[1:]), h)
+        if is_folder:
+            path += 1 << 40
+        else:
+            parent += 1 << 40
+        ext = ((ext >> 32) + 1) << 32 | at
+        struct.pack_into("<4Q", self.folders, folder * 32, path, parent, name, ext)
+
+    def folder(self, path):
+        """The folder of a path ("a/b/c", no slash at the end), made (and its parents) if new."""
+        h = hash40(path)
+        if h in self.folder_at:
+            return self.folder_at[h]
+        parent = path.rsplit("/", 1)[0] if "/" in path else ""
+        f = len(self.folders) // 32
+        self.folders += struct.pack("<4Q", h, hash40(parent), hash40(path.rsplit("/", 1)[-1]), NO_CHILD)
+        self.folder_lookup += struct.pack("<Q", h | f << 40)
+        self.folder_at[h] = f
+        if parent:
+            self.link(self.folder(parent), (h, hash40(parent) | SEARCH_FOLDER << 40, hash40(path.rsplit("/", 1)[-1]), 0), h, True)
+        return f
+
+    def add_file(self, path):
+        """A file's path, in its folder (a new path: one the section doesn't have)."""
+        h = hash40(path)
+        if h in self.path_at or "/" not in path:
+            return
+        folder, leaf = path.rsplit("/", 1)
+        ext = leaf.rsplit(".", 1)[1] if "." in leaf else ""
+        self.link(self.folder(folder), (h, hash40(folder), hash40(leaf), hash40(ext)), h, False)
+        self.added += 1
+
+    def to_bytes(self):
+        """The section (uncompressed), its lookups sorted by hash."""
+        def by_hash(table):
+            return b"".join(sorted((table[i:i + 8] for i in range(0, len(table), 8)),
+                                   key=lambda e: int.from_bytes(e, "little") & LOW40))
+        body = by_hash(self.folder_lookup) + self.folders + by_hash(self.path_lookup) + self.indices + self.paths
+        return struct.pack("<QIII", 0x14 + len(body), len(self.folders) // 32, len(self.indices) // 4, len(self.paths) // 32) + body
+
+
 def align(n, a):
     return (n + a - 1) // a * a
 
@@ -661,6 +1059,7 @@ def _apply(tree, image, lines, state, on, log):
         raise Error("the game's RomFS isn't laid out as expected (data.arc last, its tables after it)")
     arc = Arc(lambda off, n: image.read(arc_at + off, n))
     table = Table(arc)
+    table.use_config(mod_config(tree, on))
 
     # every file the turned-on mods hold (a later mod wins), sorted into kinds; patches, every mod's
     # in order, by the file they patch
@@ -772,14 +1171,23 @@ def _apply(tree, image, lines, state, on, log):
             for path, _src, name in patches[key]:
                 merged.setdefault(name, []).append(path)
         table.commit_files()
+        for note in table.notes:
+            log(f"config.json: {note}")
         table.rebuild_folders(alias, place)
 
-        # the table, then data.arc's new end
+        # the table (and the search section, with the new paths), then data.arc's new end
+        hdr = list(arc.header)
+        if table.path_names:
+            search = Search(arc.read, arc.header[5])
+            for path in table.path_names:
+                search.add_file(path)
+            t = search.to_bytes()
+            z = zstd_compress(t)
+            hdr[5] = place(struct.pack("<4I", 0x10, len(t), len(z), align(len(z), 4)) + z, 0x10)
         t = table.to_bytes()
         z = zstd_compress(t)
         table_at = place(struct.pack("<4I", 0x10, len(t), len(z), align(len(z), 4)) + z, 0x10)
         new_arc_size = at
-        hdr = list(arc.header)
         hdr[4] = table_at
 
         # the RomFS's tables after data.arc's new end, data.arc's size in them
