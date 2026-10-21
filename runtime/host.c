@@ -772,6 +772,19 @@ static u64 resolve(const char *name, int weak) {
     return addr;
 }
 
+/* Bind an exported name to a native function, for references linked from now on: the address it
+ * had (0 if nothing defines it - then it stays as it was). The wrapper calls that one itself. */
+u64 rt_wrap_symbol(const char *name, GuestFn *fn) {
+    struct Sym *s = sym_slot(name);
+    u64 real = s->name && !s->missing ? s->addr : 0;
+    if (real) s->addr = rt_native(fn, name);
+    return real;
+}
+
+#ifdef __APPLE__
+void discord_init(void);   /* (macos/discord.c) */
+#endif
+
 /* ---- loading --------------------------------------------------------------------- */
 int main(int argc, char **argv);
 static DWORD WINAPI guest_main(LPVOID unused);
@@ -891,6 +904,9 @@ static void load(const char *dir) {
         fprintf(stderr, "cannot map the native-function region\n");
         exit(2);
     }
+#ifdef __APPLE__
+    discord_init();   /* (before the modules are linked: it wraps some of main's exports) */
+#endif
     for (u32 m = 0; m < module_count; m++) relocs += bind_module(m);
     printf("loaded %u modules: %u functions, %u exported symbols, %u symbol relocations; "
            "%u symbols bound to native code, %u left undefined (%u NROs recompiled for loading later)\n",
