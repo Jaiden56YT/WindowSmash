@@ -27,6 +27,8 @@ struct InstalledMod: Codable, Identifiable, Equatable {
     let name: String
     var enabled: Bool
     let files: Int
+    let added: Int?      // new files the game doesn't have, added to it (tools/mods.py)
+    let merged: Int?     // patch files (.xmsbt, .prcx, .prcxml) merged into the game's files
     let skipped: Int
     let gamebanana: Int?
     let title: String?
@@ -404,8 +406,15 @@ struct InstalledRow: View {
                 Text([mod.category, mod.author.map { "by \($0)" }, "\(mod.files) file\(mod.files == 1 ? "" : "s")"]
                         .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "))
                     .font(.caption).foregroundStyle(.secondary)
+                if mod.enabled && (mod.added ?? 0) + (mod.merged ?? 0) > 0 {
+                    Label([(mod.added ?? 0) > 0 ? "\(mod.added!) new file\(mod.added! == 1 ? "" : "s") added to the game" : nil,
+                           (mod.merged ?? 0) > 0 ? "\(mod.merged!) patch\(mod.merged! == 1 ? "" : "es") merged (names, params)" : nil]
+                            .compactMap { $0 }.joined(separator: ", "),
+                          systemImage: "plus.circle.fill")
+                        .font(.caption).foregroundStyle(.green)
+                }
                 if mod.enabled && mod.skipped > 0 {
-                    Label("\(mod.skipped) new file\(mod.skipped == 1 ? "" : "s") the game doesn't have: not loaded yet, so it may look wrong",
+                    Label("\(mod.skipped) file\(mod.skipped == 1 ? "" : "s") not loaded: a new costume slot (c08 and up) or a file costume slots share - not supported yet, so it may look wrong",
                           systemImage: "exclamationmark.triangle.fill")
                         .font(.caption).foregroundStyle(.orange)
                 }

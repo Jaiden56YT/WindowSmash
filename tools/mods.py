@@ -26,15 +26,22 @@ data.arc is the image's last file; the RomFS's own tables follow it. `apply` wri
     before it ends, 16-aligned. So each folder a mod changes is laid out again after data.arc's
     old end, its files in their order: the unchanged ones as they were - read from the game's own
     files through the layer map, not copied (the overlay has a hole there) - and a changed one's
-    new bytes in its place, the files after it moved along; the folder's data entries and its
-    folder entry point at the new place. No table grows: the game doesn't load a table with
-    more entries than it had (tried: it crashes);
+    new bytes in its place, the files after it moved along, files a mod adds at the end; the
+    folder's data entries and its folder entry point at the new place;
+  - a file the game doesn't have (a custom model's own textures, say) is added to the directory
+    whose files are in its folder (fighter/mario/model/body/c00/x.nutexb: fighter/mario/c00): new
+    entries at the end of the file table's tables (Table: the counts the game reads grow, no entry
+    it has moves), the directory's run of files copied to the end with the new ones after it;
+  - ARCropolis' patch files are merged into the file they patch, each turned-on mod's in order:
+    .xmsbt into an .msbt (text: msbt.py), .prcx and .prcxml into a .prc (params: prc.py) - into a
+    mod's whole file if one has it, else the game's (a regional file: each region's own);
   - a stream: file (music) is stored whole, its stream data entries pointed at it;
   - the RomFS's tables come after data.arc's new end, with its new size;
 and romfs.cfg is switched to it (the game as it is: romfs_vanilla.cfg, kept).
-Limits, as against ARCropolis on a Switch: only files the game has are changed - a mod's new
-files (more costume slots, a custom model's own textures) are skipped and listed; and a file two
-paths share (one costume's texture another reuses) changes for both.
+Limits, as against ARCropolis on a Switch: a file in a folder the game doesn't have (a new
+costume slot, c08 and up: a directory of its own, and the game's fighter and UI params told of
+it) is skipped and listed; and a file two paths share (one costume's texture another reuses)
+changes for both.
 """
 import argparse
 import hashlib
@@ -49,12 +56,15 @@ import sys
 import tempfile
 import time
 import urllib.request
+import xml.etree.ElementTree as ET
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from arc import Arc, LOW40, hash40, romfs_entries  # noqa: E402
+from arc import Arc, LOW40, hash40, romfs_entries, unzstd  # noqa: E402
 from nca import RomfsImage, read_layers, write_layers  # noqa: E402
+import msbt  # noqa: E402
+import prc  # noqa: E402
 
 try:
     from compression.zstd import CompressionParameter, compress as zstd_compress   # Python 3.14
@@ -82,6 +92,9 @@ MODDED_MAP = "romfs_mods.layers"
 TOP = {"fighter", "ui", "sound", "stream;", "prebuilt;", "effect", "stage", "camera", "item", "param", "assist",
        "boss", "enemy", "finding", "pokemon", "spirits", "standard", "common", "menu", "render", "shader", "snapshot",
        "fighter_pass", "miihat", "replay", "sp_enemy"}
+# ARCropolis' patch files: merged into the game's file of the same name (or a mod's whole one) when
+# mods are applied - .xmsbt into an .msbt (text), .prcx and .prcxml into a .prc (params)
+PATCHES = {".xmsbt": ".msbt", ".prcx": ".prc", ".prcxml": ".prc"}
 SKIP_FILES = {"info.toml", "config.json", "preview.webp", "preview.png", "preview.jpg", "readme.txt", "readme.md"}
 GAMEBANANA = "https://gamebanana.com/apiv11"
 
@@ -283,27 +296,71 @@ def vanilla_cfg(tree):
     return lines
 
 
+TABLES = ("hash_to_path", "paths", "info_indices", "dir_hash_to_info", "dirs", "folder_offsets", "child_hashes",
+          "infos", "info_to_datas", "datas")
+OWN_FILE = 0x1000000      # an info-to-data entry's last field for a file in its directory's own folder
+SHARED_INFO = 0x300000    # a file info's flags for a copy of another directory's file (a costume sharing c00's)
+REGIONAL_INFO = 0x18000   # a file info's flags for a file with one data per region or language
+
+
 class Table:
-    """data.arc's file table, changed in place (no entry added, no table's size changed)."""
+    """data.arc's file table, to change: each of its tables a list of entries of its own, so files
+    can be added (add_file); bytes() puts the table together again.
+
+    How the game reads it (f_710374f910, after it reads the table): the header's counts give each
+    table's place - infos, info-to-datas and datas each hold the game's own entries, a patch's
+    (the header's 0x28), then extra ones (0x4C, 0x50, 0x54) - and a last section, after datas, maps
+    path hashes to the extra entries; the game's per-file state (one per path, per info index, per
+    folder) is allocated from the same counts. A new file's entries go at the end of each table:
+    a path and an info index (their tables have no extra part), and an info, an info-to-data and a
+    data after the extra ones, their counts grown - no entry the game has moves. A directory's files
+    are a run of infos (its start and count), so a directory that gets files has its run copied to
+    the end, the new files after it."""
 
     def __init__(self, arc):
         self.arc = arc
-        self.t = bytearray(arc.t)
+        t = arc.t
+        self.head = bytearray(t[:arc.tab["hash_to_path"][0]])   # the header, regions, streams, buckets
+        self.size = {}
+        self.tabs = {}
+        for name in TABLES:
+            o, size, count = arc.tab[name]
+            self.size[name] = size
+            self.tabs[name] = bytearray(t[o:o + size * count])
+        self.extra = bytes(t[arc.extra_at:])
+        self.base_datas = self.count("datas")
         self.streams = None
         self.owned = None
+        self.parents = None
         self.replaced = {}   # folder -> {data index: (stored bytes, size, flags)}
+        self.added = {}      # folder -> [(data index, stored bytes, size, flags)], in the order they go
+        self.new_files = {}  # directory -> [(path, bytes)]
+        self.new_paths = []  # (hash40, path index)
+
+    def count(self, table):
+        return len(self.tabs[table]) // self.size[table]
 
     def entry(self, table, index, fmt):
+        if table in self.tabs:
+            return struct.unpack_from(fmt, self.tabs[table], index * self.size[table])
         o, size, _ = self.arc.tab[table]
-        return struct.unpack_from(fmt, self.t, o + index * size)
+        return struct.unpack_from(fmt, self.head, o + index * size)
 
     def put(self, table, index, fmt, *values):
+        if table in self.tabs:
+            struct.pack_into(fmt, self.tabs[table], index * self.size[table], *values)
+            return
         o, size, _ = self.arc.tab[table]
-        struct.pack_into(fmt, self.t, o + index * size, *values)
+        struct.pack_into(fmt, self.head, o + index * size, *values)
+
+    def append(self, table, fmt, *values):
+        index = self.count(table)
+        self.tabs[table] += struct.pack(fmt, *values).ljust(self.size[table], b"\0")
+        return index
 
     def path_index(self, path):
         h = hash40(path)
-        start, count = struct.unpack_from("<2I", self.t, self.arc.bucket_table + (h % self.arc.buckets) * 8)
+        start, count = struct.unpack_from("<2I", self.head, self.arc.bucket_table + (h % self.arc.buckets) * 8)
         lo, hi = start, start + count
         while lo < hi:
             mid = (lo + hi) // 2
@@ -322,10 +379,17 @@ class Table:
         info = self.entry("info_indices", full >> 40, "<2I")[1]
         _, _, to_data, flags = self.entry("infos", info, "<4I")
         out = []
-        for r in range(self.arc.regions if flags & 0x8000 else 1):
+        # (a regional file: an empty entry, then one per region - the game reads to_data + 1 + its region)
+        for r in range(1, self.arc.regions + 1) if flags & 0x8000 else (0,):
             folder, data, _ = self.entry("info_to_datas", to_data + r, "<3I")
             out.append((folder, data))
         return sorted(set(out))
+
+    def original(self, folder, data):
+        """A file's bytes as the game has them (its folder and data entries)."""
+        offset, stored, size, flags = self.arc._entry("datas", data, "<4I")
+        raw = self.arc.read(self.arc.file_section + self.arc._entry("folder_offsets", folder, "<Q")[0] + offset * 4, stored)
+        return unzstd(raw, f"data entry {data}") if flags & 3 else raw
 
     def replace(self, folder, data, raw):
         """A file's new bytes (stored as the original is: zstd-compressed or not)."""
@@ -333,33 +397,132 @@ class Table:
         stored = game_compress(raw) if flags & 3 else raw
         self.replaced.setdefault(folder, {})[data] = (stored, len(raw), flags)
 
+    # ---- new files ----
+    def directories_of(self, parent):
+        """The directories whose files are in folder `parent` (a hash40 of "a/b/c/"): (directory,
+        whether it has a file there of its own, not another directory's)."""
+        if self.parents is None:
+            self.parents = {}
+            info_path = [e[0] for e in struct.iter_unpack("<4I", self.tabs["infos"])]
+            info_index = [e[1] for e in struct.iter_unpack("<4I", self.tabs["infos"])]
+            ii_dir = [e[0] for e in struct.iter_unpack("<2I", self.tabs["info_indices"])]
+            path_parent = [e[2] & LOW40 for e in struct.iter_unpack("<4Q", self.tabs["paths"])]
+            for d, e in enumerate(struct.iter_unpack("<QQQ7I", self.tabs["dirs"])):
+                start, n = e[5], e[6]
+                for i in range(start, start + n):
+                    found = self.parents.setdefault(path_parent[info_path[i]], {})
+                    found[d] = found.get(d, False) or ii_dir[info_index[i]] == d
+        return self.parents.get(parent, {})
+
+    def add_file(self, path, raw):
+        """Add a file the game doesn't have to the directory whose files are in its folder; returns
+        None, or why it can't be added."""
+        if "/" not in path or ":" in path:
+            return "not in a folder of data.arc's"
+        folder_path = path.rsplit("/", 1)[0] + "/"
+        found = self.directories_of(hash40(folder_path))
+        own = sorted(d for d, mine in found.items() if mine) or sorted(found)
+        if not own:
+            return f"a folder the game doesn't have ({folder_path}: a new costume slot or folder)"
+        self.new_files.setdefault(own[0], []).append((path, raw))
+        return None
+
+    def commit_files(self):
+        """The added files' entries: each directory's run of infos copied to the end, its new files after."""
+        for d in sorted(self.new_files):
+            dir_path, name, parent, re1, re2, start, n, cstart, ccount, flags = self.entry("dirs", d, "<QQQ7I")
+            folder = dir_path >> 40
+            new_start = self.count("infos")
+            sibling = {}   # extension -> a file info's flags of one of the directory's own files
+            for i in range(start, start + n):
+                p, ii, to_data, fflags = self.entry("infos", i, "<4I")
+                moved = self.append("infos", "<4I", p, ii, to_data, fflags)
+                in_dir, info = self.entry("info_indices", ii, "<2I")
+                if info == i:
+                    self.put("info_indices", ii, "<2I", in_dir, moved)
+                if in_dir == d and not fflags & SHARED_INFO:
+                    ext = self.entry("paths", p, "<4Q")[1] & LOW40
+                    sibling.setdefault(ext, fflags)
+                    sibling.setdefault(None, fflags)
+            files = self.new_files[d]
+            for path, raw in files:
+                leaf = path.rsplit("/", 1)[1]
+                ext = leaf.rsplit(".", 1)[1] if "." in leaf else ""
+                h = hash40(path)
+                p = self.count("paths")
+                ii = self.count("info_indices")
+                info = self.count("infos")
+                to_data = self.count("info_to_datas")
+                data = self.count("datas")
+                self.append("paths", "<4Q", h | ii << 40, hash40(ext) | 0xFFFFFF << 40, hash40(path.rsplit("/", 1)[0] + "/"),
+                            hash40(leaf))
+                self.append("info_indices", "<2I", d, info)
+                self.append("infos", "<4I", p, ii, to_data, sibling.get(hash40(ext), sibling.get(None, 0x10)) & ~(SHARED_INFO | REGIONAL_INFO))
+                self.append("info_to_datas", "<3I", folder, data, OWN_FILE)
+                stored = game_compress(raw)
+                self.append("datas", "<4I", 0, len(stored), len(raw), 3)
+                self.added.setdefault(folder, []).append((data, stored, len(raw), 3))
+                self.new_paths.append((h, p))
+            self.put("dirs", d, "<QQQ7I", dir_path, name, parent, re1, re2, new_start, n + len(files), cstart, ccount, flags)
+        self.new_files = {}
+        if self.new_paths:   # each bucket's paths sorted by hash, the new ones among them
+            old = self.tabs["hash_to_path"]
+            new = bytearray()
+            by_bucket = {}
+            for h, p in self.new_paths:
+                by_bucket.setdefault(h % self.arc.buckets, []).append(h | p << 40)
+            for b in range(self.arc.buckets):
+                at = self.arc.bucket_table + b * 8
+                start, n = struct.unpack_from("<2I", self.head, at)
+                struct.pack_into("<2I", self.head, at, len(new) // 8, n + len(by_bucket.get(b, ())))
+                if b in by_bucket:
+                    values = list(struct.unpack_from(f"<{n}Q", old, start * 8)) + by_bucket[b]
+                    new += struct.pack(f"<{len(values)}Q", *sorted(values, key=lambda v: v & LOW40))
+                else:
+                    new += old[start * 8:(start + n) * 8]
+            self.tabs["hash_to_path"] = new
+            self.new_paths = []
+
+    def to_bytes(self):
+        """The table, its counts as its tables have grown."""
+        fs = list(struct.unpack_from("<22I", self.head, 0))
+        assert self.count("hash_to_path") == self.count("paths")
+        fs[1] = self.count("paths")
+        fs[2] = self.count("info_indices")
+        fs[19] = self.count("infos") - fs[6] - fs[10]          # 0x4C: extra infos
+        fs[20] = self.count("info_to_datas") - fs[7] - fs[10]  # 0x50: extra info-to-datas
+        fs[21] = self.count("datas") - fs[8] - fs[10]          # 0x54: extra datas
+        struct.pack_into("<I", self.head, self.arc.bucket_table - 8, fs[1])   # (the buckets' entry count)
+        fs[0] = len(self.head) + sum(len(v) for v in self.tabs.values()) + len(self.extra)
+        struct.pack_into("<22I", self.head, 0, *fs)
+        return bytes(self.head) + b"".join(self.tabs[name] for name in TABLES) + self.extra
+
     def folder_files(self):
         """folder -> the file data entries in its chunk: the ones its info-to-data entries name
         (the folder's own range of data entries counts other folders' too)."""
         if self.owned is None:
             self.owned = {}
-            ndatas = self.arc.tab["datas"][2]
-            o, size, count = self.arc.tab["info_to_datas"]
-            for folder, data, _ in struct.iter_unpack("<3I", self.t[o:o + size * count]):
-                if data < ndatas:   # (unused entries name no data)
+            for folder, data, _ in struct.iter_unpack("<3I", self.tabs["info_to_datas"]):
+                if data < self.base_datas:   # (unused entries name no data; added files come after)
                     self.owned.setdefault(folder, set()).add(data)
         return self.owned
 
     def rebuild_folders(self, alias, place):
         """Each folder a mod changes, laid out again: its files in their order, a changed file's
         new bytes in its place, the unchanged ones' original bytes (`alias`: read from the game's
-        files, not copied); the folder and its files' entries pointed there.
+        files, not copied), added files at the end; the folder and its files' entries pointed there.
         The game reads a folder's chunk as one stream, each file where the one before ends
         (16-aligned): its loader (f_7103544a70) steps through the chunk by each file's stored
         size, not by the file's offset. So a changed file has to stay in its place, the files
         after it moved along (a file put after the chunk: the files read after it are read from
         the wrong place - a hang, or a crash in the loader's copy)."""
         owned = self.folder_files()
-        for folder in sorted(self.replaced):
+        for folder in sorted(set(self.replaced) | set(self.added)):
             off, decomp, comp, start, count, res = self.entry("folder_offsets", folder, "<QIIIII")
             files = [(o, d) for o, _, d in sorted((self.entry("datas", d, "<4I")[0] * 4, self.entry("datas", d, "<4I")[1] > 0, d)
                                                   for d in owned.get(folder, ()))]   # (an empty file before a file at its offset)
-            changes = self.replaced[folder]
+            changes = self.replaced.get(folder, {})
+            added = self.added.get(folder, [])
             # the chunk in pieces: runs of unchanged files (old offsets [a, b), the files) and changed files
             # (an empty file, stored size 0, is in the run it is at the end of)
             pieces, pos = [], 0
@@ -368,14 +531,15 @@ class Table:
                     raise Error(f"folder {folder}'s files aren't laid out one after another (file data {d})")
                 pos = align(pos + self.entry("datas", d, "<4I")[1], 0x10)
                 if d in changes:
-                    pieces.append(("new", d))
+                    pieces.append(("new", d) + changes[d])
                 elif pieces and pieces[-1][0] == "old":
                     pieces[-1][2] = pos
                     pieces[-1][3].append((in_folder, d))
                 else:
                     pieces.append(["old", in_folder, pos, [(in_folder, d)]])
-            if pos != comp or not any(d in changes for _, d in files):
+            if pos != comp:
                 raise Error(f"folder {folder}'s files don't make up its data")
+            pieces += [("new",) + a for a in added]
             base, end, grow = None, None, 0
             for piece in pieces:
                 if piece[0] == "old":
@@ -387,18 +551,17 @@ class Table:
                         self.put("datas", d, "<4I", (where + in_folder - a - base) // 4, stored, size, flags)
                     where_end = where + b - a
                 else:
-                    d = piece[1]
-                    stored, size, flags = changes[d]
+                    _, d, stored, size, flags = piece
                     where = place(stored, 0x10)
                     base = where if base is None else base
-                    grow += size - self.entry("datas", d, "<4I")[2]
+                    grow += size - self.entry("datas", d, "<4I")[2] if d < self.base_datas else align(size, 0x10)
                     self.put("datas", d, "<4I", (where - base) // 4, len(stored), size, flags)
                     where_end = align(where + len(stored), 0x10)
                 if end is not None and where != end:   # (alias and place pad to 0x10, as the chunk is)
                     raise Error(f"folder {folder}: a file isn't where the one before it ends")
                 end = where_end
             self.put("folder_offsets", folder, "<QIIIII", base - self.arc.file_section, max(0, decomp + grow),
-                     end - base, start, count, res)
+                     end - base, start, count + len(added), res)
 
     def stream_targets(self, path):
         """The stream-data entries of a stream: file (each of its variants), or None."""
@@ -499,15 +662,23 @@ def _apply(tree, image, lines, state, on, log):
     arc = Arc(lambda off, n: image.read(arc_at + off, n))
     table = Table(arc)
 
-    # every file the turned-on mods hold (a later mod wins), sorted into kinds
+    # every file the turned-on mods hold (a later mod wins), sorted into kinds; patches, every mod's
+    # in order, by the file they patch
     chosen = {}
+    patches = {}
     for name in on:
         for path, src in mod_files(os.path.join(tree.mods, name)):
-            chosen[path.lower()] = (path, src, name)
+            stem, ext = os.path.splitext(path)
+            if ext.lower() in PATCHES:
+                patches.setdefault((stem + PATCHES[ext.lower()]).lower(), []).append((path, src, name))
+            else:
+                chosen[path.lower()] = (path, src, name)
     os.makedirs(tree.work, exist_ok=True)
     overlay_path = os.path.join(tree.work, "overlay.bin")
     tmp_path = overlay_path + ".tmp"
     skipped = {}
+    added = {}
+    merged = {}
     changed = 0
     HEAD = 0x100   # overlay: [0, 0x50) the RomFS header, [0x50, 0x88) data.arc's, from HEAD data.arc's new bytes
     grow_at = align(arc_size, 0x10)   # data.arc's new bytes start here (data.arc offsets)
@@ -554,24 +725,59 @@ def _apply(tree, image, lines, state, on, log):
                 changed += 1
                 continue
             targets = table.file_targets(path)
+            with open(src, "rb") as f:
+                data = f.read()
+            if targets is None:   # a file the game doesn't have: added to its folder's directory
+                why = table.add_file(path, data)
+                if why:
+                    skipped.setdefault(name, []).append(path)
+                    log(f"{name}: {path} not added: {why}")
+                else:
+                    added.setdefault(name, []).append(path)
+                continue
             # (a data entry of size 0 is a costume slot reusing another's file: the game sizes the
             # file's buffer from that other one, so new bytes here overrun it - left as it is)
-            targets = [(f, d) for f, d in targets or [] if table.entry("datas", d, "<4I")[2]]
+            targets = [(f, d) for f, d in targets if table.entry("datas", d, "<4I")[2]]
             if not targets:
                 skipped.setdefault(name, []).append(path)
                 continue
-            with open(src, "rb") as f:
-                data = f.read()
             for folder, d in targets:
                 table.replace(folder, d, data)
             changed += 1
+        for key in sorted(patches):
+            whole = chosen.get(key)
+            targets = table.file_targets(whole[0] if whole else key)
+            targets = [(f, d) for f, d in targets or [] if table.entry("datas", d, "<4I")[2]]
+            if not targets:
+                for path, _src, name in patches[key]:
+                    skipped.setdefault(name, []).append(path)
+                    log(f"{name}: {path} not merged: the game has no {key}")
+                continue
+            if whole:
+                with open(whole[1], "rb") as f:
+                    whole_data = f.read()
+            for folder, d in targets:   # (each region's own text, for a regional file)
+                data = whole_data if whole else table.original(folder, d)
+                for path, src, name in patches[key]:
+                    with open(src, "rb") as f:
+                        patch = f.read()
+                    try:
+                        if path.lower().endswith(".xmsbt"):
+                            data = msbt.patch_bytes(data, patch)
+                        else:
+                            data = prc.patch_bytes(data, patch, xml=path.lower().endswith(".prcxml"))
+                    except (msbt.Error, prc.Error, ValueError, struct.error, ET.ParseError) as e:
+                        raise Error(f"{name}: {path} can't be merged into {key}: {e}")
+                table.replace(folder, d, data)
+            for path, _src, name in patches[key]:
+                merged.setdefault(name, []).append(path)
+        table.commit_files()
         table.rebuild_folders(alias, place)
 
         # the table, then data.arc's new end
-        z = zstd_compress(bytes(table.t))
-        orig_head = struct.unpack("<4I", arc.read(arc.header[4], 16))
-        table_at = place(struct.pack("<4I", 0x10, len(table.t), len(z), align(len(z), 4)) + z, 0x10)
-        _ = orig_head
+        t = table.to_bytes()
+        z = zstd_compress(t)
+        table_at = place(struct.pack("<4I", 0x10, len(t), len(z), align(len(z), 4)) + z, 0x10)
         new_arc_size = at
         hdr = list(arc.header)
         hdr[4] = table_at
@@ -622,21 +828,23 @@ def _apply(tree, image, lines, state, on, log):
     map_path = os.path.join(tree.modules, MODDED_MAP)
     write_layers(map_path, new_size, layers)
     cfg_text = "layered\n" + map_path + "\n" + "".join(s + "\n" for s in sources) + overlay_path + "\n"
-    check(cfg_text, chosen, skipped, tree)
+    check(cfg_text, {k: v for k, v in chosen.items() if k not in patches}, skipped, added, tree)
     with open(tree.cfg + ".tmp", "w", encoding="utf-8") as f:
         f.write(cfg_text)
     os.replace(tree.cfg + ".tmp", tree.cfg)
     written = os.stat(overlay_path).st_blocks * 512
-    summary = {"mods": on, "files": changed, "skipped": skipped, "bytes": written}
+    summary = {"mods": on, "files": changed, "added": added, "merged": merged, "skipped": skipped, "bytes": written}
     with open(os.path.join(tree.work, "applied.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=1)
-    log(f"{len(on)} mod(s), {changed} files changed, {sum(len(v) for v in skipped.values())} skipped "
-        f"(new files the game doesn't have), {written / 1048576:.1f} MB written, in {time.time() - t0:.0f} s")
+    log(f"{len(on)} mod(s), {changed} files changed, {sum(len(v) for v in added.values())} added, "
+        f"{sum(len(v) for v in merged.values())} merged, "
+        f"{sum(len(v) for v in skipped.values())} skipped, {written / 1048576:.1f} MB written, in {time.time() - t0:.0f} s")
     return summary
 
 
-def check(cfg_text, chosen, skipped, tree):
-    """Read the modded RomFS back as the game will: a few changed files must be the mods' bytes."""
+def check(cfg_text, chosen, skipped, added, tree):
+    """Read the modded RomFS back as the game will: a few changed files, and every added one, must be
+    the mods' bytes."""
     probe = os.path.join(tree.work, "check.cfg")
     with open(probe, "w", encoding="utf-8") as f:
         f.write(cfg_text)
@@ -645,7 +853,9 @@ def check(cfg_text, chosen, skipped, tree):
         arc_at = next(o for p, o, _s in romfs_entries(image) if p == "data.arc")
         arc = Arc(lambda off, n: image.read(arc_at + off, n))
         bad = set(p for v in skipped.values() for p in v)
-        sample = [v for v in chosen.values() if v[0] not in bad and not v[0].startswith("stream:/")][:8]
+        new = set(p for v in added.values() for p in v)
+        sample = [v for v in chosen.values() if v[0] not in bad | new and not v[0].startswith("stream:/")][:8]
+        sample += [v for v in chosen.values() if v[0] in new]
         for path, src, _name in sample:
             with open(src, "rb") as f:
                 if arc.get(path) != f.read():
@@ -664,6 +874,8 @@ def listing(tree):
         m = state["mods"][n]
         files = mod_files(os.path.join(tree.mods, n))
         out.append({"name": n, "enabled": bool(m.get("enabled")), "files": len(files),
+                    "added": len((applied or {}).get("added", {}).get(n, [])),
+                    "merged": len((applied or {}).get("merged", {}).get(n, [])),
                     "skipped": len((applied or {}).get("skipped", {}).get(n, [])),
                     **{k: v for k, v in m.items() if k != "enabled"}})
     return {"mods": out, "applied": (applied or {}).get("mods"), "modded": tree.is_modded()}
