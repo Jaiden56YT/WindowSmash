@@ -2521,7 +2521,10 @@ static int depth_like(MTLPixelFormat f) {   /* what a shadow slot (depth2d...) t
 
 /* A texture bound for a draw: the texture, the surface it is (if a render target), and whether its
  * texels are integers (sampled nearest). */
-typedef struct Bound { id<MTLTexture> tex; Surface *surface; int integer; } Bound;
+/* (tex: unretained - every one handed out is held by its cache: textures[], a surface's views, the
+ * dummies - and a draw's StageBinds hold 48 of them: retained, each draw released them all, ~11% of
+ * the GPU thread at the results screen's 5,800 draws a frame) */
+typedef struct Bound { __unsafe_unretained id<MTLTexture> tex; Surface *surface; int integer; } Bound;
 
 /* tex as the type a shader declares (TEX_2D, TEX_ARRAY_2D, TEX_3D, TEX_CUBE or TEX_ARRAY_CUBE):
  * itself, or a view of it, or nil where no view gives that. */
@@ -2995,7 +2998,7 @@ static void set_sampler(int stage, u32 k, id<MTLSamplerState> s) {
 typedef struct StageBinds {
     ShaderBinds bt;
     Bound tex[32];
-    id<MTLSamplerState> smp[16];
+    __unsafe_unretained id<MTLSamplerState> smp[16];   /* (held by samplers[]) */
 } StageBinds;
 
 /* Bind a stage's constant buffers and textures. */
