@@ -1,14 +1,22 @@
 #!/bin/bash
-# Builds build-mac/WindowSmash Mods.app (tools/mac/ModsApp.swift) with the Command Line Tools' Swift,
-# and puts it in ~/Applications as "WindowSmash Mods" (Spotlight finds it). Run from anywhere.
+# Builds build-mac/WindowSmash Mods.app (tools/mac/ModsShell.swift: a window around the mod manager,
+# tools/modmanager/server.py) with the Command Line Tools' Swift, and puts it in ~/Applications as
+# "WindowSmash Mods" (Spotlight finds it). Run from anywhere.
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 app="$root/build-mac/WindowSmash Mods.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 swiftc -parse-as-library -O -swift-version 5 -target arm64-apple-macos14.0 \
-    "$root/tools/mac/ModsApp.swift" -o "$app/Contents/MacOS/WindowSmash Mods"
-icon="$HOME/Applications/Play SSBU.app/Contents/Resources/windowsmash.icns"
-[ -f "$icon" ] && cp "$icon" "$app/Contents/Resources/windowsmash.icns"
+    "$root/tools/mac/ModsShell.swift" -o "$app/Contents/MacOS/WindowSmash Mods"
+# its icon, from the mod manager's own (tools/modmanager/ui/icon.png)
+set_dir="$(mktemp -d)/windowsmash.iconset"
+mkdir -p "$set_dir"
+for s in 16 32 128 256 512; do
+    sips -z $s $s "$root/tools/modmanager/ui/icon.png" --out "$set_dir/icon_${s}x${s}.png" >/dev/null
+    sips -z $((s * 2)) $((s * 2)) "$root/tools/modmanager/ui/icon.png" --out "$set_dir/icon_${s}x${s}@2x.png" >/dev/null
+done
+iconutil -c icns "$set_dir" -o "$app/Contents/Resources/windowsmash.icns" || true
+rm -rf "$(dirname "$set_dir")"
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

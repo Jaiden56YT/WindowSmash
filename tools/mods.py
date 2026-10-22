@@ -67,7 +67,12 @@ import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from arc import Arc, LOW40, hash40, romfs_entries, unzstd  # noqa: E402
+import arc as _arc  # noqa: E402
+if "extra_at" in open(_arc.__file__, encoding="utf-8").read() and hasattr(_arc, "unzstd"):
+    from arc import Arc, LOW40, hash40, romfs_entries, unzstd  # noqa: E402
+else:   # (an arc.py from before the mods' fix - the file table's extra entries counted wrong: the
+    # mod manager's own copy, which an installed mod manager brings without changing the build's)
+    from modmanager.arc_mods import Arc, LOW40, hash40, romfs_entries, unzstd  # noqa: E402
 from nca import RomfsImage, read_layers, write_layers  # noqa: E402
 import msbt  # noqa: E402
 import prc  # noqa: E402
@@ -128,7 +133,8 @@ class Tree:
             state = {}
         state.setdefault("order", [])
         state.setdefault("mods", {})
-        present = [n for n in sorted(os.listdir(self.mods)) if os.path.isdir(os.path.join(self.mods, n))] if os.path.isdir(self.mods) else []
+        present = [n for n in sorted(os.listdir(self.mods)) if os.path.isdir(os.path.join(self.mods, n)) and not n.startswith(".")
+                   ] if os.path.isdir(self.mods) else []   # (.packs: the saved modpacks)
         state["order"] = [n for n in state["order"] if n in present] + [n for n in present if n not in state["order"]]
         for n in present:
             state["mods"].setdefault(n, {"enabled": True})
@@ -171,7 +177,7 @@ def arc_path(rel):
 
 
 def mod_files(folder):
-    """(arc path, file) of every file a mod's folder holds."""
+    """(arc path, file) of every file a mod's folder holds (not its code plugins: plugins())."""
     out = []
     for dp, dirs, files in os.walk(folder):
         dirs[:] = sorted(d for d in dirs if not d.startswith("."))
@@ -179,8 +185,29 @@ def mod_files(folder):
             if n.startswith(".") or n.lower() in SKIP_FILES:
                 continue
             full = os.path.join(dp, n)
-            out.append((arc_path(os.path.relpath(full, folder)), full))
+            path = arc_path(os.path.relpath(full, folder))
+            if is_plugin(path):
+                continue
+            out.append((path, full))
     return out
+
+
+def is_plugin(path):
+    """A Skyline code plugin (plugin.nro, a moveset's or a new character's code): Switch code that
+    WindowSmash can't run - not a file of data.arc's (those .nro are under prebuilt:/nro/)."""
+    return path.lower().endswith(".nro") and not path.startswith("prebuilt:")
+
+
+def plugins(folder):
+    """The code plugins a mod's folder holds (paths in it)."""
+    out = []
+    for dp, dirs, files in os.walk(folder):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for n in files:
+            rel = os.path.relpath(os.path.join(dp, n), folder)
+            if is_plugin(arc_path(rel)):
+                out.append(rel.replace(os.sep, "/"))
+    return sorted(out)
 
 
 def find_roots(top):
@@ -205,8 +232,14 @@ def extract(archive, into):
             z.extractall(into)
         return
     r = subprocess.run(["tar", "-xf", archive, "-C", into], capture_output=True, text=True)
+    if r.returncode and os.name == "nt":   # (Windows' tar may not read .7z or .rar: 7-Zip, when it's installed)
+        for seven in (os.path.join(os.environ.get(v, ""), "7-Zip", "7z.exe") for v in ("ProgramFiles", "ProgramFiles(x86)")):
+            if os.path.exists(seven):
+                r = subprocess.run([seven, "x", "-y", f"-o{into}", archive], capture_output=True, text=True)
+                break
     if r.returncode:
-        raise Error(f"cannot unpack {os.path.basename(archive)}: {r.stderr.strip()[-400:]}")
+        hint = " (install 7-Zip, from 7-zip.org, to open .7z and .rar files)" if os.name == "nt" else ""
+        raise Error(f"cannot unpack {os.path.basename(archive)}{hint}: {(r.stderr or r.stdout).strip()[-400:]}")
 
 
 def safe_name(name):
@@ -286,11 +319,79 @@ def gamebanana_install(tree, mod_id, file_id=None, progress=None):
             raise Error(f"{f['_sFile']} did not download whole (its checksum differs): try again")
         meta = {"gamebanana": int(mod_id), "title": data.get("_sName", ""), "image": image,
                 "author": (data.get("_aSubmitter") or {}).get("_sName", ""),
-                "category": (data.get("_aCategory") or {}).get("_sName", ""), "file": f["_sFile"]}
+                "category": (data.get("_aCategory") or {}).get("_sName", ""), "file": f["_sFile"], "file_id": f["_idRow"],
+                "md5": f.get("_sMd5Checksum", "")}
         return install(tree, target, data.get("_sName") or f["_sFile"], meta)
 
 
 # ---- applying --------------------------------------------------------------------------------
+def disk_size(path):
+    """The disk space a file takes (a sparse file's holes don't count)."""
+    st = os.stat(path)
+    if hasattr(st, "st_blocks"):
+        return st.st_blocks * 512
+    if os.name == "nt":   # (Windows: no st_blocks - the allocated size, sparse holes left out)
+        try:
+            import ctypes
+            from ctypes import wintypes
+            high = wintypes.DWORD()
+            f = ctypes.windll.kernel32.GetCompressedFileSizeW
+            f.argtypes, f.restype = [wintypes.LPCWSTR, ctypes.POINTER(wintypes.DWORD)], wintypes.DWORD
+            low = f(path, ctypes.byref(high))
+            if low != 0xFFFFFFFF or ctypes.GetLastError() == 0:
+                return (high.value << 32) | low
+        except (OSError, AttributeError):
+            pass
+    return st.st_size
+
+
+def make_sparse(f):
+    """On Windows, an NTFS file whose holes cost nothing (macOS and Linux files are so already):
+    the overlay's unchanged files are holes, read from the game's own files (aliases) - without
+    this Windows writes them out as zeros, gigabytes of them, slowly."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+        dio = ctypes.windll.kernel32.DeviceIoControl
+        dio.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD, wintypes.LPVOID,
+                        wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
+        dio(msvcrt.get_osfhandle(f.fileno()), 0x900C4, None, 0, None, 0, ctypes.byref(wintypes.DWORD()), None)   # FSCTL_SET_SPARSE
+    except (OSError, AttributeError, ImportError):
+        pass   # (FAT32 or exFAT: no sparse files - only slower)
+
+
+def replace_file(tmp, path):
+    """os.replace, saying what to do when Windows has the file open elsewhere."""
+    for _ in range(10):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            time.sleep(0.5)
+    try:
+        os.replace(tmp, path)
+    except PermissionError:
+        raise Error(f"{os.path.basename(path)} is open in another program (the game, or another WindowSmash Mods window): "
+                    "close it and apply again")
+
+
+def close_image(image):
+    """A RomfsImage's files closed (an nca.py whose RomfsImage has no close() keeps them open, and
+    Windows won't replace a file that is open: overlay.bin, at the next apply)."""
+    if hasattr(image, "close"):
+        image.close()
+        return
+    for f in [getattr(image, "f", None)] + list(getattr(image, "sources", None) or []):
+        if f is not None:
+            try:
+                f.close()
+            except OSError:
+                pass
+
+
 def vanilla_cfg(tree):
     """romfs_vanilla.cfg: the game as it is (romfs.cfg, kept the first time mods are applied)."""
     if not tree.is_modded() and os.path.exists(tree.cfg):
@@ -307,7 +408,11 @@ TABLES = ("hash_to_path", "paths", "info_indices", "dir_hash_to_info", "dirs", "
 OWN_FILE = 0x1000000      # an info-to-data entry's last field for a file in its directory's own folder
 SHARED_INFO = 0x300000    # a file info's flags for a copy of another directory's file (a costume sharing c00's)
 REGIONAL_INFO = 0x18000   # a file info's flags for a file with one data per region or language
-SLOT = re.compile(r"/c\d\d(?=/|$)")   # a costume slot in a directory's path (fighter/mario/c08, .../c08/camera)
+SLOT = re.compile(r"/c\d\d(?=/|$)")
+# a costume's own effects (effect/fighter/sonic/ef_sonic_c06.eff): only the One Slot Effects
+# Skyline plugin reads them; added to the game as a mod's config.json says (to the costume's
+# directory), the game stops loading the fighter - so they are left out, the fighter's own effects used
+ONE_SLOT_EFFECT = re.compile(r"^effect/fighter/[^/]+/ef_[^/]+_c\d+\.eff$", re.I)   # a costume slot in a directory's path (fighter/mario/c08, .../c08/camera)
 
 
 def config_hash(value):
@@ -514,6 +619,8 @@ class Table:
                 continue
             for f in files:
                 fh, fp = config_hash(f)
+                if fp and ONE_SLOT_EFFECT.match(fp):
+                    continue
                 self.listed.setdefault(d, []).append((fh, fp))
                 self.listed_in.setdefault(fh, d)
 
@@ -1043,7 +1150,7 @@ def apply(tree, log=print):
     try:
         return _apply(tree, image, lines, state, on, log)
     finally:
-        image.close()
+        close_image(image)
 
 
 def _apply(tree, image, lines, state, on, log):
@@ -1058,6 +1165,7 @@ def _apply(tree, image, lines, state, on, log):
     if arc_at + arc_size > meta_at or rhdr[3] < meta_at or rhdr[5] < meta_at or rhdr[7] < meta_at or rhdr[7] + rhdr[8] > size:
         raise Error("the game's RomFS isn't laid out as expected (data.arc last, its tables after it)")
     arc = Arc(lambda off, n: image.read(arc_at + off, n))
+    log("reading the game's file table")
     table = Table(arc)
     table.use_config(mod_config(tree, on))
 
@@ -1066,6 +1174,9 @@ def _apply(tree, image, lines, state, on, log):
     chosen = {}
     patches = {}
     for name in on:
+        for plugin in plugins(os.path.join(tree.mods, name)):
+            log(f"{name}: {plugin} is a Skyline code plugin (a moveset, a new character...): WindowSmash can't run it, "
+                "so what it adds won't be in the game; the mod's other files load")
         for path, src in mod_files(os.path.join(tree.mods, name)):
             stem, ext = os.path.splitext(path)
             if ext.lower() in PATCHES:
@@ -1082,6 +1193,7 @@ def _apply(tree, image, lines, state, on, log):
     HEAD = 0x100   # overlay: [0, 0x50) the RomFS header, [0x50, 0x88) data.arc's, from HEAD data.arc's new bytes
     grow_at = align(arc_size, 0x10)   # data.arc's new bytes start here (data.arc offsets)
     with open(tmp_path, "wb") as out:
+        make_sparse(out)
         out.write(b"\0" * HEAD)
         out.write(b"\0" * (grow_at - arc_size))
         at = grow_at
@@ -1126,6 +1238,11 @@ def _apply(tree, image, lines, state, on, log):
             targets = table.file_targets(path)
             with open(src, "rb") as f:
                 data = f.read()
+            if targets is None and ONE_SLOT_EFFECT.match(path):
+                skipped.setdefault(name, []).append(path)
+                log(f"{name}: {path.rsplit('/', 1)[1]} left out: one-slot effects need the One Slot Effects plugin "
+                    "(a Switch plugin WindowSmash can't run) - this costume uses the fighter's own effects")
+                continue
             if targets is None:   # a file the game doesn't have: added to its folder's directory
                 why = table.add_file(path, data)
                 if why:
@@ -1170,9 +1287,15 @@ def _apply(tree, image, lines, state, on, log):
                 table.replace(folder, d, data)
             for path, _src, name in patches[key]:
                 merged.setdefault(name, []).append(path)
+        log(f"building the file table ({sum(len(v) for v in table.new_files.values())} new files)")
         table.commit_files()
+        unlisted = [n for n in table.notes if n.endswith("listed in a new directory, but the mod doesn't have it")]
         for note in table.notes:
-            log(f"config.json: {note}")
+            if note not in unlisted:
+                log(f"config.json: {note}")
+        if unlisted:   # (a reslotter's config often lists files the mod leaves out: harmless)
+            log(f"config.json lists {len(unlisted)} file{'s' if len(unlisted) > 1 else ''} its mod doesn't have (left out)")
+        log(f"laying out the changed folders ({len(set(table.replaced) | set(table.added))})")
         table.rebuild_folders(alias, place)
 
         # the table (and the search section, with the new paths), then data.arc's new end
@@ -1184,6 +1307,7 @@ def _apply(tree, image, lines, state, on, log):
             t = search.to_bytes()
             z = zstd_compress(t)
             hdr[5] = place(struct.pack("<4I", 0x10, len(t), len(z), align(len(z), 4)) + z, 0x10)
+        log("writing the new file table")
         t = table.to_bytes()
         z = zstd_compress(t)
         table_at = place(struct.pack("<4I", 0x10, len(t), len(z), align(len(z), 4)) + z, 0x10)
@@ -1213,7 +1337,7 @@ def _apply(tree, image, lines, state, on, log):
         out.seek(0)
         out.write(struct.pack("<10Q", *rhdr))
         out.write(struct.pack("<7Q", *hdr))
-    os.replace(tmp_path, overlay_path)
+    replace_file(tmp_path, overlay_path)
 
     # the layer map: the game's, with the two headers, the new bytes and the tables from the overlay
     src = len(sources)
@@ -1236,11 +1360,12 @@ def _apply(tree, image, lines, state, on, log):
     map_path = os.path.join(tree.modules, MODDED_MAP)
     write_layers(map_path, new_size, layers)
     cfg_text = "layered\n" + map_path + "\n" + "".join(s + "\n" for s in sources) + overlay_path + "\n"
+    log("checking the modded files read back right")
     check(cfg_text, {k: v for k, v in chosen.items() if k not in patches}, skipped, added, tree)
     with open(tree.cfg + ".tmp", "w", encoding="utf-8") as f:
         f.write(cfg_text)
-    os.replace(tree.cfg + ".tmp", tree.cfg)
-    written = os.stat(overlay_path).st_blocks * 512
+    replace_file(tree.cfg + ".tmp", tree.cfg)
+    written = disk_size(overlay_path)
     summary = {"mods": on, "files": changed, "added": added, "merged": merged, "skipped": skipped, "bytes": written}
     with open(os.path.join(tree.work, "applied.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=1)
@@ -1269,7 +1394,7 @@ def check(cfg_text, chosen, skipped, added, tree):
                 if arc.get(path) != f.read():
                     raise Error(f"check failed: {path} doesn't read back as the mod has it (nothing was changed)")
     finally:
-        image.close()
+        close_image(image)
         os.remove(probe)
 
 
