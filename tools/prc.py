@@ -18,6 +18,7 @@ a struct's keys - a new value, or a struct or list patched in turn; a list's ent
 .prcx, a list as long as its last changed entry, the entries before it that don't change "dummy"
 params: a struct with no keys... see apply). Here, the patch is applied ahead of time, when mods are
 applied (tools/mods.py)."""
+import re
 import struct
 import sys
 import xml.etree.ElementTree as ET
@@ -28,6 +29,7 @@ FIXED = {BOOL: "<?", I8: "<b", U8: "<B", I16: "<h", U16: "<H", I32: "<i", U32: "
 NAMES = {BOOL: "bool", I8: "sbyte", U8: "byte", I16: "short", U16: "ushort", I32: "int", U32: "uint",
          FLOAT: "float", HASH: "hash40", STRING: "string", LIST: "list", STRUCT: "struct"}
 MAGIC = b"paracobn"
+DUMMY = 0x54ff4f23f   # hash40("dummy"): in a patch's list, an entry left as it is (prc-rs)
 
 
 class Error(Exception):
@@ -157,8 +159,8 @@ def write(root):
 def apply(base, patch):
     """`base` (a param) with `patch` applied (prc-rs' rules): a struct's keys replaced or patched
     in turn (a key the base hasn't got is added), a list's entries by index (a patch entry that is
-    an empty struct leaves the base's as it is; entries past the base's end are added); any
-    other value replaced."""
+    an empty struct, or the hash40 "dummy", leaves the base's as it is; entries past the base's end
+    are added); any other value replaced."""
     kind, v = base
     pkind, pv = patch
     if kind == STRUCT and pkind == STRUCT:
@@ -175,7 +177,7 @@ def apply(base, patch):
         out = List(v)
         for i, p in enumerate(pv):
             if i < len(out):
-                if not (p[0] == STRUCT and not p[1]):
+                if not (p[0] == STRUCT and not p[1]) and p != (HASH, DUMMY):
                     out[i] = apply(out[i], p)
             else:
                 out.append(p)
@@ -221,6 +223,10 @@ def read_xml(text):
                     return kind, int(text, 16) if text.startswith("0x") else hash40(text)
                 return kind, e.text or ""
         raise Error(f"unknown param <{tag}> in the patch")
+    if isinstance(text, bytes):   # (UTF-16 with its byte-order mark, or UTF-8 - whatever its
+        # declaration says: mods' files say UTF-16 and are UTF-8, which ARCropolis reads)
+        text = text.decode("utf-16") if text[:2] in (b"\xff\xfe", b"\xfe\xff") else text.decode("utf-8-sig")
+    text = re.sub(r"""^\s*<\?xml[^>]*\?>""", "", text)
     root = ET.fromstring(text)
     return param(root)
 

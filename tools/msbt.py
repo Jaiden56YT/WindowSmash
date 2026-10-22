@@ -12,6 +12,7 @@ names its text by index); ATR1: one attribute (of a fixed size) per text; TXT2: 
 then UTF-16 strings, each ending in a 0). Other sections are kept as they are.
 An .xmsbt (UTF-16 XML): <xmsbt><entry label="..."><text>...</text></entry>...</xmsbt> - each
 label's text replaced, or added with its label when the file hasn't got it."""
+import re
 import struct
 import sys
 import xml.etree.ElementTree as ET
@@ -134,7 +135,7 @@ def read_xmsbt(data):
         text = data.decode("utf-16")
     else:
         text = data.decode("utf-8-sig")
-    text = text.replace('encoding="utf-16"', "").replace("encoding='utf-16'", "")   # (decoded already)
+    text = re.sub(r"""^\s*<\?xml[^>]*\?>""", "", text)   # (decoded already, whatever it says)
     root = ET.fromstring(text)
     out = []
     for e in root.iter("entry"):
