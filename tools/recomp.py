@@ -55,6 +55,7 @@ from lift import Lifter  # noqa: E402
 from nso import Module  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TREE = ROOT   # (the tree whose dump/skyline/hooks.txt is read: tools/skyline.py points it at another)
 # Load addresses, in the order the console's loader places (and searches) the modules.
 MODULES = {"main": 0x7100000000, "subsdk0": 0x7108000000, "sdk": 0x7109000000}
 # Modules the game loads at run time (NROs). The runtime saves each one it is handed that is
