@@ -116,12 +116,13 @@ def fp_imm8(imm8):
 
 
 class Lifter(SimdMixin):
-    def __init__(self, image, entries, base=BASE, forward=None, setjmp=None, pads=None):
+    def __init__(self, image, entries, base=BASE, forward=None, setjmp=None, pads=None, patches=None):
         self.img = image
         self.base = base         # guest address the module is loaded at
         self.forward = forward or {}   # entry offset -> native function that replaces it
         self.setjmp = setjmp or set()  # offsets of setjmp (or its import stub): calls become host setjmp
         self.pads = pads or {}   # function offset -> [(call range start, end, landing pad)] (eh.py)
+        self.patches = patches or {}   # offset -> [words] lifted in place of the instruction (recomp.CODE_PATCHES)
         self.entries = entries   # set of known function entry offsets
         self.tables = 0          # jump tables resolved
         self.indirect_tail = 0   # br sites treated as indirect tail calls
@@ -143,6 +144,9 @@ class Lifter(SimdMixin):
             wrapper = f"GuestFn {native[1]};\nvoid {name}(Cpu *c) {{ {native[1]}(c); }}\n"
             name += "_orig"
         self.words = struct.unpack_from(f"<{size // 4}I", self.img, start)
+        here = {off: ws for off, ws in self.patches.items() if start <= off < self.fend}
+        if here:   # (the last word in the instruction's place, so the jump table analysis sees it)
+            self.words = tuple(here[start + i * 4][-1] if start + i * 4 in here else w for i, w in enumerate(self.words))
         self.sites = self.pads.get(start, [])
         self.leaders.update(lp for _s, _e, lp in self.sites)   # entered from an exception
         self.analyze_tables()
@@ -153,6 +157,8 @@ class Lifter(SimdMixin):
             pc = start + i * 4
             try:
                 stmt, falls = self.insn(w, pc)
+                if pc in here:   # the words before the last run first
+                    stmt = " ".join([self.insn(x, pc)[0] for x in here[pc][:-1]] + [stmt])
             except Unsupported as e:
                 reasons[(str(e), w)] += 1
                 stmt, falls = f'rt_trap(c, {const(self.base +pc)}, "unsupported");', True
