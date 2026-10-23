@@ -113,7 +113,7 @@ $UserAgent = 'WindowSmash-installer'
 # (No double quotes in it: Windows PowerShell hands them to programs unescaped.)
 $ZstdCheck = 'import sys, importlib.util as u; sys.exit(0 if u.find_spec(''zstandard'') or (sys.version_info >= (3, 14) and u.find_spec(''compression.zstd'')) else 1)'
 # where updates come from: this repository's branch
-$RepoOwner = 'OpenSmash-Ultimate'
+$RepoOwner = 'Jaiden56YT'
 $RepoName = 'WindowSmash'
 $UpdateBranch = 'main'
 $RepoApi = "https://api.github.com/repos/$RepoOwner/$RepoName"

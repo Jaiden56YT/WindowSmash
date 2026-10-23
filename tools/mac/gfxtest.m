@@ -93,6 +93,7 @@ void display_fit(unsigned w, unsigned h, unsigned *x, unsigned *y, unsigned *fw,
 }
 int display_latency(void) { return 2; }
 float display_render_scale(void) { return 1.0f; }   /* (test_scale changes the renderer's: gfx_metal_set_render_scale) */
+float display_overlay_scale(void) { return 1.0f; }   /* (display.ini's overlay_scale: the overlay at its own size) */
 int display_window_mode(void) { return DISPLAY_WINDOWED; }
 void display_set_tearing(int supported) { (void)supported; }
 unsigned display_present_flags(void) { return 0; }

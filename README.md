@@ -6,6 +6,13 @@
   <strong>Super Smash Bros. Ultimate as a native Windows program, built on your own PC from your own copy of the game.</strong>
 </p>
 
+> [!NOTE]
+> This is **Jaiden56's mod-focused build** of WindowSmash, based on
+> [OpenSmash-Ultimate/WindowSmash](https://github.com/OpenSmash-Ultimate/WindowSmash). On top of it: the
+> **WindowSmash Mods** app (GameBanana mods: skins, custom models, new costume slots c08 and up, Skyline
+> moveset plugins and new characters, modpacks), macOS fixes, Discord Rich Presence and your own Miis.
+> Problems with these additions belong here, not with the original project.
+
 <p align="center">
   <a href="docs/BUILDING.md"><strong>Setup guide</strong></a> ·
   <a href="docs/PLAYING.md"><strong>Playing</strong></a> ·
@@ -127,7 +134,7 @@ Compare your PC with [what you need](#what-you-need) above. (**Settings → Syst
 2. Right-click `WindowSmash-main.zip`, choose **Extract All…**, pick a drive with about 60 GB free (for example `C:\`), and click **Extract**. You get a folder named `WindowSmash-main`; rename it to `WindowSmash` if you like.
 
 > [!TIP]
-> Keep WindowSmash out of the Desktop and Documents folders: OneDrive may try to upload them, and the finished build is around 30 GB. With [Git](https://git-scm.com/download/win), `git clone https://github.com/OpenSmash-Ultimate/WindowSmash.git` does the same as the download.
+> Keep WindowSmash out of the Desktop and Documents folders: OneDrive may try to upload them, and the finished build is around 30 GB. With [Git](https://git-scm.com/download/win), `git clone https://github.com/Jaiden56YT/WindowSmash.git` does the same as the download.
 
 ### Step 4: Start the installer
 
@@ -201,7 +208,7 @@ The installer stops with a message saying what went wrong and what to do; `insta
 You need Windows 10/11 x64. `Install WindowSmash.bat` installs Python 3.10 or newer and a compiler when they are missing: LLVM's clang-cl with Microsoft's C runtime and Windows SDK in `deps` (`tools\msvc_deps.py`, after you accept Microsoft's license terms), or the Visual Studio Build Tools with **C++ Clang tools for Windows** if that fails (`-BuildTools` goes straight to them). `-NoWizard` asks its questions in the console instead of the setup window, with the folders you give as the answers to accept. The example paths are your game files in `D:\MyDump` (the game with its 13.0.5 update), your keys in `D:\MyKeys` and your firmware in `D:\MyFirmware`.
 
 ```powershell
-git clone https://github.com/OpenSmash-Ultimate/WindowSmash.git
+git clone https://github.com/Jaiden56YT/WindowSmash.git
 cd WindowSmash
 & ".\Install WindowSmash.bat" -Game "D:\MyDump" -Keys "D:\MyKeys" -Firmware "D:\MyFirmware" -NoWizard
 ```
