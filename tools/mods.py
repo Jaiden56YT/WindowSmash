@@ -203,7 +203,7 @@ def mod_files(folder):
 
 def is_plugin(path):
     """A Skyline code plugin (plugin.nro, a moveset's or a new character's code): Switch code that
-    WindowSmash can't run - not a file of data.arc's (those .nro are under prebuilt:/nro/)."""
+    tools/skyline.py recompiles into the game - not a file of data.arc's (those .nro are under prebuilt:/nro/)."""
     return path.lower().endswith(".nro") and not path.startswith("prebuilt:")
 
 
@@ -268,9 +268,11 @@ def install(tree, archive, name=None, meta=None):
             os.makedirs(os.path.join(tmp, "x"))
             extract(archive, os.path.join(tmp, "x"))
         roots = find_roots(os.path.join(tmp, "x"))
+        if not roots and plugins(os.path.join(tmp, "x")):   # (only code: a moveset or gameplay plugin, recompiled into the game)
+            roots = [os.path.join(tmp, "x")]
         if not roots:
-            raise Error(f"{os.path.basename(archive)} has no files laid out as the game's (fighter/, ui/, sound/, stream;/ ...): "
-                        "it may be a Skyline plugin (code for a Switch), which WindowSmash can't run")
+            raise Error(f"{os.path.basename(archive)} has no files laid out as the game's (fighter/, ui/, sound/, stream;/ ...) "
+                        "and no Skyline plugin (.nro)")
         base = safe_name(name or os.path.splitext(os.path.basename(archive))[0])
         for root in roots:
             leaf = os.path.basename(root)
@@ -1600,7 +1602,7 @@ def _apply(tree, image, lines, state, on, log):
             if targets is None and ONE_SLOT_EFFECT.match(path):
                 skipped.setdefault(name, []).append(path)
                 log(f"{name}: {path.rsplit('/', 1)[1]} left out: one-slot effects need the One Slot Effects plugin "
-                    "(a Switch plugin WindowSmash can't run) - this costume uses the fighter's own effects")
+                    "(not supported yet) - this costume uses the fighter's own effects")
                 continue
             if targets is None:   # a file the game doesn't have: added to its folder's directory
                 why = table.add_file(path, data)

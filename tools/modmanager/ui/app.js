@@ -90,6 +90,10 @@ function render(lib) {
   os.innerHTML = (unsafeOn.length ? `<b>⚠ Not for public online</b>${esc(unsafeOn.join(", "))} ${unsafeOn.length > 1 ? "are" : "is"} on: play offline or with friends who have ${unsafeOn.length > 1 ? "them" : "it"}.` : "")
     + (sameOn.length ? `<b>👥 Online: everyone needs ${sameOn.length > 1 ? "these" : "this"}</b>${esc(sameOn.join(", "))} ${sameOn.length > 1 ? "change" : "changes"} more than a look (results screen, stages, movies or animations): everyone in an online room needs the same, or the match or results screen can hang.` : "");
   $("#apply").disabled = lib.game_running;
+  const unbuilt = lib.unbuilt || [];
+  $("#build-plugins").hidden = !unbuilt.length;
+  $("#build-plugins").disabled = lib.game_running;
+  $("#build-plugins").title = `${unbuilt.join(", ")}: ${unbuilt.length > 1 ? "their plugins aren't" : "its plugin isn't"} in the game yet. Compiles ${unbuilt.length > 1 ? "them" : "it"} in (a few minutes).`;
   $("#vanilla").disabled = lib.game_running || !lib.modded;
 
   const q = $("#lib-filter").value.trim().toLowerCase();
@@ -108,7 +112,9 @@ function render(lib) {
     if (m.new_slots) badges.push('<span class="badge gold">new costume slots</span>');
     if (m.added) badges.push(`<span class="badge">${m.added} new files</span>`);
     if (m.merged) badges.push(`<span class="badge">${m.merged} patches</span>`);
-    if (m.plugins && m.plugins.length) badges.push(`<span class="badge red" title="${esc(m.plugins.join(", ") + ": Switch code WindowSmash can't run (a moveset, a new character). Its models, sounds and art load; what the plugin adds doesn't.")}">needs a Switch plugin</span>`);
+    const plugs = m.plugin_state || [], waiting = plugs.filter((p) => !p.built).map((p) => p.file);
+    if (waiting.length) badges.push(`<span class="badge red" title="${esc(waiting.join(", ") + ": its code (the new moves, or the new character) runs once it's compiled into the game. Turn it on, then press Build plugins into the game (a few minutes).")}">plugin not built yet</span>`);
+    else if (plugs.length) badges.push(`<span class="badge gold" title="${esc(plugs.map((p) => p.file).join(", ") + ": compiled into the game, so its new moves and characters work.")}">plugin built in</span>`);
     if (m.kept_shared) badges.push(`<span class="badge" title="${m.kept_shared} of its files are shared with the fighter's other costumes, and stay shared: made this costume's own, they'd stop those costumes' matches from loading. So its version of them shows on every costume that shares them.">${m.kept_shared} on all costumes</span>`);
     if (m.skipped) badges.push(`<span class="badge red" title="files the game couldn't take: see the clash check">${m.skipped} not loaded</span>`);
     el.innerHTML = `
@@ -188,6 +194,9 @@ $("#apply").addEventListener("click", async () => {
     }
     runJob(await api("/api/apply", {}), () => loadLibrary());
   } catch (e) { fail(e); }
+});
+$("#build-plugins").addEventListener("click", async () => {
+  try { runJob(await api("/api/plugins/build", {}), () => loadLibrary()); } catch (e) { fail(e); }
 });
 $("#vanilla").addEventListener("click", async () => {
   try { runJob(await api("/api/vanilla", {}), () => loadLibrary()); } catch (e) { fail(e); }

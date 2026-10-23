@@ -161,6 +161,25 @@ def built_in(tree, name):
     return False
 
 
+def plugin_state(tree, mod, rels):
+    """[{"file", "module", "built"}] of a mod's code plugins (`rels`: paths in its folder) the game
+    runs: built is whether the game's program has it compiled in (None: never recompiled - the mod
+    was not turned on and applied yet). The plugins WindowSmash provides itself are left out."""
+    from nso import Module
+    record = load_record(Paths(tree))
+    out = []
+    for rel in rels:
+        if os.path.basename(rel).lower() in NATIVE:
+            continue
+        try:
+            entry = record.get(Module(os.path.join(tree, "mods", mod, rel)).build_id)
+        except Exception:   # (not an NRO the recompiler reads)
+            entry = None
+        name = entry and entry["module"]
+        out.append({"file": rel, "module": name, "built": built_in(tree, name) if name else None})
+    return out
+
+
 def hook_targets(p):
     """{module: {offset}} of the hook targets the runtime listed (dump/skyline/hooks.txt)."""
     out = {}

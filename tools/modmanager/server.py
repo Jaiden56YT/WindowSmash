@@ -42,6 +42,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 import mods  # noqa: E402
+import skyline  # noqa: E402
 import packs  # noqa: E402
 
 UI = os.path.join(HERE, "ui")
@@ -317,8 +318,10 @@ class App:
             m["new_slots"] = has_new_slots(folder)
             m["online"] = packs.online_safety(folder)
             m["plugins"] = mods.plugins(folder)
+            m["plugin_state"] = skyline.plugin_state(self.tree.root, m["name"], m["plugins"]) if m["plugins"] else []
         out["unsafe_on"] = [m["title"] or m["name"] for m in out["mods"] if m["enabled"] and m["online"]["level"] == "unsafe"]
         out["same_on"] = [m["title"] or m["name"] for m in out["mods"] if m["enabled"] and m["online"]["level"] == "same"]
+        out["unbuilt"] = [m["title"] or m["name"] for m in out["mods"] if m["enabled"] and any(not p["built"] for p in m["plugin_state"])]
         out["game_running"] = game_running()
         out["root"] = self.tree.root
         out["platform"] = sys.platform
@@ -398,6 +401,15 @@ class App:
             if game_running():
                 raise mods.Error("the game is open: close it first (it reads the mods while it runs)")
             return self.jobs.start("Applying mods", lambda log, progress: mods.apply(t, log))
+        if path == "/api/plugins/build":   # (the turned-on mods' Skyline plugins compiled into the game)
+            if game_running():
+                raise mods.Error("the game is open: close it first (its program is rebuilt)")
+
+            def build(log, progress):
+                mods.apply(t, log)   # (lists the plugins to build, and their select-screen entries)
+                if skyline.build(t.root, 3, log):
+                    raise mods.Error("the game's build failed: see the log")
+            return self.jobs.start("Building the plugins into the game", build)
         if path == "/api/vanilla":
             if game_running():
                 raise mods.Error("the game is open: close it first")

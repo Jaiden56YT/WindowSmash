@@ -264,14 +264,9 @@ CAUTION_CATEGORIES = {"Animation", "Final Smash", "Stages", "Modpacks"}
 
 def listing_works(category="", text="", root_category=""):
     """Whether a GameBanana mod can work in WindowSmash at all (what's known before downloading it):
-    None, or {"level": "no" | "partly", "text"}."""
-    cats = {category, root_category}
-    if "Skyline" in cats:
-        return {"level": "no", "text": "A Skyline plugin is Switch code: it can't run in WindowSmash."}
-    if cats & {"Movesets", "Moveset", "Custom Moveset Skins"} or (("Gameplay" in cats or re.search(r"\bmoveset\b", text or "", re.I))
-                                                                   and not re.search(r"\bskin\b.*\bonly\b", text or "", re.I)):
-        return {"level": "partly", "text": "Movesets come with a Skyline code plugin (plugin.nro), which WindowSmash can't run: the new "
-                                           "moves won't work - only the mod's models, sounds and art would load."}
+    None, or {"level": "no" | "partly", "text"}. Movesets and new characters do: their Skyline
+    plugins are recompiled into the game when they're applied (tools/skyline.py), and once one is
+    installed the clash check says if it isn't built in yet."""
     return None
 
 
@@ -344,15 +339,18 @@ def check(tree, names):
             out.append({"level": "error", "title": f"{n} isn't installed", "detail": "Install it first.", "mods": [n]})
             continue
         sums[n] = mod_summary(folder)
-    # code plugins (Skyline .nro): need a Switch
+    # code plugins (Skyline .nro): recompiled into the game when applied; only one that isn't built in
+    # yet doesn't run (a new plugin needs the game rebuilt: the Build plugins button)
     for n, s in sums.items():
-        if s["plugins"]:
-            far = sorted({int(m.group(1)) for d in s["new_dirs"] or [] if (m := re.search(r"/c(\d+)(?:/|$)", d)) and int(m.group(1)) >= 100})
-            out.append({"level": "warn", "title": f"{n} needs a Skyline code plugin WindowSmash can't run",
-                        "detail": "Its " + ", ".join(s["plugins"][:3]) + " is Switch code (a moveset or a new character): what it does "
-                                  "won't be in the game - new moves won't work, only the mod's models, sounds and art load." +
-                                  (f" Its costume slots c{far[0]}-c{far[-1]} are for the character the plugin adds, so they can't be "
-                                   "picked here." if far else ""),
+        if not s["plugins"]:
+            continue
+        import skyline
+        waiting = [p["file"] for p in skyline.plugin_state(tree.root, n, s["plugins"]) if not p["built"]]
+        if waiting:
+            out.append({"level": "warn", "title": f"{n}: its plugin isn't built into the game yet",
+                        "detail": "Its " + ", ".join(waiting[:3]) + " (the new moves, or the new character) runs once it's "
+                                  "compiled into the game: press Build plugins into the game (a few minutes). Until then only the mod's "
+                                  "models, sounds and art load.",
                         "mods": [n]})
         if s["new_dirs"] is None:
             out.append({"level": "error", "title": f"{n}: its config.json can't be read",
