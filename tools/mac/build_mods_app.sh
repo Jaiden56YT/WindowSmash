@@ -1,10 +1,12 @@
 #!/bin/bash
 # Builds build-mac/WindowSmash Mods.app (tools/mac/ModsShell.swift: a window around the mod manager,
 # tools/modmanager/server.py) with the Command Line Tools' Swift, and puts it in ~/Applications as
-# "WindowSmash Mods" (Spotlight finds it). Run from anywhere.
+# "WindowSmash Mods" (Spotlight finds it): moved there, so there's one app, not a second copy
+# left in build-mac. Run from anywhere.
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 app="$root/build-mac/WindowSmash Mods.app"
+rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 swiftc -parse-as-library -O -swift-version 5 -target arm64-apple-macos14.0 \
     "$root/tools/mac/ModsShell.swift" -o "$app/Contents/MacOS/WindowSmash Mods"
@@ -36,5 +38,5 @@ PLIST
 codesign --force --sign - "$app" 2>/dev/null || true
 mkdir -p "$HOME/Applications"
 rm -rf "$HOME/Applications/WindowSmash Mods.app"
-cp -R "$app" "$HOME/Applications/WindowSmash Mods.app"
-echo "built: $app (and ~/Applications/WindowSmash Mods.app)"
+mv "$app" "$HOME/Applications/WindowSmash Mods.app"
+echo "built: ~/Applications/WindowSmash Mods.app"

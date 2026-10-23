@@ -149,7 +149,7 @@ def sync(tree, log=print):
             f.write(text)
     missing = [n for n in names if not built_in(tree, n)]
     if missing:
-        log("not in the game yet (build them: Mods app > Rebuild, or tools/skyline.py build): " + ", ".join(missing))
+        log("not in the game yet (build them: Mods app > Build plugins into the game, or tools/skyline.py build): " + ", ".join(missing))
     return names
 
 
