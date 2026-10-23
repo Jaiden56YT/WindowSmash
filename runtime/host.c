@@ -771,6 +771,19 @@ static u64 resolve(const char *name, int weak) {
     return addr;
 }
 
+/* Bind an exported name to a native function, for references linked from now on: the address it
+ * had (0 if nothing defines it - then it stays as it was). The wrapper calls that one itself. */
+u64 rt_wrap_symbol(const char *name, GuestFn *fn) {
+    struct Sym *s = sym_slot(name);
+    u64 real = s->name && !s->missing ? s->addr : 0;
+    if (real) s->addr = rt_native(fn, name);
+    return real;
+}
+
+#ifdef __APPLE__
+void discord_init(void);   /* (macos/discord.c) */
+#endif
+
 /* ---- loading --------------------------------------------------------------------- */
 int main(int argc, char **argv);
 static DWORD WINAPI guest_main(LPVOID unused);
@@ -890,6 +903,9 @@ static void load(const char *dir) {
         fprintf(stderr, "cannot map the native-function region\n");
         exit(2);
     }
+#ifdef __APPLE__
+    discord_init();   /* (before the modules are linked: it wraps some of main's exports) */
+#endif
     for (u32 m = 0; m < module_count; m++) relocs += bind_module(m);
     printf("loaded %u modules: %u functions, %u exported symbols, %u symbol relocations; "
            "%u symbols bound to native code, %u left undefined (%u NROs recompiled for loading later)\n",
@@ -899,17 +915,26 @@ static void load(const char *dir) {
 /* nn::ro: load the recompiled module built from the NRO with this image - map it at its
  * fixed address, link it against everything loaded so far and run its initialiser. Returns
  * its load address, or 0 if no recompiled module matches the image. */
+static u64 load_nro(Cpu *c, const char *id, const char *name);
+void skyline_module_loaded(const char *name, u64 base);   /* (hle_skyline.c: the plugins' hooks into it) */
+
 u64 rt_load_nro(Cpu *c, u64 image) {
-    static SRWLOCK lock = SRWLOCK_INIT;
     char id[65];
     for (int i = 0; i < 32; i++) snprintf(id + 2 * i, 3, "%02X", *P(u8, image + 0x40 + i));
     for (int n = 64; n > 1 && id[n - 1] == '0'; n--) id[n - 1] = 0;
+    return load_nro(c, id, NULL);
+}
+
+/* Load the recompiled NRO module with this build id (or, with id NULL, this name), as
+ * rt_load_nro does. */
+static u64 load_nro(Cpu *c, const char *id, const char *name) {
+    static SRWLOCK lock = SRWLOCK_INIT;
     AcquireSRWLockExclusive(&lock);
     for (u32 m = BOOT_MODULES; m < module_count; m++)
-        if (!strcmp(modules[m]->build_id, id)) { ReleaseSRWLockExclusive(&lock); return modules[m]->base; }
+        if (id ? !strcmp(modules[m]->build_id, id) : !strcmp(modules[m]->name, name)) { ReleaseSRWLockExclusive(&lock); return modules[m]->base; }
     const RtModule *mod = NULL;
     for (u32 k = 0; k < rt_nro_count && !mod; k++)
-        if (!strcmp(rt_nro_modules[k]->build_id, id)) mod = rt_nro_modules[k];
+        if (id ? !strcmp(rt_nro_modules[k]->build_id, id) : !strcmp(rt_nro_modules[k]->name, name)) mod = rt_nro_modules[k];
     if (!mod || module_count == MAX_MODULES) { ReleaseSRWLockExclusive(&lock); return 0; }
     u32 m = module_count;
     modules[m] = mod;
@@ -923,7 +948,47 @@ u64 rt_load_nro(Cpu *c, u64 image) {
            mod->name, mod->base, mod->func_count, mod->export_count, relocs);
     fflush(stdout);
     if (mod->init != mod->base) rt_call(c, mod->init);
+    skyline_module_loaded(mod->name, mod->base);
     return mod->base;
+}
+
+/* Skyline plugins (hle_skyline.c): a recompiled NRO loaded by its module name, not by an image the
+ * game hands over; 0 if no such module was recompiled in. */
+u64 rt_load_nro_named(Cpu *c, const char *name) { return load_nro(c, NULL, name); }
+
+/* The address a loaded module exports a name at, looked up in that module alone (every plugin
+ * exports its own `main`); 0 if it does not. */
+u64 rt_module_export(u64 base, const char *symbol) {
+    for (u32 m = 0; m < module_count; m++)
+        if (modules[m]->base == base)
+            for (u32 i = 0; i < modules[m]->export_count; i++)
+                if (!strcmp(modules[m]->exports[i].name, symbol)) return modules[m]->exports[i].addr;
+    return 0;
+}
+
+/* What a weak reference to the name binds to: an export, else a native implementation (HLE),
+ * else 0 - as nn::ro::LookupSymbol finds a name. */
+u64 rt_resolve_weak(const char *name) { return resolve(name, 1); }
+
+/* Skyline's A64HookFunction, for the calls that go through the dispatch tables: every indirect
+ * call to `target` (a function entry of a loaded module) goes to `replace` from now on. Returns
+ * the address that still reaches the function as it was (the hook's "original"), 0 if `target`
+ * is not a function entry. Direct calls the recompiler made between functions are compiled in
+ * and do not see the hook (docs/SKYLINE.md: those need the function wrapped at build time). */
+u64 rt_hook_function(u64 target, u64 replace) {
+    static SRWLOCK lock = SRWLOCK_INIT;
+    GuestFn *with = rt_lookup(replace);
+    AcquireSRWLockExclusive(&lock);
+    u64 slot = (target - SLOT_BASE) >> SLOT_SHIFT;
+    u16 slot_m = slot < SLOT_COUNT ? slot_module[slot] : 0;
+    u64 off = slot_m ? target - modules[slot_m - 1]->base : ~0ull;
+    GuestFn **at = slot_m && off < modules[slot_m - 1]->text_size && !(off & 3) ? &code[slot_m - 1][off >> 2] : NULL;
+    if (!at || !*at) { ReleaseSRWLockExclusive(&lock); return 0; }
+    u64 original = rt_native(*at, "original of a hooked function");
+    __atomic_store_n(at, with, __ATOMIC_RELEASE);
+    memset((void *)lookup_cache, 0, sizeof lookup_cache);
+    ReleaseSRWLockExclusive(&lock);
+    return original;
 }
 
 /* ---- start-up -------------------------------------------------------------------- */

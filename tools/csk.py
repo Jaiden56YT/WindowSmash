@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""New characters on the select screen: the entries Skyline plugins add through the CSK
+Collection's API (add_chara_db_entry_info, add_chara_layout_db_entry_info), which the runtime writes
+to dump/skyline/csk.json as the plugins load (runtime/hle_skyline.c), put into the game's
+ui_chara_db.prc and ui_layout_db.prc (tools/mods.py does it when it applies the mods).
+
+Usage:
+  csk.py show [--tree <dir>]                       the entries the plugins added
+  csk.py apply <ui_chara_db.prc> <csk.json> <out>  (for testing)
+
+An entry with a clone_from id is a copy of that entry with the given fields set; one with the id
+of an entry the game has changes it; any other is a copy of the same fighter's entry (or the first)
+with the fields set.
+A field the entry sets that the database's entries lack is left out, but for the CSK Collection's
+color_start_index: the entry's colors are the fighter's costumes from there on (cXX_index). Map fields (c00_index...,
+characall_label_c00...) come keyed by their names' hash40s."""
+import copy
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import prc  # noqa: E402
+
+CHARA_DB = "ui/param/database/ui_chara_db.prc"
+LAYOUT_DB = "ui/param/database/ui_layout_db.prc"
+KINDS = {"ui_chara_db": ("ui_chara_id", CHARA_DB), "ui_layout_db": ("ui_layout_id", LAYOUT_DB)}
+TYPES = {"string": prc.STRING, "hash40": prc.HASH, "short": prc.I16, "int": prc.I32, "sbyte": prc.I8,
+         "byte": prc.U8, "bool": prc.BOOL, "float": prc.FLOAT}
+DB_ROOT = prc.hash40("db_root")
+COLOR_START = prc.hash40("color_start_index")
+
+
+def load(tree):
+    path = os.path.join(tree, "dump", "skyline", "csk.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return []
+
+
+def targets(entries):
+    """The database files the entries change."""
+    return sorted({KINDS[e["kind"]][1] for e in entries if e.get("kind") in KINDS})
+
+
+def key(name):
+    return int(name, 16) if name.startswith("0x") else prc.hash40(name)
+
+
+def value(kind, v):
+    if kind == prc.HASH:
+        return int(v, 16) if isinstance(v, str) else v
+    return v
+
+
+def apply(data, entries, db_kind):
+    """A database's bytes with the entries of db_kind ("ui_chara_db", "ui_layout_db") in it; and
+    notes on what was done."""
+    id_name, _ = KINDS[db_kind]
+    id_key = prc.hash40(id_name)
+    root = prc.read(data)
+    rows = dict(root[1]).get(DB_ROOT)
+    if not rows or rows[0] != prc.LIST:
+        raise prc.Error("no db_root list")
+    rows = rows[1]
+    notes = []
+
+    def find(h):
+        for i, (_kind, st) in enumerate(rows):
+            if dict(st).get(id_key, (None, None))[1] == h:
+                return i
+        return None
+
+    for e in entries:
+        if e.get("kind") != db_kind:
+            continue
+        new_id = int(e[id_name], 16)
+        at = find(new_id)
+        if at is not None:
+            row = rows[at]
+        else:
+            base = find(int(e["clone_from"], 16)) if e.get("clone_from") else None
+            if base is None:   # (else the same fighter's entry, or the same character's for a layout)
+                like = e.get("set", {}).get("fighter_kind" if db_kind == "ui_chara_db" else "ui_chara_id")
+                like_key = prc.hash40("fighter_kind" if db_kind == "ui_chara_db" else "ui_chara_id")
+                if like and db_kind == "ui_layout_db":   # (the new character's own layout is not there: its fighter's)
+                    like = None
+                for i, (_kind, st) in enumerate(rows):
+                    if like and dict(st).get(like_key, (None, None))[1] == int(like[1], 16):
+                        base = i
+                        break
+            row = copy.deepcopy(rows[base if base is not None else 0])
+            fields = row[1]
+            for i, (k, p) in enumerate(fields):
+                if k == id_key:
+                    fields[i] = (k, (prc.HASH, new_id))
+            rows.append(row)
+        fields = row[1]
+        index = {k: i for i, (k, _p) in enumerate(fields)}
+        sets = {key(name): (TYPES[tname], v) for name, (tname, v) in e.get("set", {}).items()}
+        # CSK's color_start_index (not a field of the game's): the entry's colors are that fighter's
+        # costumes from there on (c120...), which the game's cXX_index fields say per color
+        start = sets.pop(COLOR_START, None)
+        if start is not None and start[1]:
+            count = sets.get(prc.hash40("color_num"), (None, None))[1] or dict(fields).get(prc.hash40("color_num"), (0, 8))[1]
+            for c in range(count):
+                sets[prc.hash40(f"c{c:02d}_index")] = (prc.U8, start[1] + c)
+        for k, (t, v) in sets.items():
+            if k in index:
+                t = fields[index[k]][1][0]   # (the database's own type for that field)
+                fields[index[k]] = (k, (t, value(t, v)))
+            else:
+                notes.append(f"{db_kind}: field {k:#x} left out (the game's entries have no such field)")
+        notes.append(f"{db_kind}: {'changed' if at is not None else 'added'} {e[id_name]}"
+                     + (f" (a copy of {e['clone_from']})" if at is None and e.get("clone_from") else ""))
+    return prc.write(root), notes
+
+
+def main():
+    if len(sys.argv) >= 2 and sys.argv[1] == "show":
+        tree = sys.argv[sys.argv.index("--tree") + 1] if "--tree" in sys.argv else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        print(json.dumps(load(tree), indent=1))
+    elif len(sys.argv) == 5 and sys.argv[1] == "apply":
+        with open(sys.argv[2], "rb") as f:
+            data = f.read()
+        with open(sys.argv[3], encoding="utf-8") as f:
+            entries = json.load(f)
+        kind = "ui_layout_db" if "layout" in os.path.basename(sys.argv[2]) else "ui_chara_db"
+        out, notes = apply(data, entries, kind)
+        with open(sys.argv[4], "wb") as f:
+            f.write(out)
+        print("\n".join(notes))
+    else:
+        sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    main()

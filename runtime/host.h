@@ -56,6 +56,10 @@ _Noreturn void rt_fatal(const char *fmt, ...);         /* message + guest backtr
 extern int rt_trace;
 extern const char *rt_data_dir;                        /* where the module images (and romfs.cfg) live */
 u64 rt_load_nro(Cpu *c, u64 image);                     /* load the recompiled NRO; 0 if none matches */
+u64 rt_load_nro_named(Cpu *c, const char *name);        /* the same by module name (Skyline plugins) */
+u64 rt_module_export(u64 base, const char *symbol);     /* a loaded module's own export, or 0 */
+u64 rt_resolve_weak(const char *name);                  /* export or native implementation, or 0 */
+u64 rt_hook_function(u64 target, u64 replace);          /* redirect indirect calls; returns the original */
 void account_save_id(u64 uid[2]);                       /* (hle_env.c) the id naming a user's save folder */
 
 /* ---- kernel ---------------------------------------------------------------------- */

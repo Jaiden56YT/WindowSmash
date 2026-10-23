@@ -203,6 +203,27 @@ def resolve_wraps(mod, base, sizes, name):
     return forward, moved
 
 
+def hookable(name):
+    """Offsets in module `name` that Skyline plugins hook (dump/skyline/hooks.txt, which the runtime
+    writes: "<module> <offset>" a line). Each becomes a function its direct callers also reach
+    through the dispatch table, where a hook goes (lift.py)."""
+    path = os.path.join(TREE, "dump", "skyline", "hooks.txt")
+    out = set()
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                p = line.split()
+                if len(p) >= 2 and p[0] == name:
+                    out.add(int(p[1], 16))
+    return sorted(out)
+
+
+def module_fingerprint(fp, name):
+    """tools_fingerprint, with the module's hook targets: a new one generates its C again."""
+    hooks = hookable(name)
+    return fp if not hooks else modcache.fingerprint(fp + "\nhooks " + " ".join(f"{h:x}" for h in hooks))
+
+
 def tools_fingerprint():
     """What the generated C depends on besides the module and its address (modcache)."""
     import lift
@@ -221,10 +242,72 @@ def write_if_changed(path, text):
     return True
 
 
-def _init(image_path, entries, base, forward, setjmp=None, pads=None):
+def _init(image_path, entries, base, forward, setjmp=None, pads=None, patches=None):
     f = open(image_path, "rb")
     _state["img"] = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-    _state["args"] = (entries, base, forward, setjmp, pads)
+    _state["args"] = (entries, base, forward, setjmp, pads, patches)
+
+
+# Code patches, as ARCropolis (github.com/Raytwo/ARCropolis, src/fixes.rs) makes them on the
+# console, for costume slots a mod adds (c08 and up, tools/mods.py): the game checks a color
+# against 8 in places, and aborts (or Inkling reads past its ink table) for a higher one.
+# {module build id: [(offset, original word, [words], what)]}: one word replaces the instruction
+# at that offset; with several, the first ones run before the last, as an inline hook would (a
+# branch to the offset runs them too). A patch whose original word is not there is left out.
+CODE_PATCHES = {
+    "21450C647B8C5940ED5B68218EA128FD3C5D597D": [   # main, 13.0.5 (ARCropolis' list is for 13.0.5, though it says 13.0.2)
+        # Pyra/Mythra (Aegis): cmp xN, #8 -> #256. ARCropolis' 0x183527c, a b.eq, is a slip for 0x183526c.
+        (0x183526C, 0xF100227F, [0xF104027F], "cmp x19, #256 (Aegis)"),
+        (0x18355BC, 0xF100227F, [0xF104027F], "cmp x19, #256 (Aegis)"),
+        (0x18355D8, 0xF100211F, [0xF104011F], "cmp x8, #256 (Aegis)"),
+        (0x18359A8, 0xF10022FF, [0xF10402FF], "cmp x23, #256 (Aegis)"),
+        (0x1835E3C, 0xF100211F, [0xF104011F], "cmp x8, #256 (Aegis)"),
+        (0x1836594, 0xF100227F, [0xF104027F], "cmp x19, #256 (Aegis)"),
+        (0x18368B0, 0xF100213F, [0xF104013F], "cmp x9, #256 (Aegis)"),
+        (0x1A1CDF0, 0xF100211F, [0xF104011F], "cmp x8, #256 (Aegis)"),
+        (0x1A1CE34, 0xF100211F, [0xF104011F], "cmp x8, #256 (Aegis)"),
+        # Terry
+        (0x14DE31C, 0x7100213F, [0x7104013F], "cmp w9, #256 (Terry)"),
+        (0x14E1624, 0x710022FF, [0x710402FF], "cmp w23, #256 (Terry)"),
+        (0x14E17B0, 0x7100211F, [0x7104011F], "cmp w8, #256 (Terry)"),
+        # Tourney Mode
+        (0x1A56084, 0x94603F7B, [0x52800020], "mov w0, #1 (Tourney)"),
+        (0x1A561B4, 0xF100211F, [0xF104011F], "cmp x8, #256 (Tourney)"),
+        (0x1A55A74, 0x7100215F, [0x7104015F], "cmp w10, #256 (Tourney)"),
+        (0x1A55B0C, 0x7100201F, [0x7104001F], "cmp w0, #256 (Tourney)"),
+        (0x1A55B38, 0xF100201F, [0xF104001F], "cmp x0, #256 (Tourney)"),
+        (0x1A55AA0, 0xF100201F, [0xF104001F], "cmp x0, #256 (Tourney)"),
+        (0x1A55AD4, 0x7100217F, [0x7104017F], "cmp w11, #256 (Tourney)"),
+        # A player whose color is over 7 is taken for a cheat ("An error has been detected.
+        # Disconnecting.", pop_online_cheat_error) when Classic Mode starts: not in ARCropolis' list
+        (0x1799ACC, 0x71001D1F, [0x7103FD1F], "cmp w8, #255 (the player check)"),
+        # Classic Mode: the color it keeps for the run, modulo 8 (set_global_color_for_classic_mode)
+        (0x23DA5CC, 0xB9001AA9, [0x12000929, 0xB9001AA9], "and w9, w9, #7 before str w9, [x21, #0x18] (Classic)"),
+        # Inkling: no color check before the ink table (inkling_patch), the ink cleared with
+        # color modulo 8 (clear_ink_patch), and two calls skipped for c10+ (inkling_c10plus)
+        (0x35BC504, 0x7100229F, [0xD503201F], "nop: cmp w20, #8 (Inkling)"),
+        (0x35BC508, 0x54003D62, [0xD503201F], "nop: b.hs (Inkling)"),
+        (0x35BCF90, 0x7100231F, [0x12000B18, 0x7100231F], "and w24, w24, #7 before cmp w24, #8 (Inkling ink)"),
+        (0xB0B614, 0xF9400008, [0x1400000E], "b +0x38 (Inkling c10+)"),
+        # Inkling's ink color list (8 colors), read with the color in three places: the index wraps
+        # instead of aborting past the end (not in ARCropolis' list; with Inkling c08 the match
+        # stopped loading, and refilling ink stopped the game)
+        (0x46D904, 0x93407E68, [0x93407E68, 0x9ACA090B, 0x9B0AA168], "sxtw x8, w19; udiv x11, x8, x10; msub x8, x11, x10, x8 (ink color)"),
+        (0x46DA04, 0x93407E88, [0x93407E88, 0x9ACA090B, 0x9B0AA168], "sxtw x8, w20; udiv x11, x8, x10; msub x8, x11, x10, x8 (ink color)"),
+        (0x69378C, 0x2A1303E8, [0x2A1303E8, 0x9ACA090B, 0x9B0AA168], "mov w8, w19; udiv x11, x8, x10; msub x8, x11, x10, x8 (ink color)"),
+    ],
+}
+
+
+def code_patches(mod, name):
+    """offset -> [words] of CODE_PATCHES for this module, each checked against its code."""
+    out = {}
+    for off, was, words, what in CODE_PATCHES.get(mod.build_id, []):
+        if mod.u32(off) == was:
+            out[off] = words
+        else:
+            print(f"{name}: code patch at {off:#x} ({what}) left out: {mod.u32(off):08x} is there, not {was:08x}")
+    return out
 
 
 def unwind_jumpto(mod, found):
@@ -296,10 +379,70 @@ def _emit(args):
     return name, ext - own, insns, max(s for _, s in funcs) // 4, bad, lifter.unresolved
 
 
+def branch_target(w, pc):
+    """Where a direct branch (b, b.cond, cbz/cbnz, tbz/tbnz) at pc goes; None for anything else."""
+    if w & 0x7C000000 == 0x14000000 and not w >> 31:                    # b
+        imm, bits = w & 0x3FFFFFF, 26
+    elif w & 0xFF000010 == 0x54000000 or w & 0x7E000000 == 0x34000000:  # b.cond, cbz/cbnz
+        imm, bits = (w >> 5) & 0x7FFFF, 19
+    elif w & 0x7E000000 == 0x36000000:                                  # tbz/tbnz
+        imm, bits = (w >> 5) & 0x3FFF, 14
+    else:
+        return None
+    return pc + (imm - (1 << bits) if imm >> (bits - 1) else imm) * 4
+
+
+def tail_entries(mod, found):
+    """A module without an unwind table (a Skyline plugin: Rust built with panic=abort) has its
+    functions only from calls, symbols and relocations; a function reached by tail branches
+    alone is not among them. Each function runs to the next entry, so a branch that leaves the
+    stretch it is in goes to another function: its target is one, until no branch leaves."""
+    lo, hi = mod.text.mem, mod.text.end
+    branches = []
+    for pc in range(lo, hi, 4):
+        t = branch_target(mod.u32(pc), pc)
+        if t is not None and lo <= t < hi:
+            branches.append((pc, t))
+    # Functions whose address the code takes itself (adr, or adrp + add: fn pointers handed to
+    # Smashline, Skyline's hooks, closures) are reached only by indirect calls. Not a jump
+    # table's anchor (adr xA, then add xA, xA, wE, lsl #2 a few instructions on).
+    for pc in range(lo, hi, 4):
+        w = mod.u32(pc)
+        if w & 0x1F000000 != 0x10000000:
+            continue
+        rd, imm = w & 31, (((w >> 5) & 0x7FFFF) << 2) | ((w >> 29) & 3)
+        imm -= (1 << 21) if imm >> 20 else 0
+        if w >> 31:   # adrp: with the add that follows
+            nxt = next((mod.u32(q) for q in range(pc + 4, min(pc + 16, hi), 4)
+                        if mod.u32(q) & 0xFFC003E0 == 0x91000000 | rd << 5), None)
+            if nxt is None or (nxt >> 22) & 1:
+                continue
+            t = (pc & ~0xFFF) + (imm << 12) + ((nxt >> 10) & 0xFFF)
+        else:
+            t = pc + imm
+            if any(mod.u32(q) & 0xFFE0FC00 == 0x8B000800 and (mod.u32(q) >> 5) & 31 == rd
+                   for q in range(pc + 4, min(pc + 20, hi), 4)):
+                continue
+        if lo <= t < hi and not t & 3 and t not in found:
+            found[t] = {"adr"}
+    while True:
+        marks = sorted(set(found) | {lo, hi})
+        added = 0
+        for pc, t in branches:
+            k = bisect.bisect_right(marks, pc) - 1
+            if not marks[k] <= t < marks[k + 1] and t not in found:
+                found[t] = {"b"}
+                added += 1
+        if not added:
+            return
+
+
 def load(path):
     """(module, {entry: sources}, [(entry, size)]) with every function that has code."""
     mod = Module(path)
     found, sizes = discover(mod)
+    if not any("eh" in src for src in found.values()):
+        tail_entries(mod, found)
     funcs = sorted((a, sizes[a]) for a, src in found.items() if "eh" in src or "plt" in src)
     # Hand-written assembly (system-call wrappers, memcpy, setjmp, ...) has no unwind entry.
     # Such a routine runs from its entry to the next known entry or described function,
@@ -426,9 +569,28 @@ def emit(path, roots, out, depth, sample=0):
     print(f"wrote {out}: {len(bodies)} functions, {len(stubs)} stubs")
 
 
+def unwind_tables(path):
+    """For a module without an unwind table (a Skyline plugin): (offset, bytes, header size) of
+    the ones tools/plugin_eh.py makes, which go after its image; else None."""
+    start, end = Module(path).eh_frame_hdr
+    if end > start:
+        return None
+    mod, found, funcs = load(path)
+    import plugin_eh
+    return plugin_eh.tables(mod, funcs)
+
+
 def image(path, out):
     mod, base = Module(path), base_of(path)
     img = bytearray(mod.image) + bytes(mod.mem_end - len(mod.image))
+    eh = unwind_tables(path) if path.endswith(".nro") else None
+    if eh:
+        import plugin_eh
+        at, data, hdr_size = eh
+        img = img.ljust(at, b"\0") + data
+        o, patch = plugin_eh.mod0_patch(mod, at, hdr_size)
+        img[o:o + len(patch)] = patch
+        print(f"{module_key(path)}: unwind tables made for it ({len(data):,} bytes after its image)")
     n = 0
     for off, typ, _sym, addend in mod.relocs:
         if typ == 1027:
@@ -439,7 +601,7 @@ def image(path, out):
     print(f"wrote {out}: {len(img):,} bytes, {n:,} base relocations applied for {base:#x}")
 
 
-def module_table(mod, name, base, funcs, missing, moved=()):
+def module_table(mod, name, base, funcs, missing, moved=(), hooks=()):
     """C source for a module's loader tables: functions, exports, and symbol relocations; and
     for each wrapped function found elsewhere (resolve_wraps), the original under the name
     the runtime's wrapper calls."""
@@ -451,13 +613,14 @@ def module_table(mod, name, base, funcs, missing, moved=()):
         index = imports.setdefault(sname, (len(imports), info >> 4 == 2))[0]
         relocs.append((off, addend, index))
     defined = [a for a, _ in funcs]
+    hooks = set(hooks)
     out = ['#include "module.h"\n\n']
-    out += [f"GuestFn f_{base + a:x};\n" for a in defined]
+    out += [f"GuestFn f_{base + a:x}{'_orig' if a in hooks else ''};\n" for a in defined]
     out += [f'void f_{base + a:x}(Cpu *c) {{ rt_trap(c, 0x{base + a:X}ull, "no code at call target"); }}\n'
             for a in sorted(missing)]
     out += [f"GuestFn f_{at:x}_orig;\nvoid f_{a:x}_orig(Cpu *c) {{ f_{at:x}_orig(c); }}\n" for a, at in moved]
     out.append("\nstatic const RtFunc funcs[] = {\n")
-    out += [f"    {{0x{base + a:X}ull, f_{base + a:x}}},\n" for a in defined]
+    out += [f"    {{0x{base + a:X}ull, f_{base + a:x}{'_orig' if a in hooks else ''}}},\n" for a in defined]
     out.append("};\nstatic const RtSym exports[] = {\n")
     out += [f'    {{"{n}", 0x{base + v:X}ull}},\n' for n, v, _s, _i, _x in mod.exports]
     out.append("};\nstatic const char *const imports[] = {\n")
@@ -466,8 +629,10 @@ def module_table(mod, name, base, funcs, missing, moved=()):
     out.append("static const RtReloc relocs[] = {\n")
     out += [f"    {{0x{o:X}ull, {a}, {i}}},\n" for o, a, i in relocs]
     out.append("    {0, 0, 0}\n};\n\n")
+    eh = unwind_tables(mod.path) if mod.path.endswith(".nro") else None
+    size = eh[0] + len(eh[1]) if eh else mod.mem_end
     out.append(f"const RtModule rt_module_{name} = {{\n"
-               f'    "{name}", 0x{base:X}ull, 0x{mod.mem_end:X}ull, 0x{mod.text.end:X}ull, 0x{base + mod.dyn.get(12, 0):X}ull,\n'
+               f'    "{name}", 0x{base:X}ull, 0x{size:X}ull, 0x{mod.text.end:X}ull, 0x{base + mod.dyn.get(12, 0):X}ull,\n'
                f"    funcs, {len(defined)}, exports, {len(mod.exports)}, imports, import_weak, {len(imports)}, "
                f'relocs, {len(relocs)}, "{mod.build_id}",\n}};\n')
     return "".join(out), len(imports), len(relocs)
@@ -475,6 +640,25 @@ def module_table(mod, name, base, funcs, missing, moved=()):
 
 def build(path, outdir, jobs, per_file):
     mod, found, funcs = load(path)
+    # A module without an unwind table (a Skyline plugin) is LLVM's code with its machine
+    # outliner's helpers, which a `bl` reaches and which use the caller's callee-saved registers
+    # as their own: lift.py's register cache (callee-saved registers kept in C locals across a
+    # call) does not hold for those. Every register in the context, as with SSBU_REGCACHE=0.
+    plain = not any("eh" in src for src in found.values())
+    regcache_was = os.environ.get("SSBU_REGCACHE")
+    if plain:
+        os.environ["SSBU_REGCACHE"] = "0"
+    try:
+        _build(mod, found, funcs, path, outdir, jobs, per_file)
+    finally:
+        if plain:
+            if regcache_was is None:
+                del os.environ["SSBU_REGCACHE"]
+            else:
+                os.environ["SSBU_REGCACHE"] = regcache_was
+
+
+def _build(mod, found, funcs, path, outdir, jobs, per_file):
     name, base = module_key(path), base_of(path)
     os.makedirs(outdir, exist_ok=True)
     modcache.clear_stamp(outdir)   # (until generated and compiled again)
@@ -483,8 +667,12 @@ def build(path, outdir, jobs, per_file):
     forward.update(unwind_jumpto(mod, found))
     wraps, moved = resolve_wraps(mod, base, dict(funcs), name)
     forward.update(wraps)
+    sizes = dict(funcs)
+    hooks = [off for off in hookable(name) if off in sizes and off not in forward]
+    forward.update({off: ("hook", None) for off in hooks})
     from eh import landing_pads
     pads = landing_pads(mod)
+    patches = code_patches(mod, name)
     chunks, cur, count = [], [], 0
     for a, size in funcs:   # a function bigger than the budget gets a file to itself
         if cur and count + size // 4 > per_file:
@@ -496,14 +684,14 @@ def build(path, outdir, jobs, per_file):
         chunks.append(cur)
     defined = {a for a, _ in funcs}
     missing, manifest, bad, unresolved = set(), [], 0, []
-    with Pool(jobs, _init, (image_file(mod), set(found), base, forward, setjmp_targets(mod), pads)) as pool:
+    with Pool(jobs, _init, (image_file(mod), set(found), base, forward, setjmp_targets(mod), pads, patches)) as pool:
         tasks = [(i, c, outdir) for i, c in enumerate(chunks)]
         for fname, ext, insns, biggest, b, unres in pool.imap_unordered(_emit, tasks):
             missing |= ext - defined
             manifest.append((fname, insns, biggest))
             bad += b
             unresolved += unres
-    table, imports, relocs = module_table(mod, name, base, funcs, missing, moved)
+    table, imports, relocs = module_table(mod, name, base, funcs, missing, moved, hooks)
     write_if_changed(os.path.join(outdir, "g_module.c"), table)
     keep = {n for n, _i, _b in manifest} | {"g_module.c"}
     for old in os.listdir(outdir):   # drop files left over from a different partitioning
@@ -513,7 +701,7 @@ def build(path, outdir, jobs, per_file):
     size = sum(os.path.getsize(os.path.join(outdir, n)) for n, _i, _b in manifest)
     print(f"{name}: {len(manifest)} files, {size / 1048576:,.0f} MB of C, {len(defined):,} functions, "
           f"{sum(i for _n, i, _b in manifest):,} instructions; {bad} untranslated, {len(missing)} calls to nowhere, "
-          f"{len(unresolved)} unresolved jump tables, {len(forward)} replaced natively; "
+          f"{len(unresolved)} unresolved jump tables, {len(forward)} replaced natively, {len(patches)} code patches, {len(hooks)} hookable; "
           f"{imports:,} symbols referenced by {relocs:,} relocations")
 
 
@@ -642,8 +830,9 @@ def build_all(exefs, out, jobs, compile_c=True):
     targets = {name: os.path.join(out, "nro", name) if os.path.dirname(nso) == NRO_DIR else os.path.join(out, name)
                for name, nso in paths.items()}
     shown = progress.Build(min(jobs, 16), compile=compile_c, link=progress.LINK if compile_c else None)
+    fps = {name: module_fingerprint(fp, name) for name in mods}
     for name, mod in mods.items():
-        current = modcache.build_info(targets[name]) == (mod.build_id, MODULES[name], name, fp)
+        current = modcache.build_info(targets[name]) == (mod.build_id, MODULES[name], name, fps[name])
         shown.module(name, (mod.text.end - mod.text.mem) // 4,
                      [(t[0], t[3]) for t in stale_files(targets[name])] if current else None)
     build_ids = {name: mod.build_id for name, mod in mods.items()}
@@ -659,18 +848,18 @@ def build_all(exefs, out, jobs, compile_c=True):
                 image(nso, img)
             info = modcache.build_info(target)
             if not info or info[:2] != (build_id, base):   # another tree may have built it
-                src = modcache.find_built(build_id, base, target, fp)
+                src = modcache.find_built(build_id, base, target, fps[name])
                 if src:
                     linked, copied = modcache.adopt(src, target)
                     print(f"{name}: build files of {src} ({linked} linked, {copied} copied)")
                     info = modcache.build_info(target)
-            if info == (build_id, base, name, fp):
+            if info == (build_id, base, name, fps[name]):
                 print(f"{name}: C up to date (build id {build_id[:16]}, same tools)")
                 reused += 1
             else:
                 build(nso, target, jobs, 40000)
             if not compile_c:
-                modcache.write_stamp(target, build_id, base, name, fp)
+                modcache.write_stamp(target, build_id, base, name, fps[name])
             shown.written(name, [(t[0], t[3]) for t in stale_files(target)])
             shown.end("gen", name)
         print(f"{reused} of {len(paths)} modules reused without generating their C again")
@@ -680,7 +869,7 @@ def build_all(exefs, out, jobs, compile_c=True):
         for name in paths:
             if not compile_dir(targets[name], min(jobs, 16), shown):
                 return False
-            modcache.write_stamp(targets[name], build_ids[name], MODULES[name], name, fp)
+            modcache.write_stamp(targets[name], build_ids[name], MODULES[name], name, fps[name])
         shown.begin("link")
         ok = link(list(targets.values()), exe)
         shown.end("link")

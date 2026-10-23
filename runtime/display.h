@@ -46,6 +46,7 @@ typedef struct DisplaySettings { int mode, width, height, latency, hide_cursor, 
 void display_settings(DisplaySettings *out);
 const char *display_ini_path(void);
 int display_overlay(void);                /* overlay = 1: the frame-rate overlay shows from the start */
+float display_overlay_scale(void);        /* overlay_scale = 0.25-2: the overlay's size */
 void display_set_mode(int mode);          /* DISPLAY_*: the window switches now (and F11 goes back to it) */
 int display_take_mode(void);              /* (Linux, the window's loop) a mode asked for, or -1 */
 void display_set_pacing(Pacing pacing);

@@ -115,6 +115,8 @@ static const char DEFAULT_INI[] =
     "hide_cursor = 1\n"
     "; overlay = 1: show the frame rate in the corner from the start (F1 shows or hides it while playing).\n"
     "overlay = 1\n"
+    "; overlay_scale = 0.25-2: the overlay's size (0.5: half as big, out of the way of the game).\n"
+    "overlay_scale = 1\n"
     "\n"
     "; render_scale = 1 | auto | a number from 0.5 to 4\n"
     ";   The game draws its pictures at 1920x1080. render_scale draws them this many times as wide and\n"
@@ -160,6 +162,14 @@ static void parse_render_scale(const char *v) {
     else { fprintf(stderr, "[display] render_scale is auto or a number from 0.5 to 4, not '%s': 1 it is\n", v); cfg.render_scale = 1; }
 }
 
+static float overlay_scale = 1;   /* overlay_scale = 0.25-2 */
+static void parse_overlay_scale(const char *v) {
+    char *end;
+    double x = strtod(v, &end);
+    if (end != v && x >= 0.25 && x <= 2) overlay_scale = (float)x;
+    else fprintf(stderr, "[display] overlay_scale is a number from 0.25 to 2, not '%s': 1 it is\n", v);
+}
+
 static char *trim(char *s) {
     while (*s == ' ' || *s == '\t') s++;
     char *e = s + strlen(s);
@@ -195,6 +205,7 @@ static BOOL CALLBACK load_once(PINIT_ONCE once, PVOID param, PVOID *ctx) {
         else if (!_stricmp(key, "latency")) cfg.latency = atoi(value);
         else if (!_stricmp(key, "hide_cursor")) cfg.hide_cursor = atoi(value) != 0;
         else if (!_stricmp(key, "overlay")) cfg.overlay = atoi(value) != 0;
+        else if (!_stricmp(key, "overlay_scale")) parse_overlay_scale(value);
         else if (!_stricmp(key, "gpu")) snprintf(cfg.gpu, sizeof cfg.gpu, "%s", value);
         else if (!_stricmp(key, "render_scale")) parse_render_scale(value);
         else fprintf(stderr, "[display] %s: unknown setting '%s'\n", path, key);
@@ -229,6 +240,7 @@ static float saved_render_scale;
 static int render_scale_saved;
 void display_set_render_scale(float scale) { saved_render_scale = scale; render_scale_saved = 1; }
 int display_overlay(void) { load(); return cfg.overlay; }
+float display_overlay_scale(void) { load(); return overlay_scale; }
 
 /* ---- the settings menu's changes ------------------------------------------------------- */
 static volatile LONG asked_mode = -1, asked_latency;

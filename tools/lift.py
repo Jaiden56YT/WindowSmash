@@ -116,12 +116,13 @@ def fp_imm8(imm8):
 
 
 class Lifter(SimdMixin):
-    def __init__(self, image, entries, base=BASE, forward=None, setjmp=None, pads=None):
+    def __init__(self, image, entries, base=BASE, forward=None, setjmp=None, pads=None, patches=None):
         self.img = image
         self.base = base         # guest address the module is loaded at
         self.forward = forward or {}   # entry offset -> native function that replaces it
         self.setjmp = setjmp or set()  # offsets of setjmp (or its import stub): calls become host setjmp
         self.pads = pads or {}   # function offset -> [(call range start, end, landing pad)] (eh.py)
+        self.patches = patches or {}   # offset -> [words] lifted in place of the instruction (recomp.CODE_PATCHES)
         self.entries = entries   # set of known function entry offsets
         self.tables = 0          # jump tables resolved
         self.indirect_tail = 0   # br sites treated as indirect tail calls
@@ -139,10 +140,18 @@ class Lifter(SimdMixin):
             return (f"GuestFn {native};\nvoid f_{self.base + start:x}(Cpu *c) {{ {native}(c); }}",
                     Counter(), set())
         name, wrapper = f"f_{self.base + start:x}", ""
-        if isinstance(native, tuple):   # wrapped natively: callers reach the wrapper, which may call this one
+        if isinstance(native, tuple) and native[0] == "hook":
+            # a Skyline plugin's hook target (recomp.py hookable): direct callers go through the
+            # dispatch table, as indirect ones do, which has this function's body - or the hook
+            wrapper = f"void {name}(Cpu *c) {{ rt_lookup(0x{self.base + start:X}ull)(c); }}\n"
+            name += "_orig"
+        elif isinstance(native, tuple):   # wrapped natively: callers reach the wrapper, which may call this one
             wrapper = f"GuestFn {native[1]};\nvoid {name}(Cpu *c) {{ {native[1]}(c); }}\n"
             name += "_orig"
         self.words = struct.unpack_from(f"<{size // 4}I", self.img, start)
+        here = {off: ws for off, ws in self.patches.items() if start <= off < self.fend}
+        if here:   # (the last word in the instruction's place, so the jump table analysis sees it)
+            self.words = tuple(here[start + i * 4][-1] if start + i * 4 in here else w for i, w in enumerate(self.words))
         self.sites = self.pads.get(start, [])
         self.leaders.update(lp for _s, _e, lp in self.sites)   # entered from an exception
         self.analyze_tables()
@@ -153,6 +162,8 @@ class Lifter(SimdMixin):
             pc = start + i * 4
             try:
                 stmt, falls = self.insn(w, pc)
+                if pc in here:   # the words before the last run first
+                    stmt = " ".join([self.insn(x, pc)[0] for x in here[pc][:-1]] + [stmt])
             except Unsupported as e:
                 reasons[(str(e), w)] += 1
                 stmt, falls = f'rt_trap(c, {const(self.base +pc)}, "unsupported");', True
@@ -378,6 +389,12 @@ class Lifter(SimdMixin):
                 return wr(rd, sf, f"({t})(({s}){a} >> ({b} & {size - 1}))")
             if opcode == 11:
                 return wr(rd, sf, f"ror{n}({a}, (u32){b})")
+            if 0x10 <= opcode <= 0x17 and (opcode & 3 == 3) == bool(sf):   # crc32{b,h,w,x}, crc32c{b,h,w,x}
+                bits = 8 << (opcode & 3)
+                poly = "0x82F63B78u" if opcode & 4 else "0xEDB88320u"   # (reflected; no inversions)
+                data = f"(u64){b}" if bits == 64 else f"(u64)(u{bits}){b}"
+                return wr(rd, 0, f"({{ u32 crc_ = (u32){reg(rn, 0)}; u64 d_ = {data}; "
+                                 f"for (int i_ = 0; i_ < {bits}; i_++) crc_ = (crc_ >> 1) ^ ({poly} & (0u - ((crc_ ^ (u32)(d_ >> i_)) & 1u))); crc_; }})")
             raise Unsupported("dp2: crc32 / other")
         raise Unsupported("reserved dp-reg")
 
@@ -640,6 +657,40 @@ class Lifter(SimdMixin):
                     break
                 targets.add(t)
             self.table_at[i] = targets
+
+        # The other form (LLVM's for small tables, as in Rust code): entries of 1 or 2 bytes,
+        # each a count of instructions past an anchor the code takes with adr:
+        #     adr xT, table ; adr xA, anchor ; ldrb/ldrh wE, [xT, xI] ; add xA, xA, xE, lsl #2 ; br xA
+        # The table's length is not checked here; entries leading out of the function end it.
+        for i in pending:
+            j = self.find_def((ws[i] >> 5) & 31, i)
+            if j is None or ws[j] & 0xFFE00000 != 0x8B000000:      # add xD, xN, xM, lsl #s
+                continue
+            shift, rn_, rm_ = (ws[j] >> 10) & 63, (ws[j] >> 5) & 31, (ws[j] >> 16) & 31
+            anchor = reach(rn_, j, True)
+            k = self.find_def(rm_, j)
+            if not anchor or len(anchor) != 1 or k is None:
+                continue
+            load = ws[k]
+            size = {0x38600800: 1, 0x78600800: 2}.get(load & 0xFFE00C00)   # ldrb / ldrh (register)
+            table = reach((load >> 5) & 31, k, True) if size else None
+            if not table or len(table) != 1:
+                continue
+            anchor, table = next(iter(anchor)), next(iter(table))
+            targets = set()
+            for e in range(256 if size == 1 else 4096):
+                at = table + e * size
+                if at + size > len(self.img):
+                    break
+                t = anchor + (int.from_bytes(self.img[at:at + size], "little") << shift)
+                if not self.fstart <= t < self.fend:
+                    break
+                targets.add(t)
+            if targets:
+                self.table_like += 1
+                self.table_at[i] = targets
+                if self.fstart + i * 4 in self.unresolved:
+                    self.unresolved.remove(self.fstart + i * 4)
 
     # ------------------------------------------------------------------ loads / stores
     def load_store(self, w, pc):

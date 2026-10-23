@@ -219,9 +219,38 @@ static u32 add_mount(const char *name, MountKind kind, const char *root) {
     return R_MOUNT_EXISTS;
 }
 
+/* ARCropolis' mods: - every turned-on mod's files as one tree, a later mod's file over an earlier's
+ * (<data dir>/../skyline/mods.txt: the mods' folders in order, which tools/skyline.py writes). */
+static char mods_list[64][160];
+static int mods_count = -1;
+
+static void mods_path(char *out, size_t n, const char *rest) {
+    if (mods_count < 0) {
+        char path[1024], line[200];
+        snprintf(path, sizeof path, "%s/../skyline/mods.txt", rt_data_dir);
+        FILE *f = fopen(path, "r");
+        mods_count = 0;
+        while (f && mods_count < 64 && fgets(line, sizeof line, f)) {
+            line[strcspn(line, "\r\n")] = 0;
+            if (*line) snprintf(mods_list[mods_count++], sizeof mods_list[0], "%s", line);
+        }
+        if (f) fclose(f);
+    }
+    for (int i = mods_count; i-- > 0;) {
+        snprintf(out, n, "%s/../../mods/%s/%s", rt_data_dir, mods_list[i], rest);
+        if (GetFileAttributesA(out) != INVALID_FILE_ATTRIBUTES) return;
+    }
+    snprintf(out, n, "%s/../skyline/sd/ultimate/no-mod/%s", rt_data_dir, rest);
+}
+
 static void host_path(char *out, size_t n, struct Mount *m, const char *rest) {
     while (*rest == '/') rest++;
-    snprintf(out, n, "%s/%s", m->root, rest);
+    if (!strcmp(m->name, "mods")) { mods_path(out, n, rest); return; }
+    /* (Skyline plugins' SD card: its ultimate/mods is the mods folder, tools/mods.py's) */
+    if (!strcmp(m->name, "sd") && !_strnicmp(rest, "ultimate/mods", 13) && (!rest[13] || rest[13] == '/'))
+        snprintf(out, n, "%s/../../mods%s", rt_data_dir, rest + 13);
+    else
+        snprintf(out, n, "%s/%s", m->root, rest);
     for (char *p = out; *p; p++) if (*p == '/') *p = '\\';
 }
 
@@ -253,7 +282,24 @@ static const char *data_root(char *out, size_t n, const char *leaf) {   /* nativ
 /* ---- mounting -------------------------------------------------------------------- */
 HLE(_ZN2nn2fs12SetAllocatorEPFPvmEPFvS1_mE) { (void)c; ready(); }
 HLE(_ZN2nn2fs22QueryMountRomCacheSizeEPm) { ready(); st64(c->x[0], 0x1000); c->x[0] = 0; }
-HLE(_ZN2nn2fs8MountRomEPKcPvm) { ready(); c->x[0] = add_mount(P(char, c->x[0]), M_ROM, ""); }
+void skyline_load_plugins(Cpu *c);        /* (hle_skyline.c) */
+
+/* Skyline mounts the SD card as sd: for its plugins: here <data dir>/../skyline/sd, with the mods
+ * folder as its ultimate/mods (host_path). */
+void fs_mount_sd(void) {
+    char root[1024];
+    snprintf(root, sizeof root, "%s/../skyline/sd", rt_data_dir);
+    add_mount("sd", M_HOST, root);
+    add_mount("mods", M_HOST, root);   /* (host_path: the mods' files) */
+}
+int skyline_provides(const char *path);
+/* (once the RomFS is there, Skyline's plugins load, as on the console) */
+HLE(_ZN2nn2fs8MountRomEPKcPvm) {
+    ready();
+    u32 r = add_mount(P(char, c->x[0]), M_ROM, "");
+    if (!r) skyline_load_plugins(c);
+    c->x[0] = r;
+}
 HLE(_ZN2nn2fs17MountCacheStorageEPKc) {
     char root[512];
     ready();
@@ -291,7 +337,8 @@ HLE(_ZN2nn2fs12GetEntryTypeEPNS0_18DirectoryEntryTypeEPKc) {
     if (!m) { c->x[0] = R_NOT_MOUNTED; return; }
     if (m->kind == M_ROM) {
         u32 d, f;
-        if (!rom_lookup(rest, &d, &f)) { c->x[0] = R_PATH_NOT_FOUND; return; }
+        if (skyline_provides(rest)) f = 0;
+        else if (!rom_lookup(rest, &d, &f)) { c->x[0] = R_PATH_NOT_FOUND; return; }
         st32(c->x[0], f == NONE ? DIR_ENTRY : FILE_ENTRY);
     } else {
         char path[1024];
@@ -315,10 +362,16 @@ HLE(_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci) {
     h.mode = mode;
     if (m->kind == M_ROM) {
         u32 d, f;
-        if (!rom_lookup(rest, &d, &f) || f == NONE) { c->x[0] = R_PATH_NOT_FOUND; return; }
-        if (mode & OPEN_WRITE) { c->x[0] = R_UNSUPPORTED; return; }
-        h.offset = rom.data + rom_file(f)->offset;
-        h.size = rom_file(f)->size;
+        if (mode & OPEN_WRITE && (skyline_provides(rest) || rom_lookup(rest, &d, &f))) { c->x[0] = R_UNSUPPORTED; return; }
+        if (skyline_provides(rest)) {   /* (an empty file: the plugin is native) */
+            h.offset = rom.data;
+            h.size = 0;
+        } else {
+            if (!rom_lookup(rest, &d, &f) || f == NONE) { c->x[0] = R_PATH_NOT_FOUND; return; }
+            if (mode & OPEN_WRITE) { c->x[0] = R_UNSUPPORTED; return; }
+            h.offset = rom.data + rom_file(f)->offset;
+            h.size = rom_file(f)->size;
+        }
     } else {
         char path[1024];
         host_path(path, sizeof path, m, rest);
