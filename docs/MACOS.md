@@ -12,8 +12,9 @@ Linux versions.
 - `Install WindowSmash.command` sets it all up and builds the game, as `Install WindowSmash.bat` does
   on Windows.
 
-Any game version should work. On a Mac, 13.0.5 has been checked through its opening and menus, at
-60 fps; full matches haven't been yet. The Windows build has been tested with 11.0.0 and 13.0.5.
+As on Windows, the game must be version 13.0.5, its last update
+([which copies count](UPDATES.md#what-counts-as-1305)). On a Mac, it has been checked through its
+opening and menus, at 60 fps; full matches haven't been yet.
 
 > [!IMPORTANT]
 > WindowSmash doesn't include the game. You need your own copy of Super Smash Bros. Ultimate, dumped
@@ -42,13 +43,13 @@ Any game version should work. On a Mac, 13.0.5 has been checked through its open
 | **macOS** | macOS 14 Sonoma or newer; on macOS 14, version 14.5 or newer, for the Command Line Tools the build needs. |
 | **Memory** | 8 GB at least; 16 GB or more builds much faster. |
 | **Free space** | About 40 GB on the disk WindowSmash goes on, plus room for your game files (about 17 GB). |
-| **Your game files** | The game (its `.nca` files, or an `.nsp` or `.xci`), with its update and DLC if you have them; your keys (`prod.keys` and `title.keys`); and your firmware's `.nca` files. Ryujinx's and yuzu's forks' own folders work as they are. |
+| **Your game files** | The game (its `.nca` files, or an `.nsp` or `.xci`), with its **13.0.5 update** (unless your dump has 13.0.5 merged in) and your DLC if you have it; your keys (`prod.keys` and `title.keys`); and your firmware's `.nca` files. Ryujinx's and yuzu's forks' own folders work as they are, with the game updated to 13.0.5 there. |
 | **Apple's Command Line Tools** | Apple's free compiler, version 16 or newer (with the macOS 15 SDK or newer: an older SDK lacks parts of Metal the game uses). The installer has macOS install them when they are missing; Xcode isn't needed. |
 | **Time** | About 15 minutes of your own time, plus one to a few hours while the Mac builds the game. |
 
 ## Install and build
 
-1. **Download WindowSmash.** On the [GitHub page](https://github.com/SNO2207/WindowSmash/tree/macos-port), click
+1. **Download WindowSmash.** On the [GitHub page](https://github.com/OpenSmash-Ultimate/WindowSmash/tree/macos-port), click
    **Code**, then **Download ZIP**. Double-click the ZIP in your Downloads folder to unpack it, then move
    the folder to your home folder (the one with your name, in Finder's **Go** menu) and call it
    `WindowSmash`. Keep it out of Desktop, Documents and Downloads: iCloud Drive may try to upload the
@@ -68,7 +69,8 @@ Any game version should work. On a Mac, 13.0.5 has been checked through its open
    `install.log`. If Apple's Command Line Tools are missing, a window offers to install them: click
    **Install**, then **Agree**. They take 5 to 30 minutes; the installer waits.
 4. **Choose your folders.** A window lists the folders it found for your game files, keys and firmware,
-   with a line under each saying what is in it (✓ when it's fine, ✗ with what's missing). Click
+   with a line under each saying what is in it (✓ when it's fine, ✗ with what's missing, such as
+   the 13.0.5 update when the game is another version). Click
    **Change…** to pick another folder, your online name, or the options; then **Set up and build**.
    The folder window shows hidden folders too, so Ryujinx's (`~/Library/Application Support/Ryujinx`)
    can be picked.
@@ -92,7 +94,7 @@ WindowSmash.command` from Finder into the window, and press <kbd>Return</kbd>.
 Or download and start everything with one command. This puts WindowSmash in `~/WindowSmash`:
 
 ```bash
-mkdir -p ~/WindowSmash && curl -fL https://codeload.github.com/SNO2207/WindowSmash/tar.gz/refs/heads/macos-port | tar -xz -C ~/WindowSmash --strip-components 1 && bash ~/WindowSmash/"Install WindowSmash.command"
+mkdir -p ~/WindowSmash && curl -fL https://codeload.github.com/OpenSmash-Ultimate/WindowSmash/tar.gz/refs/heads/macos-port | tar -xz -C ~/WindowSmash --strip-components 1 && bash ~/WindowSmash/"Install WindowSmash.command"
 ```
 
 </details>
@@ -113,7 +115,9 @@ The installer's options, for a Terminal window in the WindowSmash folder
 
 **To update WindowSmash**, double-click `Install WindowSmash.command` again. It downloads the newest
 WindowSmash if there is one, and builds again what the update changed: minutes, not hours. Your game
-files, settings, save and online name stay as they are.
+files, settings, save and online name stay as they are. A folder an older WindowSmash built from
+another game version is set up again as 13.0.5 once your game folder has the 13.0.5 update
+([a folder built from another version](UPDATES.md#a-folder-built-from-another-version)).
 
 ## What the installer does
 
@@ -148,8 +152,6 @@ Terminal window that shows the game's log as it goes; closing that window leaves
 
 - The first time you play online, it asks for the name other players see and keeps it in
   `online_name.txt`.
-- With [more than one game version](VERSIONS.md) built, the launchers ask which one to start. The one
-  you picked last is the default. Every player in a room needs the same game version.
 - There is no **Prepare Shaders** on a Mac yet: each shader is compiled when it is first needed, so a
   new effect can show a moment late, or stutter, the first time.
 - `controllers.ini` and `display.ini` in the WindowSmash folder work as on Windows
@@ -205,8 +207,8 @@ All of these are in the WindowSmash folder, unless the table says otherwise:
 
 | What | Where |
 | :--- | :--- |
-| The game | `build-mac/WindowSmash.app`; another game version has its own, for example `v13.0.5/build-mac/`. |
-| Its log | `build/play.log` (for another version, `v13.0.5/build/play.log`). |
+| The game | `build-mac/WindowSmash.app` |
+| Its log | `build/play.log` |
 | Your save | `save/`. Back it up now and then, with the game closed. |
 | Screenshots | `screenshots/` |
 | Crash and freeze reports | `reports/`, and macOS's own in `~/Library/Logs/DiagnosticReports` (`ssbu-*.ips`). |
@@ -236,14 +238,16 @@ everything it showed.
 | *Xcode's licence has not been accepted yet* | With Xcode installed and chosen as the developer tools, its licence must be accepted once: open Xcode, or run `sudo xcodebuild -license` in Terminal. |
 | The build stops after a long time, the Mac very slow | It may have run out of memory: run the installer again with fewer jobs, in Terminal: `./"Install WindowSmash.command" --jobs 4`. |
 | *The game data is not where it was when the game was built* | The game reads its data in place. Connect the disk it is on again, or run the installer to set it up from where it is now. |
-| *The game is not built yet* / *No game version is built here yet* | Run `Install WindowSmash.command`. |
+| *WindowSmash needs version 13.0.5* | Your game files are another version of the game. Put the game's 13.0.5 update `.nsp` in your game folder, next to the game (with Ryujinx or a yuzu fork, install the update there), then run the installer again ([which copies count](UPDATES.md#what-counts-as-1305)). |
+| *… set up from version 11.0.0 of the game* (or another version) | An older WindowSmash built this folder from another game version. With the 13.0.5 update in your game folder, the installer sets it up again as 13.0.5; your save and settings stay ([more](UPDATES.md#a-folder-built-from-another-version)). |
+| *The game isn't built here yet* | Run `Install WindowSmash.command`. |
 | The game window doesn't appear, or closes at once | Look at the end of `build/play.log` and at the newest file in `reports/`. Play SSBU says when the game stopped with an error. |
 | No sound, or a controller does nothing | Check the log's `[audio]` and `[input]` lines. Press <kbd>F2</kbd> to see the pads the game knows. |
 | Hosting a room: nobody can join | Allow the game on the local network (above), and through the firewall if it is on. The [multiplayer guide](MULTIPLAYER.md#which-address-to-give) says which address to give. |
 | The log says *macOS keeps the game off your local network* | The game was not allowed on the local network: allow WindowSmash in System Settings → Privacy & Security → Local Network, then start the game again. |
 
-When you report a problem, include the end of `build/play.log`, the report from `reports/`, your Mac's
-chip and macOS version, and the game version ([Getting help](../README.md#getting-help)).
+When you report a problem, include the end of `build/play.log`, the report from `reports/`, and your Mac's
+chip and macOS version ([Getting help](../README.md#getting-help)).
 
 ## Building it by hand
 
@@ -281,7 +285,7 @@ the game's C (`tools/recomp.py all --generate-only`) and compiles and links it w
   `<tree>/build/` (on a Mac, `recomp.py all` only generates it), with the runtime, and links
   `<tree>/build-mac/WindowSmash.app` (the program is `Contents/MacOS/ssbu`). It compiles again a
   file whose source changed, a game object whose C is not the file it was compiled from
-  (`obj/game_sources.tsv`: another game version's module can lend a tree older C), and everything
+  (`obj/game_sources.tsv`), and everything
   when the compile flags change; `--replace` starts the game's objects over. Beside the app are
   `obj/` (the objects), `gen/` (the files the build makes), `codecs/` (libopus and libvpx;
   `tools/codec_libs.py --out <dir>` builds them alone) and `ssbu.syms`, which names the program's
@@ -296,8 +300,7 @@ the game's C (`tools/recomp.py all --generate-only`) and compiles and links it w
   off screen), which `tests/test_mac_build.py` builds and runs, and `tools/mac/boottest/` (the whole
   program on a small made-up game, started as the launchers start it, its window shown a moment:
   `deps/venv/bin/python tools/mac/boottest/boottest.py`, which builds it in
-  `~/Library/Caches/WindowSmash/boottest`: kept out of the WindowSmash folder, where the launchers
-  would offer it as a game version).
+  `~/Library/Caches/WindowSmash/boottest`, outside the WindowSmash folder).
 - **Debugging:** the variables of the [Technical guide](TECHNICAL.md), and the Metal renderer's own
   forms: `SSBU_DUMP_MSL=<folder>` (or `SSBU_DUMP_HLSL`) saves each shader as compiled, as
   `<name>.metal`; `SSBU_GFX_PS_FILE` takes Metal source with a `fragment ... ps_main`;
@@ -311,7 +314,7 @@ the game's C (`tools/recomp.py all --generate-only`) and compiles and links it w
 | Area | Where it stands |
 | :--- | :--- |
 | **Overall** | Experimental, and the newest of the three versions. Expect problems that Windows doesn't have. |
-| **Game versions** | **13.0.5** runs its opening movie, the new-save screens, Challenges, stage select and fighter select at 60 fps (on an M5 Pro). Full matches haven't been checked yet, and other versions haven't been tried on a Mac. |
+| **Game version** | **13.0.5**, the only one WindowSmash builds, runs its opening movie, the new-save screens, Challenges, stage select and fighter select at 60 fps (on an M5 Pro). Full matches haven't been checked yet. |
 | **Graphics** | A new Metal renderer. Shaders are compiled the first time each is used; there is no ahead-of-time preparation yet. |
 | **Controllers, sound** | Through SDL3, as on Windows. Testing with real pads has been limited. |
 | **Multiplayer** | The same online lobby and private rooms as on Windows and Linux. Playing between a Mac and the other two hasn't been tested yet. |

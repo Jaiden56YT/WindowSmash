@@ -44,7 +44,7 @@ import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-REPO_OWNER, REPO_NAME, BRANCH = "SNO2207", "WindowSmash", "main"
+REPO_OWNER, REPO_NAME, BRANCH = "OpenSmash-Ultimate", "WindowSmash", "main"
 REPO_API = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}"
 SOURCE_VERSION = os.path.join("tools", "source_version.txt")   # "<commit> <date>": GitHub's ZIP fills it in
 USER_AGENT = "WindowSmash-installer"
@@ -965,7 +965,7 @@ def step_files(a):
         found["firmware"] = ask("Firmware folder (.nca files)", found["firmware"], True)
     firmware = ask_folder("firmware", found["firmware"], check_firmware, interactive)
     if interactive and not a.game:
-        found["game"] = ask("Game folder (the game's .nca, .nsp or .xci files)", found["game"], True)
+        found["game"] = ask("Game folder (the game's .nca, .nsp or .xci files, with its 13.0.5 update)", found["game"], True)
     game = ask_folder("game", found["game"], lambda p: (False, "choose the folder with your game files")
                       if not p or not os.path.isdir(p) else scan_game(p, keys), interactive)
     name = a.online_name or (ask("Online name (what other players see)", default_name, True) if interactive else default_name)

@@ -191,6 +191,7 @@ typedef struct Ctx {
     ShaderInfo *info;
     int dispatch;                 /* blocks in a switch loop */
     u8 *leader;                   /* per instruction: starts a block */
+    u32 *stack_to;                /* per SYNC/BRK: where it goes, known at translation (resolve_stacks), or NULL */
     u32 out_attr_mask;            /* vertex: generic attributes written (from AST) */
     int uses_cc;
     int uses_gmem;                /* global memory loads (LDG) */
@@ -1463,8 +1464,8 @@ static int emit_flow(Ctx *c, const Insn *in, u32 next) {
     if (strcmp(cond, "true")) guard = guard ? tmp("(%s && %s)", guard, cond) : cond;   /* predicate and flow test */
     if (!next) next = 0xFFFFFFFFu;
     switch (in->op) {
-    case OP_SSY: line(c, "ssy_[ssp_ & 15u] = 0x%xu; ssp_ = ssp_ + 1u;", branch_target(in)); return 0;
-    case OP_PBK: line(c, "pbk_[psp_ & 15u] = 0x%xu; psp_ = psp_ + 1u;", branch_target(in)); return 0;
+    case OP_SSY: if (!c->stack_to) line(c, "ssy_[ssp_ & 15u] = 0x%xu; ssp_ = ssp_ + 1u;", branch_target(in)); return 0;
+    case OP_PBK: if (!c->stack_to) line(c, "pbk_[psp_ & 15u] = 0x%xu; psp_ = psp_ + 1u;", branch_target(in)); return 0;
     case OP_BRA:
         if (!taken) return 0;
         if (!guard) { goto_pc(c, branch_target(in)); return 1; }
@@ -1472,6 +1473,12 @@ static int emit_flow(Ctx *c, const Insn *in, u32 next) {
         return 1;
     case OP_SYNC: case OP_BRK: {
         if (!taken) return 0;
+        if (c->stack_to) {   /* where it goes, known (unreached: 0, which the default case ends) */
+            u32 to = c->stack_to[in - c->ins];
+            if (!guard) goto_pc(c, to);
+            else line(c, "npc_ = %s ? 0x%xu : 0x%xu; break;", guard, to, next);
+            return 1;
+        }
         const char *pop = in->op == OP_SYNC ? "ssp_ = ssp_ - 1u; npc_ = ssy_[ssp_ & 15u];" : "psp_ = psp_ - 1u; npc_ = pbk_[psp_ & 15u];";
         if (!guard) line(c, "%s break;", pop);
         else {   /* as selects: fxc fails internally on assignments under the condition */
@@ -1553,6 +1560,88 @@ static int brx_targets(Ctx *c, u32 i) {
     return c->brx_ok;
 }
 
+/* The SSY and PBK stacks, followed through the blocks while translating. Where each block is
+ * entered with the same stacks however it is reached (as the game's programs have them), every
+ * SYNC and BRK goes to a known place, and the program keeps no stacks while it runs. With the
+ * stacks as arrays indexed at run time, some programs lost writes on NVIDIA's driver (their
+ * bytecode was right, and moving code about changed where): the lava of the Great Cave
+ * Offensive missed its lights (vs_346571090be3dfb2, whose light sum came out as what the
+ * registers held before) and showed red, yellow-green or black in patches that moved with the
+ * camera. A block entered with different stacks, a stack deeper than 16 or popped empty, or an
+ * indirect branch (BRX) keeps the arrays. */
+typedef struct Stacks { u32 nssy, npbk, ssy[16], pbk[16]; } Stacks;
+typedef struct Walk { Stacks *at; u8 *seen; u32 *work, nwork; int ok; } Walk;
+
+/* A flow test as flow_true decides it, without its side effects: 0 never passes, 1 always,
+ * 2 on the condition codes. */
+static int flow_test(u32 test) {
+    if (test == 15) return 1;
+    switch (test) {
+    case 0: case 7: case 8: case 16: case 18: case 21: case 23: case 24: case 25: case 26: case 27: case 28: case 29: return 0;
+    }
+    return 2;
+}
+
+static void reach(Ctx *c, Walk *k, int i, const Stacks *s) {   /* block i entered with s (i < 0: the program ends) */
+    if (i < 0 || (u32)i >= c->n) return;
+    if (!k->seen[i]) { k->seen[i] = 1; k->at[i] = *s; k->work[k->nwork++] = (u32)i; return; }
+    const Stacks *t = &k->at[i];
+    if (t->nssy != s->nssy || t->npbk != s->npbk || memcmp(t->ssy, s->ssy, 4 * s->nssy) || memcmp(t->pbk, s->pbk, 4 * s->npbk))
+        k->ok = 0;
+}
+
+static void resolve_stacks(Ctx *c, const u8 *ssy_target, const u8 *pbk_target) {
+    Walk k = {calloc(c->n, sizeof(Stacks)), calloc(c->n, 1), malloc(sizeof(u32) * c->n), 0, 1};
+    u32 *to = calloc(c->n, sizeof *to);
+    Stacks s = {0};
+    reach(c, &k, 0, &s);
+    while (k.ok && k.nwork) {
+        u32 b = k.work[--k.nwork];
+        s = k.at[b];
+        if (ssy_target[b] && s.nssy && s.ssy[s.nssy - 1] == c->ins[b].addr) s.nssy--;   /* (as the block's start does) */
+        if (pbk_target[b] && s.npbk && s.pbk[s.npbk - 1] == c->ins[b].addr) s.npbk--;
+        for (u32 i = b, end = 0; k.ok && !end && i < c->n; i++) {
+            if (i > b && c->leader[i]) { reach(c, &k, (int)i, &s); break; }   /* on into the next block */
+            const Insn *in = &c->ins[i];
+            u32 p = BITS(in->w, 16, 3), neg = BITS(in->w, 19, 1);
+            if ((!is_branchy(in->op) && in->op != OP_EXIT) || (p == PT && neg)) continue;
+            int test = flow_test(BITS(in->w, 0, 5)), guarded = p != PT || test == 2;
+            int sync = in->op == OP_SYNC || in->op == OP_SSY;
+            u32 *depth = sync ? &s.nssy : &s.npbk, *stack = sync ? s.ssy : s.pbk;
+            switch (in->op) {
+            case OP_SSY: case OP_PBK:   /* (whatever the predicate and test, as emit_flow) */
+                if (*depth == 16) k.ok = 0;
+                else stack[(*depth)++] = branch_target(in);
+                break;
+            case OP_BRA:
+                if (!test) break;
+                reach(c, &k, find(c, branch_target(in)), &s);
+                if (guarded) reach(c, &k, (int)i + 1, &s);
+                end = 1;
+                break;
+            case OP_SYNC: case OP_BRK: {
+                if (!test) break;
+                if (!*depth) { k.ok = 0; break; }
+                Stacks popped = s;
+                (*(sync ? &popped.nssy : &popped.npbk))--;
+                to[i] = stack[*depth - 1];
+                reach(c, &k, find(c, to[i]), &popped);
+                if (guarded) reach(c, &k, (int)i + 1, &s);
+                end = 1;
+                break;
+            }
+            case OP_EXIT: end = test && !guarded; break;
+            default: k.ok = 0; break;   /* BRX */
+            }
+        }
+    }
+    if (k.ok) c->stack_to = to;
+    else free(to);
+    free(k.at);
+    free(k.seen);
+    free(k.work);
+}
+
 static void emit_body(Ctx *c) {
     int branchy = 0, brx = 0;
     for (u32 i = 0; i < c->n; i++) { branchy |= is_branchy(c->ins[i].op); brx |= c->ins[i].op == OP_BRX; }
@@ -1585,7 +1674,9 @@ static void emit_body(Ctx *c) {
         if ((in->op == OP_BRA || in->op == OP_BRX || in->op == OP_SYNC || in->op == OP_BRK || in->op == OP_EXIT) && i + 1 < c->n)
             c->leader[i + 1] = 1;
     }
-    line(c, "uint pc_ = 0x%xu; uint ssy_[16], pbk_[16]; uint ssp_ = 0u, psp_ = 0u;", c->ins[0].addr);
+    resolve_stacks(c, ssy_target, pbk_target);
+    if (c->stack_to) line(c, "uint pc_ = 0x%xu;", c->ins[0].addr);
+    else line(c, "uint pc_ = 0x%xu; uint ssy_[16], pbk_[16]; uint ssp_ = 0u, psp_ = 0u;", c->ins[0].addr);
     line(c, "%sfor (uint guard_ = 0u; guard_ < 1000000u; guard_++) {", c->msl ? "" : "[loop] ");
     c->indent++;
     line(c, "uint npc_ = pc_;");
@@ -1598,8 +1689,8 @@ static void emit_body(Ctx *c) {
             line(c, "case 0x%xu: {", in->addr);
             c->indent++;
             open = 1; ended = 0;
-            if (ssy_target[i]) line(c, "if (ssp_ > 0u && ssy_[(ssp_ - 1u) & 15u] == 0x%xu) ssp_ = ssp_ - 1u;", in->addr);
-            if (pbk_target[i]) line(c, "if (psp_ > 0u && pbk_[(psp_ - 1u) & 15u] == 0x%xu) psp_ = psp_ - 1u;", in->addr);
+            if (ssy_target[i] && !c->stack_to) line(c, "if (ssp_ > 0u && ssy_[(ssp_ - 1u) & 15u] == 0x%xu) ssp_ = ssp_ - 1u;", in->addr);
+            if (pbk_target[i] && !c->stack_to) line(c, "if (psp_ > 0u && pbk_[(psp_ - 1u) & 15u] == 0x%xu) psp_ = psp_ - 1u;", in->addr);
         }
         if (ended) continue;   /* unreachable within the block */
         switch (in->op) {
@@ -1626,6 +1717,8 @@ static void emit_body(Ctx *c) {
     emit_exit(c);
     free(ssy_target);
     free(pbk_target);
+    free(c->stack_to);
+    c->stack_to = NULL;
 }
 
 /* (a format: the buffer's type, then a loop attribute) */
@@ -2259,6 +2352,18 @@ int shader_uses_pixels(const u8 *program, u32 size, int stage) {
         default: break;
         }
     }
+    free(c.ins);
+    return uses;
+}
+
+/* Does the program use the SSY/PBK stacks? Their translation changed (resolve_stacks): such
+ * programs get cache files of their own too. */
+int shader_uses_stacks(const u8 *program, u32 size) {
+    init_table();
+    Ctx c = {0};
+    decode_program(&c, program, size);
+    int uses = 0;
+    for (u32 i = 0; i < c.n && !uses; i++) uses = c.ins[i].op == OP_SSY || c.ins[i].op == OP_PBK;
     free(c.ins);
     return uses;
 }

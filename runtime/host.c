@@ -618,10 +618,11 @@ _Noreturn void rt_trap(Cpu *c, u64 pc, const char *why) {
     rt_fatal("guest trap at %s: %s", rt_describe(pc, name, sizeof name), why);
 }
 
-/* The original of a wrapped guest function (HLE_WRAP) this game version does not have:
- * tools/recomp.py links each f_<address>_orig no module defines to this one. Nothing calls
- * it, since nothing reaches that wrapper either. */
-void rt_wrap_missing(Cpu *c) { rt_trap(c, 0, "wrapped guest function missing from this game version"); }
+/* The original of a wrapped guest function (HLE_WRAP) no module of this build has (a made-up
+ * game's, tools/mac/boottest; the game's own always has them, tools/recomp.py resolve_wraps):
+ * tools/recomp.py links each f_<address>_orig no module defines to this one. Nothing calls it,
+ * since nothing reaches that wrapper either. */
+void rt_wrap_missing(Cpu *c) { rt_trap(c, 0, "wrapped guest function missing from this build's modules"); }
 
 /* ---- dispatch -------------------------------------------------------------------- */
 /* The tables are 2 bytes per byte of code (hundreds of MB), so a lookup in them mostly misses
@@ -1129,6 +1130,27 @@ static void mac_start(int argc, char **argv, const char **dir, int *options) {
 }
 #endif
 
+/* The game is version 13.0.5: its main module's build id (tools/game_version.py MAIN_BUILD_ID, which
+ * tests/test_game_version.py checks this against). The build refuses other versions; a game built
+ * from one before that (or by hand) says so plainly and stops - not a crash report, not a bug. */
+#define REQUIRED_VERSION "13.0.5"
+#define REQUIRED_MAIN_BUILD "21450C647B8C5940ED5B68218EA128FD3C5D597D"
+
+static int game_version_ok(void) {
+    const char *id = rt_module_main.build_id;
+    if (id && !_stricmp(id, REQUIRED_MAIN_BUILD)) return 1;
+    static const char text[] =
+        "This WindowSmash was built from another version of the game, and WindowSmash needs version "
+        REQUIRED_VERSION ". Put the game's " REQUIRED_VERSION " update (an .nsp file) in your game folder, next to the "
+        "game, and run Install WindowSmash again: it sets this folder up again, keeping your save and settings.";
+    fprintf(stderr, "[boot] the game's main module is %s, not %s's (%s)\n%s\n", id ? id : "unknown",
+            REQUIRED_VERSION, REQUIRED_MAIN_BUILD, text);
+#ifdef _WIN32
+    MessageBoxA(NULL, text, "WindowSmash", MB_OK | MB_ICONERROR);
+#endif
+    return 0;
+}
+
 /* SSBU_CRASH_TEST=<seconds>: a deliberate fault then (to try the crash report and minidump). */
 static DWORD WINAPI crash_test(void *seconds) {
     Sleep((DWORD)(uintptr_t)seconds * 1000);
@@ -1179,6 +1201,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[boot] %s, built %04d-%02d-%02d %02d:%02d\n", exe, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min);
     }
 #endif
+    if (!game_version_ok()) return 4;
     for (int i = options; i < argc; i++) {
         if (!strcmp(argv[i], "--trace")) rt_trace = 1;
         if (!strcmp(argv[i], "--status") && i + 1 < argc) status_every = atoi(argv[++i]);

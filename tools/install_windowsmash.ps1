@@ -113,7 +113,7 @@ $UserAgent = 'WindowSmash-installer'
 # (No double quotes in it: Windows PowerShell hands them to programs unescaped.)
 $ZstdCheck = 'import sys, importlib.util as u; sys.exit(0 if u.find_spec(''zstandard'') or (sys.version_info >= (3, 14) and u.find_spec(''compression.zstd'')) else 1)'
 # where updates come from: this repository's branch
-$RepoOwner = 'SNO2207'
+$RepoOwner = 'OpenSmash-Ultimate'
 $RepoName = 'WindowSmash'
 $UpdateBranch = 'main'
 $RepoApi = "https://api.github.com/repos/$RepoOwner/$RepoName"
@@ -1020,7 +1020,7 @@ function Test-GameFolder {
     $lines = @($scan.summary)
     if (Test-Path -LiteralPath (Join-Path $Folder 'romfs.bin')) { $lines += 'romfs.bin found (the game data, used as it is).' }
     if ($scan.program) { return @{ Ok = $true; Text = ($lines -join ' ') } }
-    return @{ Ok = $false; Text = (($lines + @("Problem: $($scan.problem)")) -join ' ') }
+    return @{ Ok = $false; Text = ((@("Problem: $($scan.problem)") + $lines) -join ' ') }   # (the problem first: two lines show)
 }
 
 function Show-Wizard {
@@ -1053,7 +1053,7 @@ function Show-Wizard {
     $rows = @{}
     $y = 58
     foreach ($spec in @(
-        @{ Key = 'Game'; Title = 'Game files'; Hint = "yuzu's or Ryujinx's game folder, or yours: the game (.xci, .nsp or .nca), update, DLC" },
+        @{ Key = 'Game'; Title = 'Game files'; Hint = "yuzu's or Ryujinx's game folder, or yours: the game (.xci/.nsp/.nca), its 13.0.5 update, DLC" },
         @{ Key = 'Keys'; Title = 'Keys'; Hint = "The folder with prod.keys and title.keys" },
         @{ Key = 'Firmware'; Title = 'Firmware'; Hint = "The folder with your Switch firmware's .nca files (for the fonts)" }
     )) {

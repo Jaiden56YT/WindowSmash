@@ -2,9 +2,11 @@
 problems the review of 2026-10-18 found, each tried the way an attacker would, with the in-process
 clients of nex.selftest.   python -m nex.test_hardening   (from tools/; nex.selftest runs it too)
 
-The test names say which finding of the review they are about (item 1 ... item 10)."""
+The test names say which finding of the review they are about (item 1 ... item 10); test_logs_*
+are about the server's log, which held every player's NSA id (the account's secret) until 2026-10-22."""
 import asyncio
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -29,11 +31,11 @@ from .streams import StreamIn, StreamOut
 class Net(selftest.Net):
     """selftest's network, with the server's log kept rather than printed."""
 
-    def __init__(self, state_dir=None):
+    def __init__(self, state_dir=None, verbose=1):
         self.boxes = {}
         self.log = []
         self.server = make_server(lambda addr, port, data, src=None: self.boxes.setdefault(addr, []).append(data),
-                                  state_dir=state_dir, verbose=1, log=lambda *a: self.log.append(" ".join(map(str, a))))
+                                  state_dir=state_dir, verbose=verbose, log=lambda *a: self.log.append(" ".join(map(str, a))))
 
 
 def u32s(*values):
@@ -129,6 +131,55 @@ def probe_param(targets, source):
     out.list(targets, StreamOut.string)
     out.string(source)
     return out.get()
+
+
+NSA = 0x7E57C0DE5EC2E7A1          # (made up for the test: no player's)
+NAME = "Tester"
+TOKEN = f"ssbu-port.1.{NSA:016x}.{NAME}"
+
+
+def secret_forms(nsa=NSA, token=TOKEN):
+    """Every way the test player's NSA id or token could be written into a log: as text (hex in
+    either case, decimal - the user name nex.selftest logs in with - and the token), and those or
+    the id's u64 as hex dumps, with spaces (streams.hexdump) or none (bytes.hex)."""
+    texts = [f"{nsa:016x}", f"{nsa:016X}", str(nsa), token]
+    raw = [t.encode() for t in texts] + [struct.pack("<Q", nsa), struct.pack(">Q", nsa)]
+    return texts + [b.hex(" ") for b in raw] + [b.hex() for b in raw]
+
+
+def login_param(token=TOKEN, username=str(NSA), corrupt=False):
+    """ValidateAndRequestTicketWithParam's parameter as nex.selftest.authenticate writes it, with any
+    token (corrupt: AnyDataHolder lengths that disagree, which the server fails to read)."""
+    info = StreamOut()
+    info.string(token)
+    info.u32(4)
+    info.u8(2)
+    info.u32(0)
+    data = StreamOut()
+    data.struct(lambda d: None)
+    data.struct(lambda d: d.write(info.get()))
+    param = StreamOut()
+
+    def p(o):
+        o.u32(3)
+        o.string(username)
+        o.string("AuthenticationInfo")
+        o.u32(len(data.get()) + 4 + (1 if corrupt else 0))
+        o.u32(len(data.get()))
+        o.write(data.get())
+        o.bool(False)
+        o.u32(40603)
+        o.u32(0)
+    param.struct(p)
+    return param.get()
+
+
+def send_raw(c, message):
+    """Any bytes as one RMC message (DATA), with no answer looked for."""
+    p = Packet(DATA, F_RELIABLE | F_NEED_ACK | F_HAS_SIZE, seq=c.seq, options={O_FRAGMENT: b"\0"},
+               payload=c.rc4_out.crypt(message))
+    c.seq += 1
+    c.send(p, c.session_key, c.server_sig)
 
 
 class Case(unittest.TestCase):
@@ -447,6 +498,55 @@ class Ranked(Case):
         self.start(a, 7, [a.pid, self.b.pid])
         self.ranked.tick(self.server.now + ROUND_LIFETIME + 1)
         self.assertEqual(self.ranked.rounds, {})
+
+
+class Logs(Case):
+    """The log holds no NSA id or token at any --nex-log level (the online lobby's service runs at
+    1, where the login line had both the id and the user name - in nex.selftest's logins, the id
+    again, in decimal)."""
+
+    def scenario(self, verbose, state_dir):
+        """Every way a player's secret went into the log: logging in, logins refused, Ticket
+        Granting calls the server does not know or cannot read, secure calls holding the NSA id.
+        Returns the log, and whatever went to stdout and stderr meanwhile."""
+        self.net = Net(state_dir, verbose)
+        self.server = self.net.server
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            c = selftest.login(self.net, ("10.13.0.2", 49152), NSA, NAME)
+            auth = selftest.Client(self.net, ("10.13.0.3", 49152), AUTH_PORT)
+            auth.connect()
+            for token in (TOKEN.upper(), f"ssbu-port.1.{NSA:016X}.{NAME}", f"ssbu-port.1.{NSA:016x}"):
+                self.refused(call(auth, 10, 6, login_param(token)), rmc.RENDEZVOUS_INVALID_USERNAME)
+            self.refused(call(auth, 10, 2, login_param()), rmc.CORE_NOT_IMPLEMENTED)
+            self.refused(call(auth, 10, 6, login_param(corrupt=True)), rmc.CORE_INVALID_ARGUMENT)
+            send_raw(auth, struct.pack("<I", 2) + rmc.request(10, 99, 6, login_param())[4:])   # (undecodable)
+            self.refused(call(c, 10, 2, login_param()), rmc.CORE_NOT_IMPLEMENTED)   # (to the secure server)
+            self.refused(call(c, 110, 99, struct.pack("<Q", NSA) + str(NSA).encode()), rmc.CORE_NOT_IMPLEMENTED)
+            self.refused(call(c, 110, 98, b"harmless"), rmc.CORE_NOT_IMPLEMENTED)
+        return "\n".join(self.net.log) + "\n" + out.getvalue()
+
+    def test_logs_hold_no_nsa_id_or_token_at_any_level(self):
+        tag = hashlib.sha256(f"{NSA:016x}".encode()).hexdigest()[:8]
+        for verbose in (0, 1, 2, 3):
+            with self.subTest(verbose=verbose), tempfile.TemporaryDirectory() as tmp:
+                log = self.scenario(verbose, tmp)
+                for form in secret_forms():
+                    self.assertNotIn(form, log)
+                if verbose:   # (and the log still says what happened)
+                    self.assertIn(f"login: {NAME} (account {tag}, platform 3) -> pid", log)
+                    self.assertEqual(log.count("login refused"), 3)
+                    self.assertIn("UNHANDLED TicketGranting.ValidateAndRequestTicketWithCustomData", log)
+                    self.assertIn("undecodable RMC message", log)
+                    self.assertIn("they hold the account's NSA id", log)
+                    self.assertIn(b"harmless".hex(" "), log)   # (other calls' parameters are still shown)
+                requests = os.path.join(tmp, "requests")
+                saved = os.listdir(requests) if os.path.isdir(requests) else []
+                self.assertEqual([f for f in saved if f.startswith("10-")], [])   # (nor are logins kept)
+
+
+class LiteLogs(Logs):
+    lite = True
 
 
 class Lobby(unittest.TestCase):

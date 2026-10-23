@@ -33,6 +33,7 @@
 #include <stdio.h>
 
 #include "pad.h"
+#include "padusb.h"
 #ifdef SSBU_HAVE_SDL3
 #include <SDL3/SDL_init.h>
 #include <SDL3/SDL_gamepad.h>
@@ -269,6 +270,7 @@ static void config_load(void) {
 typedef struct Dev {
     int used, slot;               /* slot -1: no free player */
     int xinput;                   /* XInput user index, or -1 for an SDL pad */
+    int usb;                      /* hle_padusb.c's port + 1, or 0 */
 #ifdef SSBU_HAVE_SDL3
     SDL_JoystickID id;
     SDL_Gamepad *gp;
@@ -584,6 +586,68 @@ static void xinput_poll(PadState fresh[PAD_SLOTS], char names[PAD_SLOTS][48], Pa
     }
 }
 
+/* ---- GameCube controllers straight from USB (hle_padusb.c) ---------------------------------
+ * Its ports become pads as SDL's do; they go by their letters (A at the bottom, X right, B left,
+ * Y on top, as SDL puts a GameCube controller's) and play as GameCube controllers (style = auto). */
+static const char *usb_ignore;   /* what SDL leaves to it (padusb_start), or NULL */
+
+static void usb_raw(const PadUsbState *s, Raw *raw) {
+    static const struct { u32 pu; int rb; } MAP[] = {
+        {PU_A, RB_SOUTH}, {PU_B, RB_WEST}, {PU_X, RB_EAST}, {PU_Y, RB_NORTH}, {PU_START, RB_START}, {PU_Z, RB_RIGHT_SHOULDER},
+        {PU_ZL, RB_LEFT_SHOULDER}, {PU_L, RB_MISC3}, {PU_R, RB_MISC4}, {PU_UP, RB_DPAD_UP}, {PU_DOWN, RB_DPAD_DOWN},
+        {PU_LEFT, RB_DPAD_LEFT}, {PU_RIGHT, RB_DPAD_RIGHT}, {PU_HOME, RB_GUIDE}, {PU_CAPTURE, RB_MISC1}, {PU_C, RB_MISC2},
+    };
+    memset(raw, 0, sizeof *raw);
+    for (u32 i = 0; i < sizeof MAP / sizeof *MAP; i++)
+        if (s->buttons & MAP[i].pu) raw->buttons |= 1u << MAP[i].rb;
+    raw->axis[RA_LEFTX] = s->lx; raw->axis[RA_LEFTY] = s->ly;
+    raw->axis[RA_RIGHTX] = s->rx; raw->axis[RA_RIGHTY] = s->ry;
+    raw->axis[RA_LEFT_TRIGGER] = s->lt; raw->axis[RA_RIGHT_TRIGGER] = s->rt;
+}
+
+static void usb_poll(PadState fresh[PAD_SLOTS], char names[PAD_SLOTS][48], PadInfo info[PAD_SLOTS]) {
+    static PadUsbState ports[PADUSB_PORTS];
+    static const int LETTERS[4] = {N_A, N_X, N_B, N_Y};
+    ULONGLONG now = GetTickCount64();
+    padusb_poll(ports);
+    for (int i = 0; i < (int)(sizeof devs / sizeof *devs); i++) {   /* gone */
+        Dev *d = &devs[i];
+        if (!d->used || !d->usb || ports[d->usb - 1].connected) continue;
+        if (d->slot >= 0) fprintf(stderr, "[input] player %d: \"%s\" disconnected\n", d->slot + 1, d->name);
+        d->used = 0;
+    }
+    for (int p = 0; p < PADUSB_PORTS; p++) {   /* came (devs 0-3 are XInput's when there is no SDL) */
+        int open = !ports[p].connected;
+        for (int i = 0; i < (int)(sizeof devs / sizeof *devs) && !open; i++) open = devs[i].used && devs[i].usb == p + 1;
+        Dev *d = NULL;
+        for (int i = 4; i < (int)(sizeof devs / sizeof *devs) && !open && !d; i++) if (!devs[i].used) d = &devs[i];
+        if (!d) continue;
+        memset(d, 0, sizeof *d);
+        d->used = 1; d->xinput = -1; d->usb = p + 1;
+        snprintf(d->name, sizeof d->name, "%s", ports[p].name);
+        snprintf(d->type, sizeof d->type, "gamecube");
+        snprintf(d->guid, sizeof d->guid, "%s", ports[p].id);
+        snprintf(d->path, sizeof d->path, "%s", ports[p].path);
+        dev_configure(d, LETTERS);
+        d->slot = dev_assign(d);
+        if (d->slot >= 0) dev_remember(d);
+        log_connect(d);
+    }
+    for (int i = 0; i < (int)(sizeof devs / sizeof *devs); i++) {
+        Dev *d = &devs[i];
+        if (!d->used || !d->usb) continue;
+        if (d->slot < 0 && (d->slot = dev_assign(d)) >= 0) { dev_remember(d); log_connect(d); }   /* a player became free */
+        if (d->slot < 0) continue;
+        Raw raw;
+        usb_raw(&ports[d->usb - 1], &raw);
+        dev_state(d, &raw, &fresh[d->slot]);
+        dev_info(d, &raw, &info[d->slot]);
+        snprintf(names[d->slot], sizeof names[d->slot], "%s", d->name);
+        u16 low, high;
+        if (rumble_due(d, now, &low, &high)) padusb_rumble(d->usb - 1, low || high);
+    }
+}
+
 /* ---- SDL3 ---------------------------------------------------------------------------- */
 #ifdef SSBU_HAVE_SDL3
 #define SDL_FUNCS(X) X(SDL_SetHint) X(SDL_Init) X(SDL_GetError) X(SDL_free) X(SDL_GetVersion) \
@@ -615,6 +679,8 @@ static int sdl_start(void) {
     if (missing) { fprintf(stderr, "[input] SDL3.dll has no %s: XInput pads only\n", missing); return 0; }
 #endif
     p_SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
+    if (usb_ignore) p_SDL_SetHint(SDL_HINT_HIDAPI_IGNORE_DEVICES, usb_ignore);       /* hle_padusb.c reads those */
+    if (usb_ignore) p_SDL_SetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES, usb_ignore);
     p_SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");   /* we decide (background = ...) */
     p_SDL_SetHint(SDL_HINT_JOYSTICK_ENHANCED_REPORTS, "auto");       /* PlayStation pads change mode only for rumble */
     if (!p_SDL_Init(SDL_INIT_GAMEPAD)) {
@@ -671,7 +737,7 @@ static void sdl_poll(PadState fresh[PAD_SLOTS], char names[PAD_SLOTS][48], PadIn
         SDL_JoystickID *ids = p_SDL_GetGamepads(&n);
         for (int i = 0; i < (int)(sizeof devs / sizeof *devs); i++) {
             Dev *d = &devs[i];
-            if (!d->used) continue;
+            if (!d->used || d->usb) continue;
             int present = 0;
             for (int k = 0; k < n && !present; k++) present = ids[k] == d->id;
             if (present && p_SDL_GamepadConnected(d->gp)) continue;
@@ -685,7 +751,7 @@ static void sdl_poll(PadState fresh[PAD_SLOTS], char names[PAD_SLOTS][48], PadIn
             if (!open) sdl_open(ids[k]);
         }
         for (int i = 0; i < (int)(sizeof devs / sizeof *devs); i++)   /* a player became free */
-            if (devs[i].used && devs[i].slot < 0 && (devs[i].slot = dev_assign(&devs[i])) >= 0) {
+            if (devs[i].used && !devs[i].usb && devs[i].slot < 0 && (devs[i].slot = dev_assign(&devs[i])) >= 0) {
                 dev_remember(&devs[i]);
                 p_SDL_SetGamepadPlayerIndex(devs[i].gp, devs[i].slot);
                 log_connect(&devs[i]);
@@ -694,7 +760,7 @@ static void sdl_poll(PadState fresh[PAD_SLOTS], char names[PAD_SLOTS][48], PadIn
     }
     for (int i = 0; i < (int)(sizeof devs / sizeof *devs); i++) {
         Dev *d = &devs[i];
-        if (!d->used || d->slot < 0) continue;
+        if (!d->used || d->usb || d->slot < 0) continue;
         Raw raw = {0};
         for (int b = 0; b < RB_COUNT; b++)
             if (p_SDL_GetGamepadButton(d->gp, (SDL_GamepadButton)b)) raw.buttons |= 1u << b;
@@ -785,7 +851,7 @@ static void sdl_poll(PadState fresh[PAD_SLOTS], char names[PAD_SLOTS][48], PadIn
         int n = SDL_NumJoysticks();
         for (int i = 0; i < (int)(sizeof devs / sizeof *devs); i++) {
             Dev *d = &devs[i];
-            if (!d->used || SDL_GameControllerGetAttached(d->gp)) continue;
+            if (!d->used || d->usb || SDL_GameControllerGetAttached(d->gp)) continue;
             if (d->slot >= 0) fprintf(stderr, "[input] player %d: \"%s\" disconnected\n", d->slot + 1, d->name);
             SDL_GameControllerClose(d->gp);
             d->used = 0;
@@ -798,7 +864,7 @@ static void sdl_poll(PadState fresh[PAD_SLOTS], char names[PAD_SLOTS][48], PadIn
             if (!open) sdl_open(k);
         }
         for (int i = 0; i < (int)(sizeof devs / sizeof *devs); i++)   /* a player became free */
-            if (devs[i].used && devs[i].slot < 0 && (devs[i].slot = dev_assign(&devs[i])) >= 0) {
+            if (devs[i].used && !devs[i].usb && devs[i].slot < 0 && (devs[i].slot = dev_assign(&devs[i])) >= 0) {
                 dev_remember(&devs[i]);
                 SDL_GameControllerSetPlayerIndex(devs[i].gp, devs[i].slot);
                 log_connect(&devs[i]);
@@ -806,7 +872,7 @@ static void sdl_poll(PadState fresh[PAD_SLOTS], char names[PAD_SLOTS][48], PadIn
     }
     for (int i = 0; i < (int)(sizeof devs / sizeof *devs); i++) {
         Dev *d = &devs[i];
-        if (!d->used || d->slot < 0) continue;
+        if (!d->used || d->usb || d->slot < 0) continue;
         Raw raw = {0};
         for (int b = 0; b < SDL_CONTROLLER_BUTTON_MAX && b < RB_COUNT; b++)
             if (SDL_GameControllerGetButton(d->gp, (SDL_GameControllerButton)b)) raw.buttons |= 1u << b;
@@ -854,9 +920,9 @@ static void config_reload(int sdl) {
         d->slot = dev_assign(d);
         if (d->slot >= 0) dev_remember(d);
 #ifdef SSBU_HAVE_SDL3
-        if (sdl && d->slot >= 0) p_SDL_SetGamepadPlayerIndex(d->gp, d->slot);
+        if (sdl && d->gp && d->slot >= 0) p_SDL_SetGamepadPlayerIndex(d->gp, d->slot);
 #elif defined SSBU_HAVE_SDL2
-        if (sdl && d->slot >= 0) SDL_GameControllerSetPlayerIndex(d->gp, d->slot);
+        if (sdl && d->gp && d->slot >= 0) SDL_GameControllerSetPlayerIndex(d->gp, d->slot);
 #endif
         if (d->slot != was[i]) log_connect(d);
     }
@@ -892,8 +958,9 @@ static DWORD WINAPI input_thread(LPVOID unused) {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
     HANDLE timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
     if (!timer) timer = CreateWaitableTimerExW(NULL, NULL, 0, TIMER_ALL_ACCESS);
-    int sdl = sdl_start();
-    if (!sdl && !xinput_start()) { fprintf(stderr, "[input] no SDL and no XInput: keyboard only\n"); return 0; }
+    usb_ignore = padusb_start();
+    int sdl = sdl_start(), xinput = !sdl && xinput_start();
+    if (!sdl && !xinput && !usb_ignore) { fprintf(stderr, "[input] no SDL and no XInput: keyboard only\n"); return 0; }
     for (;;) {
         PadState fresh[PAD_SLOTS] = {0};
         char names[PAD_SLOTS][48] = {{0}};
@@ -901,7 +968,8 @@ static DWORD WINAPI input_thread(LPVOID unused) {
         memset(info, 0, sizeof info);
         if (InterlockedExchange(&reload_asked, 0)) config_reload(sdl);
         if (sdl) sdl_poll(fresh, names, info);
-        else xinput_poll(fresh, names, info);
+        else if (xinput) xinput_poll(fresh, names, info);
+        if (usb_ignore) usb_poll(fresh, names, info);
         publish(fresh, names, info);
         LARGE_INTEGER due = {.QuadPart = -10000};   /* 1 ms */
         if (timer && SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE)) WaitForSingleObject(timer, 50);

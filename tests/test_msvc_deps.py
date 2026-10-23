@@ -369,6 +369,7 @@ class ToolchainChoiceTests(unittest.TestCase):
     def test_flags_follow_the_system_root(self):
         # (the module's own choice on this PC: /winsysroot exactly when deps\msvc is used)
         self.assertEqual('/winsysroot' in cc.BASE_CFLAGS, cc.WINSYSROOT is not None)
+        self.assertEqual('/winsysroot' in cc.LINK_FLAGS, cc.WINSYSROOT is not None)   # (clang-cl's, for the link: test_link_command)
         self.assertEqual(cc.LINK_OPTIONS, ['/winsysroot:' + cc.WINSYSROOT] if cc.WINSYSROOT else [])
         self.assertTrue(set(cc.BASE_CFLAGS) <= set(cc.CFLAGS))
 

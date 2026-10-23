@@ -83,7 +83,7 @@ static u32 dotted_ip(const char *name) {
     return a << 24 | b << 16 | d << 8 | e;
 }
 
-/* NEX's login job, the step that works out the game server's address (11.0.0: main+0x249190;
+/* NEX's login job, the step that works out the game server's address (main+0x249190;
  * the job is x0, its NgsFacade at +360). Give the facade the direct address first. */
 /* signature: f81b0ffc a9015ff8 a90257f6 a9034ff4 a9047bfd 910103fd d10d83ff b9417808 aa0003f3 3100051f 54.....0 9100e3e8 9....... b9403be8 b9418269 4b090108 */
 HLE_WRAP(7100249190) {
@@ -104,7 +104,7 @@ HLE_WRAP(7100249190) {
     f_7100249190_orig(c);
 }
 
-/* NEX's InetAddress from a name (11.0.0: main+0x1becd0; x0 the address, x1 the name -> bool):
+/* NEX's InetAddress from a name (main+0x1becd0; x0 the address, x1 the name -> bool):
  * the address is at +12, in network order. */
 /* signature: d10643ff f900b3fc a9174ff4 a9187bfd 910603fd aa0103f4 aa0003f3 .0.....1 91....21 aa1403e0 9....... 34.....0 .0.....1 91....21 aa1403e0 9....... */
 HLE_WRAP(71001becd0) {
@@ -120,7 +120,7 @@ HLE_WRAP(71001becd0) {
     f_71001becd0_orig(c);
 }
 
-/* Pia's name resolution (11.0.0: main+0xba850; x0 the name, x4 a Pia InetAddress, whose IPv4
+/* Pia's name resolution (main+0xba850; x0 the name, x4 a Pia InetAddress, whose IPv4
  * address is at +8 in host order -> bool): the NAT check servers are the online server too.
  * Pia's NAT check needs its two servers at different addresses: nncs2 gets the last address of
  * the server's /16 (10.13.255.254), which the online lobby keeps for it (tools/nex/server.py). */

@@ -4,7 +4,7 @@
 
 ## WindowSmash's own source
 
-No project-wide license has been specified for the WindowSmash source outside the separately identified third-party material below.
+The WindowSmash source is licensed under the [GNU General Public License, version 3](LICENSE) (GPL-3.0), except for the separately identified third-party material below, which keeps its own license. The GPL covers WindowSmash only: it gives no rights to Super Smash Bros. Ultimate, its files, or anything WindowSmash builds from them.
 
 ## libvpx
 
@@ -23,7 +23,7 @@ libopus 1.5.2 (Xiph.Org Foundation and contributors) is included as source in [`
 
 Controller input can use [SDL3](https://www.libsdl.org/) (Simple DirectMedia Layer), copyright Sam Lantinga, under the [zlib license](https://github.com/libsdl-org/SDL/blob/main/LICENSE.txt).
 
-SDL3 is an external dependency: this repository contains no SDL source or binaries. The runtime is compiled against the headers of the official SDL3 Windows development package (`deps/SDL3`, which `Install WindowSmash.bat` downloads from SDL's GitHub releases, or `SSBU_SDL3_DIR`) and loads `SDL3.dll` from the executable's folder at run time. A package that includes `SDL3.dll` should include that package's `LICENSE.txt` too; the local bundler (`tools/bundle_ssbu.py`) adds it as `build/SDL3-LICENSE.txt`.
+SDL3 is an external dependency: this repository contains no SDL source or binaries. The runtime is compiled against the headers of the official SDL3 Windows development package (`deps/SDL3`, which `Install WindowSmash.bat` downloads from SDL's GitHub releases, or `SSBU_SDL3_DIR`) and loads `SDL3.dll` from the executable's folder at run time. A package that includes `SDL3.dll` should include that package's `LICENSE.txt` too.
 
 ## Python
 
@@ -51,6 +51,6 @@ A developer can link their own libopus or libvpx builds instead of the included 
 
 ## Game content and names
 
-The Git source tree contains no Nintendo game binaries, translated game functions, assets, fonts, keys, firmware or personal saves. Runtime package assets contain the precompiled executable and relocated module images; the original game-data archives, firmware fonts, keys and saves remain separate inputs.
+The Git source tree contains no Nintendo game binaries, translated game functions, assets, fonts, keys, firmware or personal saves. WindowSmash publishes no prebuilt game: each player builds it on their own PC from their own copy, and game-data archives, firmware fonts, keys and saves stay with the player.
 
 Super Smash Bros. Ultimate and associated names are the property of their respective owners. WindowSmash is an independent project and is not affiliated with Nintendo.

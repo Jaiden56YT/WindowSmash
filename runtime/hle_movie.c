@@ -5,11 +5,11 @@
  * "MovieDecoderEventHandler" thread, copies them into PCM buffers and hands those to the audio
  * out callback. Its Close frees `pending` (the decoder output it is part-way through) and zeroes
  * that pointer, under the renderer's lock; the lists of PCM buffers are emptied by the call
- * after it (main+0x3614650 in 11.0.0), without the lock. The renderer's output step
- * (main+0x3613cf0) returns at once while it has no free buffer, and otherwise reads `pending`.
+ * after it (main+0x36f6080), without the lock. The renderer's output step
+ * (main+0x36f5720) returns at once while it has no free buffer, and otherwise reads `pending`.
  *
  * Stop ends the event thread before those two calls. Starting a movie over (the player's Start
- * with the movie at its end, main+0x3610cc0) makes them while the event thread keeps running,
+ * with the movie at its end, main+0x36f26f0) makes them while the event thread keeps running,
  * so a decoder output that arrives between them meets free buffers and no `pending`: the event
  * thread reads through the null pointer ("reading address 0x28", or 0x4, in the output step).
  * It shows a few seconds after the game starts, as the title screen's movie begins. On
@@ -35,9 +35,9 @@ static void empty_buffers(Cpu *c, u64 vector) {
     }
 }
 
-/* The audio renderer's Close - the same code in 11.0.0 and 13.0.5 (main+0x36f6400 there). */
+/* The audio renderer's Close. */
 /* signature: f81b0ff9 a9015ff8 a90257f6 a9034ff4 a9047bfd 910103fd 320003e8 9102e014 aa0003f3 39004008 aa1403e0 9....... a945a668 cb080129 d343fd29 5295556a */
-HLE_WRAP(71036149d0) {
+HLE_WRAP(71036f6400) {
     u64 renderer = c->x[0], lr = c->x[30];
     rt_callsym(c, "_ZNSt3__15mutex4lockEv", 1, renderer + RENDERER_LOCK);
     empty_buffers(c, renderer + RENDERER_FREE);
@@ -45,5 +45,5 @@ HLE_WRAP(71036149d0) {
     rt_callsym(c, "_ZNSt3__15mutex6unlockEv", 1, renderer + RENDERER_LOCK);
     c->x[0] = renderer;
     c->x[30] = lr;
-    f_71036149d0_orig(c);
+    f_71036f6400_orig(c);
 }

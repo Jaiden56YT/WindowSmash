@@ -7,9 +7,15 @@ The game logs in with its network service account's id token (runtime/hle_env.c:
 logged with its parameters and answered "not implemented", which is how the game's real call
 order is found.
 
+The log never holds an NSA id or a token, at any verbosity: it names an account by its PID and
+account_tag (a short hash of its NSA id), and shows no bytes of the authentication server's
+messages or of Ticket Granting's (logging in carries the token) - nor any message that holds the
+player's own NSA id.
+
 The authentication server answers Ticket Granting alone, and only for the PID its connection
 logged in as; the secure server answers the rest, and only on connections that came in with a
 ticket."""
+import hashlib
 import json
 import os
 import re
@@ -38,6 +44,19 @@ MAX_URLS = 8                     # station URLs a client may register
 MAX_RESPONSE = 255 * FRAGMENT - 64   # largest RMC response (PRUDP fragment ids are a byte)
 SAVE_EVERY = 10.0                # seconds between writes of changed accounts and ratings
 SAVE_REQUEST_EVERY = 10.0        # (debugging copies of failed requests: one a method this often)
+
+
+def account_tag(nsa):
+    """What the log calls an account: the first 8 hex digits of its NSA id's SHA-256 - enough to
+    follow one install through the log, too little to log in with or to get the id back from."""
+    return hashlib.sha256(nsa.encode()).hexdigest()[:8]
+
+
+def nsa_forms(nsa):
+    """The ways an NSA id (16 hex digits) can show up in a message's bytes: as text in hex (the
+    token's) or decimal (the login's user name), or as a u64 either way round."""
+    n = int(nsa, 16)
+    return (nsa.encode(), nsa.upper().encode(), str(n).encode(), struct.pack("<Q", n), struct.pack(">Q", n))
 
 
 class Bucket:
@@ -89,6 +108,7 @@ class Accounts(JsonStore):
         self.data = {"next_pid": 1000001, "users": {}}
         self.data.update(self.load() or {})
         self.names = {u["pid"]: u["name"] for u in self.data["users"].values()}
+        self.nsa_of = {}         # pid -> NSA id, of the accounts logged in since the server started (for shown)
         self.new_accounts = Bucket(NEW_ACCOUNTS_RATE, NEW_ACCOUNTS_BURST)
 
     def content(self):
@@ -107,6 +127,7 @@ class Accounts(JsonStore):
             u["name"] = name
             self.dirty = True
         self.names[u["pid"]] = u["name"]
+        self.nsa_of[u["pid"]] = nsa
         return u["pid"]
 
     def name(self, pid):
@@ -162,6 +183,17 @@ class NexServer:
     def info(self, *what):
         if self.verbose:
             self.say("[nex]", *what)
+
+    def shown(self, conn, data, limit=256, protocol=None):
+        """A client's message bytes as they may go into the log: in hex, but only their size when
+        they may carry the account's secret - anything to the authentication server or of Ticket
+        Granting (logging in sends the token), or anything holding the player's own NSA id."""
+        if not conn.server.secure or protocol in AUTH_PROTOCOLS:
+            return f"({len(data)} B, not shown: logging in carries the account's token)"
+        nsa = self.accounts.nsa_of.get(conn.pid)
+        if nsa is not None and any(form in data for form in nsa_forms(nsa)):
+            return f"({len(data)} B, not shown: they hold the account's NSA id)"
+        return hexdump(data, limit)
 
     def register(self, protocol, method, fn):
         self.handlers[(protocol, method)] = fn
@@ -281,7 +313,7 @@ class NexServer:
             s = StreamIn(payload)
             ticket, request = s.buffer(), s.buffer()
         except Exception as e:
-            self.info(f"secure CONNECT from {conn.addr}: bad payload ({e}): {hexdump(payload, 64)}")
+            self.info(f"secure CONNECT from {conn.addr}: bad payload ({e}; {len(payload)} B, a ticket: not shown)")
             return None
         opened = self.tickets.open_inner(ticket)
         if opened is None:
@@ -325,7 +357,7 @@ class NexServer:
         try:
             m = rmc.decode(data)
         except Exception as e:
-            self.info(f"{self.name(conn)}: undecodable RMC message ({e}): {hexdump(data, 64)}")
+            self.info(f"{self.name(conn)}: undecodable RMC message ({e}): {self.shown(conn, data, 64)}")
             return
         if not m.request:
             cb = self.pending_calls.pop(m.call_id, None)
@@ -347,7 +379,7 @@ class NexServer:
             self.reply_error(conn, m, rmc.CORE_NOT_IMPLEMENTED)
             return
         if fn is None:
-            self.info(f"UNHANDLED {what} from {self.name(conn)}: {hexdump(m.body, 512)}")
+            self.info(f"UNHANDLED {what} from {self.name(conn)}: {self.shown(conn, m.body, 512, m.protocol)}")
             self.reply_error(conn, m, rmc.CORE_NOT_IMPLEMENTED)
             return
         try:
@@ -357,7 +389,7 @@ class NexServer:
             self.reply_error(conn, m, e.code)
             return
         except Exception as e:
-            self.info(f"{what} from {self.name(conn)} failed: {e!r}; parameters {hexdump(m.body, 512)}")
+            self.info(f"{what} from {self.name(conn)} failed: {e!r}; parameters {self.shown(conn, m.body, 512, m.protocol)}")
             self.save_request(m)
             self.reply_error(conn, m, rmc.CORE_INVALID_ARGUMENT)
             return
@@ -373,8 +405,9 @@ class NexServer:
 
     def save_request(self, m):
         """(debugging) The parameters of a request this server could not take, for replaying offline:
-        <state>/requests/<protocol>-<method>.bin (one a method every SAVE_REQUEST_EVERY seconds)."""
-        if not self.state_dir:
+        <state>/requests/<protocol>-<method>.bin (one a method every SAVE_REQUEST_EVERY seconds).
+        Never Ticket Granting's: logging in carries the account's token, and these get passed on."""
+        if not self.state_dir or m.protocol in AUTH_PROTOCOLS:
             return
         key = (m.protocol, m.method)
         last = self.saved_requests.get(key)
@@ -405,7 +438,7 @@ class NexServer:
         _v, raw = s.struct()
         p = StreamIn(raw)
         platform = p.u32()
-        username = p.string()
+        _username = p.string()   # (can be the NSA id itself - nex.selftest's is, in decimal - so never logged)
         holder, data = p.anydata()
         token = ""
         if holder == "AuthenticationInfo":
@@ -417,19 +450,22 @@ class NexServer:
             token = a.string()
         parts = token.split(".", 3)
         if len(parts) != 4 or parts[0] != "ssbu-port" or not NSA_ID.match(parts[2]):
-            self.info(f"login refused from {conn.addr}: token {token[:60]!r} (user {username[:40]!r}, "
-                      f"holder {holder[:40]!r})")
+            # (its shape only: the token holds the secret, and so can the user name)
+            what = ("not a port token" if parts[0] != "ssbu-port" else
+                    f"a port token of {len(parts)} fields" if len(parts) != 4 else "a port token with a bad NSA id")
+            self.info(f"login refused from {conn.addr}: {what} ({len(token)} characters; holder {clean(holder, 40)!r})")
             raise rmc.NexError(rmc.RENDEZVOUS_INVALID_USERNAME, "not a port token")
         nsa = parts[2]
         name = "".join(ch for ch in parts[3][:MAX_NAME] if ch.isprintable())
         pid = self.accounts.login(nsa, name, self.now)
         if pid is None:
-            self.info(f"login refused from {conn.addr}: no new accounts now ({len(self.accounts.data['users'])} kept)")
+            self.info(f"login refused from {conn.addr}: no new accounts now ({len(self.accounts.data['users'])} kept; "
+                      f"account {account_tag(nsa)})")
             raise rmc.NexError(rmc.RENDEZVOUS_LIMIT_EXCEEDED, "no new accounts now")
         conn.pid = pid
         ticket, source_key, _session = self.tickets.issue(pid, SERVER_PID, datetime_now())
         rest = p.read(p.left()) if p.left() else b""
-        self.info(f"login: {clean(name)} (nsa {nsa}, user {username[:40]!r}, platform {platform}) -> pid {pid}; "
+        self.info(f"login: {clean(name)} (account {account_tag(nsa)}, platform {platform}) -> pid {pid}; "
                   f"rest of the parameters {hexdump(rest, 64)}")
         out = StreamOut()
 

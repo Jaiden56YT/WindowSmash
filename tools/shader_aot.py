@@ -2,7 +2,7 @@
 """Compile the game's shaders ahead of time, into the renderer's disk cache.
 
 Usage:
-  shader_aot.py [--tree <dir>] [--jobs N] [--dry]
+  shader_aot.py [--jobs N] [--dry]
 
 The game's GPU programs are stored in data.arc as they are uploaded: in the effect files
 (.eff), the shader databases (.nushdb) and nested archives (.arc); a few more are built into the
@@ -11,7 +11,7 @@ header word: 256-byte boundaries + 0x30 in effects and archives, 8-byte ones in 
 of a database's programs start 8 bytes past a 16-byte one - and 16-byte ones in the executables),
 keeps one copy of each, pairs each pixel program with the vertex programs of its file (a vertex
 program's outputs are its pixel program's inputs), and has tools/shaderaot.c translate and
-compile them all into <tree>/dump/shadercache, exactly as the renderer would: a program's first
+compile them all into dump/shadercache, exactly as the renderer would: a program's first
 use in the game then loads its DXBC instead of compiling it.
 
 The files are dated 2001-01-01 until the game first uses them, so the start's prewarm only
@@ -251,11 +251,10 @@ def low_priority():
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
-    ap.add_argument("--tree", default=ROOT, help="the game version's folder (default: the port's own)")
     ap.add_argument("--jobs", type=int, default=default_jobs())
     ap.add_argument("--dry", action="store_true")
     a = ap.parse_args()
-    tree = os.path.abspath(a.tree)
+    tree = ROOT
     t0 = time.time()
     arc = A.Arc(os.path.join(tree, "dump", "modules", "romfs.cfg"))
     read_errors = []

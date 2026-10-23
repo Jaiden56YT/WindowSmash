@@ -202,40 +202,20 @@ class LauncherIniTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual((self.dir / 'n.txt').read_bytes(), b'Zo\xc3\xab\r\n')
 
-    def test_versions(self):
+    def test_game_version(self):
         d = self.dir / 'port'
-
-        def make(*parts, text=b''):
-            p = d.joinpath(*parts)
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_bytes(text)
-        make('build', 'ssbu.exe')
-        make('version.txt', text=b'11.0.0\r\n')
-        make('v13.0.5', 'build', 'ssbu.exe')
-        make('v13.0.5', 'dump', 'modules', 'romfs.cfg')
-        make('v13.0.5', 'version.txt', text=b'\r\n; a comment\r\n13.0.5\r\nmore\r\n')
-        make('half', 'build', 'ssbu.exe')                 # (no dump\modules\romfs.cfg: not a version)
-        make('zz', 'build', 'ssbu.exe')
-        make('zz', 'dump', 'modules', 'romfs.cfg')
-        make('nothing', 'dump', 'modules', 'romfs.cfg')
-        script = (dot_source(d) +
-                  '$v = @(Get-GameVersions $Root)\n'
-                  '$v | ForEach-Object { "$($_.Tree)|$($_.Label)" }\n'
-                  '"default|" + (Get-DefaultVersion $v $Root).Tree\n'
-                  '[IO.File]::WriteAllText((Join-Path $Root "last_version.txt"), "V13.0.5`r`n")\n'
-                  '"last|" + (Get-DefaultVersion $v $Root).Tree\n'
-                  '"cmd|" + (Get-GameCommand "v13.0.5")\n')
-        r = run_ps(script)
+        d.mkdir()
+        script = dot_source(d) + '"[" + (Get-GameVersion $Root) + "|" + (Test-GameBuilt $Root) + "]"\n'
+        self.assertEqual(run_ps(script).stdout.strip(), '[|False]')
+        (d / 'build').mkdir()
+        (d / 'build' / 'ssbu.exe').write_bytes(b'')
+        (d / 'version.txt').write_bytes(b'\r\n; a comment\r\n13.0.5\r\n# game version of this folder\r\n')
+        r = run_ps(script + '"cmd|" + (Get-GameCommand)\n')
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.splitlines(), [
-            '.|11.0.0  - build\\, save\\',
-            'v13.0.5|13.0.5  - v13.0.5\\',
-            'zz|zz  - zz\\',
-            'default|zz',
-            'last|v13.0.5',
-            'cmd|v13.0.5\\build\\ssbu.exe v13.0.5\\dump\\modules --status 30 --online > v13.0.5\\build\\play.log 2>&1',
+            '[13.0.5|True]',
+            'cmd|build\\ssbu.exe dump\\modules --status 30 --online > build\\play.log 2>&1',
         ])
-        self.assertEqual(run_ps(dot_source(self.dir) + '@(Get-GameVersions $Root).Count').stdout.strip(), '0')
 
     def test_auto_starts_directly(self):
         """Play SSBU.bat's path with show_launcher = 0: no window, the game's command (here only printed)."""
@@ -245,8 +225,7 @@ class LauncherIniTests(unittest.TestCase):
         r = subprocess.run([POWERSHELL, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(LAUNCHER), '-Auto', '-DryRun',
                             '-Root', str(self.dir)], capture_output=True, text=True, timeout=120)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn('start "SSBU log" /min cmd /c ".\\build\\ssbu.exe .\\dump\\modules --status 30 --online > .\\build\\play.log 2>&1"', r.stdout)
-        self.assertFalse((self.dir / 'last_version.txt').exists(), '-DryRun wrote last_version.txt')
+        self.assertIn('start "SSBU log" /min cmd /c "build\\ssbu.exe dump\\modules --status 30 --online > build\\play.log 2>&1"', r.stdout)
         (self.dir / 'build' / 'ssbu.exe').unlink()
         r = subprocess.run([POWERSHELL, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(LAUNCHER), '-Auto', '-DryRun',
                             '-Root', str(self.dir)], capture_output=True, text=True, timeout=120)

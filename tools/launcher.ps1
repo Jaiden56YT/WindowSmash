@@ -12,14 +12,14 @@ their comments and every line it does not change:
   online_name.txt   the online name (empty: the game picks one at its first online start)
   online_direct.txt on / off: direct connections
   launcher.ini      show_launcher = 0: Play SSBU.bat starts the game directly (hold Shift for this window)
-  last_version.txt  the game version picked (tools\pick_version.bat reads it too)
 Play saves only the values changed in the window, then starts what Play SSBU.bat starts: the game
-with --online, its output in <version folder>\build\play.log. Close starts nothing and saves nothing.
+with --online, its output in build\play.log. Close starts nothing and saves nothing. The game
+version shown is version.txt's (what the build wrote: 13.0.5).
 
 The ini writer follows the game's own (runtime/hle_settings.c, settings_ini_set) byte for byte:
 tests/test_launcher_ini.py checks the two give the same files.
 
-Exit codes: 0 played or closed, 1 no game version is built, 2 the window could not be opened
+Exit codes: 0 played or closed, 1 the game isn't built here, 2 the window could not be opened
 (Play SSBU.bat then starts the game the old way).
 
 .PARAMETER Auto
@@ -229,59 +229,35 @@ function Set-LineValue([string]$Path, [string]$Line) {
     return $true
 }
 
-# ---- game versions (as tools\pick_version.bat) ---------------------------------------------
-function Get-GameVersions([string]$Dir) {
-    <# The built versions: '.' when build\ssbu.exe is there, then each folder with build\ssbu.exe and
-       dump\modules\romfs.cfg; each @{Tree; Label}, the label from version.txt's first line. #>
-    $trees = @()
-    if (Test-Path -LiteralPath (Join-Path $Dir 'build\ssbu.exe') -PathType Leaf) { $trees += '.' }
-    foreach ($d in Get-ChildItem -LiteralPath $Dir -Directory | Sort-Object Name) {
-        if ((Test-Path -LiteralPath (Join-Path $d.FullName 'build\ssbu.exe') -PathType Leaf) -and
-            (Test-Path -LiteralPath (Join-Path $d.FullName 'dump\modules\romfs.cfg') -PathType Leaf)) { $trees += $d.Name }
-    }
-    foreach ($tree in $trees) {
-        $ver = $tree
-        $file = Join-Path (Join-Path $Dir $tree) 'version.txt'
-        if (Test-Path -LiteralPath $file -PathType Leaf) {
-            # (for /f: the first line that is neither empty nor a ';' comment)
-            foreach ($l in [IO.File]::ReadAllLines($file, [Text.Encoding]::Default)) {
-                if ($l.Length -and $l[0] -ne ';') { $ver = $l; break }
-            }
-        }
-        $where = if ($tree -eq '.') { 'build\, save\' } else { "$tree\" }
-        [pscustomobject]@{ Tree = $tree; Label = "$ver  - $where" }
-    }
+# ---- the game ------------------------------------------------------------------------------
+$NotBuilt = "The game isn't built here yet: run Install WindowSmash.bat."
+
+function Test-GameBuilt([string]$Dir) {
+    return Test-Path -LiteralPath (Join-Path $Dir 'build\ssbu.exe') -PathType Leaf
 }
 
-function Get-DefaultVersion($Versions, [string]$Dir) {
-    <# The version picked last time (last_version.txt), else the last one listed. #>
-    $Versions = @($Versions)
-    if (-not $Versions.Count) { return $null }
-    $pick = $Versions[$Versions.Count - 1]
-    $file = Join-Path $Dir 'last_version.txt'
+function Get-GameVersion([string]$Dir) {
+    <# The game version the build wrote: version.txt's first line that is neither empty nor a
+       comment, or '' (none written yet). #>
+    $file = Join-Path $Dir 'version.txt'
     if (Test-Path -LiteralPath $file -PathType Leaf) {
-        $last = [IO.File]::ReadAllLines($file) | Select-Object -First 1
-        foreach ($v in $Versions) { if ([string]::Equals($v.Tree, $last, [StringComparison]::OrdinalIgnoreCase)) { $pick = $v } }
+        foreach ($l in [IO.File]::ReadAllLines($file, [Text.Encoding]::Default)) {
+            if ($l.Length -and $l[0] -ne ';' -and $l[0] -ne '#') { return $l }
+        }
     }
-    return $pick
+    return ''
 }
 
-function Get-GameCommand([string]$Tree) {
+function Get-GameCommand {
     <# What Play SSBU.bat runs, inside start "SSBU log" /min cmd /c "...". #>
-    return "$Tree\build\ssbu.exe $Tree\dump\modules --status 30 --online > $Tree\build\play.log 2>&1"
+    return 'build\ssbu.exe dump\modules --status 30 --online > build\play.log 2>&1'
 }
 
-function Start-Game([string]$Tree) {
-    $cmd = Get-GameCommand $Tree
-    $line = "start `"SSBU log`" /min cmd /c `"$cmd`""
+function Start-Game {
+    $line = "start `"SSBU log`" /min cmd /c `"$(Get-GameCommand)`""
     if ($DryRun) { Write-Host "would start, in $Root`: $line"; return }
     foreach ($v in $ClearedVars) { Remove-Item -LiteralPath "Env:$v" -ErrorAction SilentlyContinue }
     Start-Process -FilePath $env:ComSpec -ArgumentList "/c $line" -WorkingDirectory $Root -WindowStyle Hidden
-}
-
-function Save-Version([string]$Tree) {
-    if ($DryRun) { Write-Host "would write last_version.txt: $Tree"; return }
-    [IO.File]::WriteAllText((Join-Path $Root 'last_version.txt'), "$Tree`r`n", [Text.Encoding]::ASCII)
 }
 
 function Get-Number([string]$s) {
@@ -307,16 +283,11 @@ try {
     exit 2
 }
 
-$versions = @(Get-GameVersions $Root)
-$preferred = $null
-if ($env:SSBU_TREE) { $preferred = $versions | Where-Object { $_.Tree -eq $env:SSBU_TREE } | Select-Object -First 1 }
-if (-not $preferred) { $preferred = Get-DefaultVersion $versions $Root }
+$built = Test-GameBuilt $Root
 
 if ($Auto -and -not (Test-ShowLauncher) -and -not ([Windows.Forms.Control]::ModifierKeys -band [Windows.Forms.Keys]::Shift)) {
-    if (-not $preferred) { Write-Host 'No game version is built here yet - see docs\VERSIONS.md.'; exit 1 }
-    Write-Host "Game version $($preferred.Label)"
-    Save-Version $preferred.Tree
-    Start-Game $preferred.Tree
+    if (-not $built) { Write-Host $NotBuilt; exit 1 }
+    Start-Game
     exit 0
 }
 
@@ -408,9 +379,8 @@ function New-TextBox([string]$Text, [int]$MaxLength, [int]$X, [int]$Y, [int]$W, 
 
 # Game version
 [void](New-Text 'Game version' 16 14 120 -Bold)
-$versionBox = New-Choice @($versions | ForEach-Object { @{ Value = $_.Tree; Text = $_.Label } }) $(if ($preferred) { $preferred.Tree }) 140 11 604 `
-    'Every game version built here has its own folder and save (docs\VERSIONS.md).'
-if ($versions.Count -le 1) { $versionBox.Enabled = $false }
+$gameVersion = Get-GameVersion $Root
+[void](New-Text $(if (-not $built) { 'not built yet' } elseif ($gameVersion) { $gameVersion } else { 'built' }) 140 14 604)
 
 # Display (left column)
 $L = 16; $LC = 140; $LW = 220
@@ -527,8 +497,8 @@ $sep.BorderStyle = [Windows.Forms.BorderStyle]::Fixed3D
 [void](Add-Control $sep $L 448 728 2)
 
 $directStart = New-Check 'Start the game directly next time (hold Shift while starting to see this window again)' (-not (Test-ShowLauncher)) $L 462 728
-if (-not $versions.Count) {
-    $none = New-Text 'No game version is built here yet - see docs\VERSIONS.md.' $L 496 728
+if (-not $built) {
+    $none = New-Text $NotBuilt $L 496 728
     $none.ForeColor = [Drawing.Color]::Firebrick
 }
 
@@ -536,7 +506,7 @@ $play = New-Object Windows.Forms.Button
 $play.Text = 'Play'
 $play.Font = $boldFont
 [void](Add-Control $play 488 528 150 32)
-$play.Enabled = [bool]$versions.Count
+$play.Enabled = $built
 $close = New-Object Windows.Forms.Button
 $close.Text = 'Close'
 $close.DialogResult = [Windows.Forms.DialogResult]::Cancel
@@ -615,7 +585,7 @@ $play.Add_Click({
         [void][Windows.Forms.MessageBox]::Show($form, "The settings could not be saved: $($_.Exception.Message)", 'WindowSmash', 'OK', 'Error')
         return
     }
-    $script:played = $versionBox.SelectedItem.Value
+    $script:played = $true
     $form.Close()
 })
 
@@ -626,7 +596,6 @@ $play.Add_Click({
     exit 2
 }
 if ($script:played) {
-    Save-Version $script:played
-    Start-Game $script:played
+    Start-Game
 }
 exit 0

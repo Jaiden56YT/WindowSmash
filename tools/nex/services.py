@@ -42,10 +42,10 @@ class Services:
 
     def no_reply(self, protocol, method):
         from .rmc import name_of
-        from .streams import hexdump
 
         def handler(conn, s):
-            self.nex.info(f"{name_of(protocol, method)} from {self.nex.name(conn)}: {hexdump(s.read(s.left()), 160)}")
+            self.nex.info(f"{name_of(protocol, method)} from {self.nex.name(conn)}: "
+                          f"{self.nex.shown(conn, s.read(s.left()), 160, protocol)}")
             return b""
         return handler
 
@@ -75,7 +75,7 @@ class Services:
     # {u16 0, s32 -1} (parser main+0x25e8d0; field layout not confirmed - 6 bytes either way).
     def utility_10(self, conn, s):
         raw = s.read(s.left())
-        self.nex.info(f"{self.nex.name(conn)}: Utility 10 {raw.hex()}")
+        self.nex.info(f"{self.nex.name(conn)}: Utility 10 {self.nex.shown(conn, raw, 64, 110)}")
         out = StreamOut()
         out.struct(lambda o: (o.u16(0), o.s32(-1)))
         return out.get()
