@@ -243,6 +243,9 @@ static void mods_path(char *out, size_t n, const char *rest) {
     snprintf(out, n, "%s/../skyline/sd/ultimate/no-mod/%s", rt_data_dir, rest);
 }
 
+static int fs_trace = -1;   /* SSBU_FS_TRACE=1: every path asked for, on stderr (debugging) */
+#define FS_TRACE(...) do { if (fs_trace < 0) fs_trace = getenv("SSBU_FS_TRACE") != NULL; if (fs_trace) fprintf(stderr, "[fs] " __VA_ARGS__); } while (0)
+
 static void host_path(char *out, size_t n, struct Mount *m, const char *rest) {
     while (*rest == '/') rest++;
     if (!strcmp(m->name, "mods")) { mods_path(out, n, rest); return; }
@@ -331,6 +334,7 @@ HLE(_ZN2nn2fs6CommitEPKc) { c->x[0] = 0; }   /* host writes are already durable 
 
 /* ---- queries --------------------------------------------------------------------- */
 HLE(_ZN2nn2fs12GetEntryTypeEPNS0_18DirectoryEntryTypeEPKc) {
+    FS_TRACE("%s %s\n", "fs12GetEntryTypeEPN", P(char, c->x[1]));
     const char *rest;
     ready();
     struct Mount *m = find_mount(P(char, c->x[1]), &rest);
@@ -352,6 +356,7 @@ HLE(_ZN2nn2fs12GetEntryTypeEPNS0_18DirectoryEntryTypeEPKc) {
 
 /* ---- files ----------------------------------------------------------------------- */
 HLE(_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci) {
+    FS_TRACE("%s %s\n", "fs8OpenFileEPNS0_10", P(char, c->x[1]));
     const char *rest;
     ready();
     struct Mount *m = find_mount(P(char, c->x[1]), &rest);
@@ -497,6 +502,7 @@ static void listing_add(Handle *h, const char *name, size_t len, int type, u64 s
 }
 
 HLE(_ZN2nn2fs13OpenDirectoryEPNS0_15DirectoryHandleEPKci) {   /* (handle*, path, mode) */
+    FS_TRACE("%s %s\n", "fs13OpenDirectoryEP", P(char, c->x[1]));
     const char *rest;
     ready();
     struct Mount *m = find_mount(P(char, c->x[1]), &rest);

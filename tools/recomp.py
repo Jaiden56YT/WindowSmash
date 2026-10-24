@@ -192,15 +192,31 @@ def hookable(name):
         with open(path, encoding="utf-8") as f:
             for line in f:
                 p = line.split()
-                if len(p) >= 2 and p[0] == name:
+                if len(p) == 2 and p[0] == name:
+                    out.add(int(p[1], 16))
+    return sorted(out)
+
+
+def inline_points(name):
+    """Offsets in module `name` where Skyline plugins put inline hooks (hooks.txt lines "<module>
+    <offset> inline"): rt_inline_hook runs there (lift.py), with the registers to read and change."""
+    path = os.path.join(TREE, "dump", "skyline", "hooks.txt")
+    out = set()
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                p = line.split()
+                if len(p) == 3 and p[0] == name and p[2] == "inline":
                     out.add(int(p[1], 16))
     return sorted(out)
 
 
 def module_fingerprint(fp, name):
     """tools_fingerprint, with the module's hook targets: a new one generates its C again."""
-    hooks = hookable(name)
-    return fp if not hooks else modcache.fingerprint(fp + "\nhooks " + " ".join(f"{h:x}" for h in hooks))
+    hooks, inline = hookable(name), inline_points(name)
+    if not hooks and not inline:
+        return fp
+    return modcache.fingerprint(fp + "\nhooks " + " ".join(f"{h:x}" for h in hooks) + "\ninline " + " ".join(f"{h:x}" for h in inline))
 
 
 def tools_fingerprint():
@@ -221,10 +237,10 @@ def write_if_changed(path, text):
     return True
 
 
-def _init(image_path, entries, base, forward, setjmp=None, pads=None, patches=None):
+def _init(image_path, entries, base, forward, setjmp=None, pads=None, patches=None, inline=None):
     f = open(image_path, "rb")
     _state["img"] = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-    _state["args"] = (entries, base, forward, setjmp, pads, patches)
+    _state["args"] = (entries, base, forward, setjmp, pads, patches, inline)
 
 
 # Code patches, as ARCropolis (github.com/Raytwo/ARCropolis, src/fixes.rs) makes them on the
@@ -371,6 +387,18 @@ def branch_target(w, pc):
     return pc + (imm - (1 << bits) if imm >> (bits - 1) else imm) * 4
 
 
+def sizes_of(mod):
+    from funcs import eh_frame_functions
+    return dict(eh_frame_functions(mod))
+
+
+def plugin_like(mod, found, sizes):
+    """A module built the way Skyline plugins are (Rust, panic=abort): with no unwind table, or one
+    that describes hardly any of its code (a debug build's: just its assembly stubs)."""
+    covered = sum(sizes.get(a, 0) for a, src in found.items() if "eh" in src)
+    return covered * 4 < mod.text.end - mod.text.mem
+
+
 def tail_entries(mod, found):
     """A module without an unwind table (a Skyline plugin: Rust built with panic=abort) has its
     functions only from calls, symbols and relocations; a function reached by tail branches
@@ -399,8 +427,10 @@ def tail_entries(mod, found):
             t = (pc & ~0xFFF) + (imm << 12) + ((nxt >> 10) & 0xFFF)
         else:
             t = pc + imm
-            if any(mod.u32(q) & 0xFFE0FC00 == 0x8B000800 and (mod.u32(q) >> 5) & 31 == rd
-                   for q in range(pc + 4, min(pc + 20, hi), 4)):
+            # (a jump table's anchor: added to the entry it loads, shifted or not - a debug build's
+            # is the adr's own address)
+            if t == pc or any(mod.u32(q) & 0xFF200000 == 0x8B000000 and rd in ((mod.u32(q) >> 5) & 31, (mod.u32(q) >> 16) & 31)
+                              for q in range(pc + 4, min(pc + 24, hi), 4)):
                 continue
         if lo <= t < hi and not t & 3 and t not in found:
             found[t] = {"adr"}
@@ -420,7 +450,7 @@ def load(path):
     """(module, {entry: sources}, [(entry, size)]) with every function that has code."""
     mod = Module(path)
     found, sizes = discover(mod)
-    if not any("eh" in src for src in found.values()):
+    if plugin_like(mod, found, sizes):
         tail_entries(mod, found)
     funcs = sorted((a, sizes[a]) for a, src in found.items() if "eh" in src or "plt" in src)
     # Hand-written assembly (system-call wrappers, memcpy, setjmp, ...) has no unwind entry.
@@ -551,10 +581,9 @@ def emit(path, roots, out, depth, sample=0):
 def unwind_tables(path):
     """For a module without an unwind table (a Skyline plugin): (offset, bytes, header size) of
     the ones tools/plugin_eh.py makes, which go after its image; else None."""
-    start, end = Module(path).eh_frame_hdr
-    if end > start:
-        return None
     mod, found, funcs = load(path)
+    if not plugin_like(mod, found, sizes_of(mod)):
+        return None
     import plugin_eh
     return plugin_eh.tables(mod, funcs)
 
@@ -621,14 +650,16 @@ def build(path, outdir, jobs, per_file):
     # outliner's helpers, which a `bl` reaches and which use the caller's callee-saved registers
     # as their own: lift.py's register cache (callee-saved registers kept in C locals across a
     # call) does not hold for those. Every register in the context, as with SSBU_REGCACHE=0.
-    plain = not any("eh" in src for src in found.values())
+    plain = plugin_like(mod, found, sizes_of(mod))
     regcache_was = os.environ.get("SSBU_REGCACHE")
     if plain:
         os.environ["SSBU_REGCACHE"] = "0"
+        os.environ["SSBU_DYNAMIC_JUMPS"] = "1"
     try:
         _build(mod, found, funcs, path, outdir, jobs, per_file)
     finally:
         if plain:
+            os.environ.pop("SSBU_DYNAMIC_JUMPS", None)
             if regcache_was is None:
                 del os.environ["SSBU_REGCACHE"]
             else:
@@ -660,7 +691,8 @@ def _build(mod, found, funcs, path, outdir, jobs, per_file):
         chunks.append(cur)
     defined = {a for a, _ in funcs}
     missing, manifest, bad, unresolved = set(), [], 0, []
-    with Pool(jobs, _init, (image_file(mod), set(found), base, forward, setjmp_targets(mod), pads, patches)) as pool:
+    inline = set(inline_points(name)) & {pc for a, size in funcs for pc in range(a, a + size, 4)}
+    with Pool(jobs, _init, (image_file(mod), set(found), base, forward, setjmp_targets(mod), pads, patches, inline)) as pool:
         tasks = [(i, c, outdir) for i, c in enumerate(chunks)]
         for fname, ext, insns, biggest, b, unres in pool.imap_unordered(_emit, tasks):
             missing |= ext - defined
@@ -677,7 +709,7 @@ def _build(mod, found, funcs, path, outdir, jobs, per_file):
     size = sum(os.path.getsize(os.path.join(outdir, n)) for n, _i, _b in manifest)
     print(f"{name}: {len(manifest)} files, {size / 1048576:,.0f} MB of C, {len(defined):,} functions, "
           f"{sum(i for _n, i, _b in manifest):,} instructions; {bad} untranslated, {len(missing)} calls to nowhere, "
-          f"{len(unresolved)} unresolved jump tables, {len(forward)} replaced natively, {len(patches)} code patches, {len(hooks)} hookable; "
+          f"{len(unresolved)} unresolved jump tables, {len(forward)} replaced natively, {len(patches)} code patches, {len(hooks)} hookable, {len(inline)} inline hooks; "
           f"{imports:,} symbols referenced by {relocs:,} relocations")
 
 

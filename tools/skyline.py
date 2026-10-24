@@ -34,7 +34,10 @@ ROOT = os.path.dirname(HERE)
 
 # Game functions runtime/hle_skyline.c hooks itself that the game also calls directly (the CSK
 # Collection's select-screen redirect: the fighter set-up and the portrait paths)
-NATIVE_HOOKS = ("main 66dcf0", "main 3238a70")
+NATIVE_HOOKS = ("main 66dcf0", "main 3238a70", "main 64b730", "main 6079d0") + tuple(   # (+ Smashline's cloned-weapon swaps, inline)
+    f"main {o:x} inline" for o in (0x33b6bd8, 0x33ad528, 0x33af3e8, 0x33ae488, 0x33ac5f0, 0x17e0a0c, 0x33ad42c, 0x33af2ec,
+                                   0x33ae38c, 0x33ac504, 0x17e094c, 0x33b6de0, 0x33b6fa0, 0x33b72c4, 0x33ad43c, 0x33af2fc,
+                                   0x33ae39c, 0x33ac514))
 # (provided natively by runtime/hle_skyline.c, or linked into the plugins that use them)
 NATIVE = {"libsmashline_plugin.nro", "libsmashline_hook.nro", "libparam_config.nro", "libarcropolis.nro",
           "libnro_hook.nro", "libthe_csk_collection.nro", "libskyline.nro"}
@@ -110,9 +113,12 @@ def generate(p, name, log):
     nro = os.path.join(p.nro, name + ".nro")
     img = os.path.join(p.modules, name + ".reloc.bin")
     out = os.path.join(p.build, name)
-    if not os.path.exists(img) or os.path.getmtime(img) < os.path.getmtime(nro):
+    table = os.path.join(out, "g_module.c")
+    fresh_c = not os.path.exists(table) or os.path.getmtime(table) < os.path.getmtime(nro)
+    # (the image goes with the C: its size, and the unwind tables recomp.py adds to a plugin's)
+    if fresh_c or not os.path.exists(img) or os.path.getmtime(img) < os.path.getmtime(nro):
         recomp(p, "image", nro, "--out", img)
-    if not os.path.exists(os.path.join(out, "g_module.c")) or os.path.getmtime(os.path.join(out, "g_module.c")) < os.path.getmtime(nro):
+    if fresh_c:
         log(f"{name}: generating its C")
         log(recomp(p, "build", nro, "--out", out, "--jobs", "1").strip().splitlines()[-1])
 
@@ -128,8 +134,14 @@ def sync(tree, log=print):
             f.writelines(h + "\n" for h in missing)
     record = load_record(p)
     names = []
+    skip = set()   # (dump/skyline/skip.txt: plugins left out, by module name or mod-relative file - one that does not run yet)
+    if os.path.exists(os.path.join(p.skyline, "skip.txt")):
+        skip = {l.split("#")[0].strip() for l in open(os.path.join(p.skyline, "skip.txt"), encoding="utf-8")} - {""}
     for mod, source in turned_on(tree):
         build_id, name = module_of(p, source, record)
+        if name in skip or os.path.relpath(source, os.path.join(tree, "mods")).replace(os.sep, "/") in skip:
+            log(f"{mod}: plugin {os.path.relpath(source, os.path.join(tree, 'mods', mod))} left out (dump/skyline/skip.txt)")
+            continue
         record[build_id] = {"module": name, "mod": mod, "file": os.path.relpath(source, tree)}
         generate(p, name, log)
         if name not in names:
@@ -141,7 +153,16 @@ def sync(tree, log=print):
     t = mods.Tree(tree)
     state = t.load()
     with open(os.path.join(p.skyline, "mods.txt"), "w", encoding="utf-8", newline="\n") as f:   # (the runtime's mods: mount)
-        f.writelines(f"{n}\n" for n in state["order"] if state["mods"].get(n, {}).get("enabled"))
+        for n in state["order"]:   # (each data root of a mod: a pack keeps its mods in subfolders)
+            if state["mods"].get(n, {}).get("enabled"):
+                folder = os.path.join(t.mods, n)
+                roots = []
+                for dp, dirs, _f in os.walk(folder):
+                    if any(d.lower() in mods.TOP for d in dirs):
+                        roots.append(dp)
+                    dirs[:] = [d for d in dirs if d.lower() not in mods.TOP]   # (not into a root's own data)
+                roots = roots or [folder]
+                f.writelines(os.path.relpath(r, t.mods).replace(os.sep, "/") + "\n" for r in roots)
     text = "".join(f"{n}\n" for n in names)
     old = open(p.list, encoding="utf-8").read() if os.path.exists(p.list) else ""
     if text != old:
@@ -191,12 +212,26 @@ def hook_targets(p):
     return out
 
 
+def inline_targets(p):
+    """{module: {offset}} of the inline hook points the runtime listed ("<module> <offset> inline")."""
+    out = {}
+    if os.path.exists(p.hooks):
+        for line in open(p.hooks, encoding="utf-8"):
+            m = re.match(r"(\w+)\s+([0-9a-f]+)\s+inline$", line.strip())
+            if m:
+                out.setdefault(m.group(1), set()).add(int(m.group(2), 16))
+    return out
+
+
 def stale_hooks(tree):
     """The game modules whose generated C lacks hook targets the runtime listed (hooks.txt)."""
     import recomp as rc
     rc.TREE = tree
     out = []
-    for mod, offs in sorted(hook_targets(Paths(tree)).items()):
+    p = Paths(tree)
+    hooks, inline = hook_targets(p), inline_targets(p)
+    for mod in sorted(set(hooks) | set(inline)):
+        offs = hooks.get(mod, set())
         table = os.path.join(tree, "build", mod, "g_module.c") if mod in ("main", "subsdk0", "sdk") else \
             os.path.join(tree, "build", "nro", mod, "g_module.c")
         base = rc.MODULES.get(mod) or rc.nro_modules().get(mod) if os.path.exists(table) else None
@@ -205,6 +240,15 @@ def stale_hooks(tree):
         text = open(table, encoding="utf-8").read()
         if any(f"f_{base + o:x}_orig" not in text for o in offs):
             out.append(mod)
+            continue
+        if inline.get(mod):   # (the C files: is each point's rt_inline_hook in one?)
+            folder = os.path.dirname(table)
+            have = set()
+            for n in os.listdir(folder):
+                if n.startswith("g") and n.endswith(".c") and n != "g_module.c":
+                    have |= {int(h, 16) for h in re.findall(r"rt_inline_hook\(c, 0x([0-9A-Fa-f]+)ull\)", open(os.path.join(folder, n), encoding="utf-8").read())}
+            if any(base + o not in have for o in inline[mod]):
+                out.append(mod)
     return out
 
 

@@ -319,9 +319,9 @@ class App:
             m["online"] = packs.online_safety(folder)
             m["plugins"] = mods.plugins(folder)
             m["plugin_state"] = skyline.plugin_state(self.tree.root, m["name"], m["plugins"]) if m["plugins"] else []
-        out["unsafe_on"] = [m["title"] or m["name"] for m in out["mods"] if m["enabled"] and m["online"]["level"] == "unsafe"]
-        out["same_on"] = [m["title"] or m["name"] for m in out["mods"] if m["enabled"] and m["online"]["level"] == "same"]
-        out["unbuilt"] = [m["title"] or m["name"] for m in out["mods"] if m["enabled"] and any(not p["built"] for p in m["plugin_state"])]
+        out["unsafe_on"] = [m.get("title") or m["name"] for m in out["mods"] if m["enabled"] and m["online"]["level"] == "unsafe"]
+        out["same_on"] = [m.get("title") or m["name"] for m in out["mods"] if m["enabled"] and m["online"]["level"] == "same"]
+        out["unbuilt"] = [m.get("title") or m["name"] for m in out["mods"] if m["enabled"] and any(not p["built"] for p in m["plugin_state"])]
         out["game_running"] = game_running()
         out["root"] = self.tree.root
         out["platform"] = sys.platform

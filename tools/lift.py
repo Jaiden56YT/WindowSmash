@@ -81,6 +81,7 @@ def logical(sf, opc, a, b, rd, rd_sp):
 # Guest registers in C locals, the context brought up to date only where something else reads
 # it (tools/regcache.py). SSBU_REGCACHE=0: every register in the context, as before.
 REGCACHE = os.environ.get("SSBU_REGCACHE", "1") != "0"
+DYNAMIC_JUMPS = os.environ.get("SSBU_DYNAMIC_JUMPS") == "1"   # (recomp.py: for Skyline plugins; analyze_tables)
 # Not for giant functions (a 200,000-instruction one in lua2cpp_item): their locals tie the
 # optimiser in knots for half an hour; they stay as they were (the two forms call each other
 # freely: the context is right at every call and return either way).
@@ -116,8 +117,9 @@ def fp_imm8(imm8):
 
 
 class Lifter(SimdMixin):
-    def __init__(self, image, entries, base=BASE, forward=None, setjmp=None, pads=None, patches=None):
+    def __init__(self, image, entries, base=BASE, forward=None, setjmp=None, pads=None, patches=None, inline=None):
         self.img = image
+        self.inline = inline or set()   # offsets of Skyline inline hooks: rt_inline_hook before the instruction (recomp.hookable)
         self.base = base         # guest address the module is loaded at
         self.forward = forward or {}   # entry offset -> native function that replaces it
         self.setjmp = setjmp or set()  # offsets of setjmp (or its import stub): calls become host setjmp
@@ -164,6 +166,8 @@ class Lifter(SimdMixin):
                 stmt, falls = self.insn(w, pc)
                 if pc in here:   # the words before the last run first
                     stmt = " ".join([self.insn(x, pc)[0] for x in here[pc][:-1]] + [stmt])
+                if pc in self.inline:   # (every register in the context here: no register cache in this function)
+                    stmt = (f"{{ extern void rt_inline_hook(Cpu *, u64); rt_inline_hook(c, {const(self.base + pc)}); }} " + stmt)
             except Unsupported as e:
                 reasons[(str(e), w)] += 1
                 stmt, falls = f'rt_trap(c, {const(self.base +pc)}, "unsupported");', True
@@ -174,7 +178,7 @@ class Lifter(SimdMixin):
         elif falls:
             body.append((None, f'rt_trap(c, {const(self.base + self.fend)}, "fell off the end of a function");', False))
         decl = []
-        if REGCACHE and len(self.words) <= REGCACHE_MAX:
+        if REGCACHE and len(self.words) <= REGCACHE_MAX and not any(start <= o < self.fend for o in self.inline):
             decl, cached = regcache.apply([(pc, mark_syncs(s), f) for pc, s, f in body], self.leaders,
                                           bool(self.sites) or any("rt_setjmp" in s for _pc, s, _f in body))
             body = [(pc, s, f) for (pc, s), (_pc, _s, f) in zip(cached, body)]
@@ -672,17 +676,19 @@ class Lifter(SimdMixin):
             if not anchor or len(anchor) != 1 or k is None:
                 continue
             load = ws[k]
-            size = {0x38600800: 1, 0x78600800: 2}.get(load & 0xFFE00C00)   # ldrb / ldrh (register)
+            # ldrb / ldrh (register), or ldrsw (register, lsl #2): a debug build's table of 32-bit
+            # offsets from an anchor of its own (adr xA, .), not from the table
+            size, signed = {0x38600800: (1, False), 0x78600800: (2, False), 0xB8A00800: (4, True)}.get(load & 0xFFE00C00, (0, False))
             table = reach((load >> 5) & 31, k, True) if size else None
             if not table or len(table) != 1:
                 continue
             anchor, table = next(iter(anchor)), next(iter(table))
             targets = set()
-            for e in range(256 if size == 1 else 4096):
+            for e in range({1: 256, 2: 4096, 4: 4096}[size]):
                 at = table + e * size
                 if at + size > len(self.img):
                     break
-                t = anchor + (int.from_bytes(self.img[at:at + size], "little") << shift)
+                t = anchor + (int.from_bytes(self.img[at:at + size], "little", signed=signed) << shift)
                 if not self.fstart <= t < self.fend:
                     break
                 targets.add(t)
@@ -691,6 +697,15 @@ class Lifter(SimdMixin):
                 self.table_at[i] = targets
                 if self.fstart + i * 4 in self.unresolved:
                     self.unresolved.remove(self.fstart + i * 4)
+        # A Skyline plugin's dispatch that is still not resolved goes anywhere in its function: every
+        # instruction a case (SSBU_DYNAMIC_JUMPS, which recomp.py sets for modules without an unwind
+        # table, whose tables come in more forms than the game's compiler makes).
+        if DYNAMIC_JUMPS:
+            for i in pending:
+                pc = self.fstart + i * 4
+                if pc in self.unresolved and i not in self.table_at:
+                    self.table_at[i] = set(range(self.fstart, self.fend, 4))
+                    self.unresolved.remove(pc)
 
     # ------------------------------------------------------------------ loads / stores
     def load_store(self, w, pc):

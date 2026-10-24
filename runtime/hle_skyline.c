@@ -63,6 +63,21 @@ static void note_hook_target(u64 target) {
     if ((f = fopen(path, "a"))) { fputs(line, f); fclose(f); }
 }
 
+static void note_inline_point(u64 at) {
+    char where[96], line[128], path[1200], have[128];
+    rt_describe(at, where, sizeof where);
+    char *plus = strchr(where, '+');
+    if (!plus || strncmp(plus, "+0x", 3)) return;
+    *plus = 0;
+    snprintf(line, sizeof line, "%s %s inline\n", where, plus + 3);
+    snprintf(path, sizeof path, "%s/../skyline/hooks.txt", rt_data_dir);
+    FILE *f = fopen(path, "r");
+    while (f && fgets(have, sizeof have, f))
+        if (!strcmp(have, line)) { fclose(f); return; }
+    if (f) fclose(f);
+    if ((f = fopen(path, "a"))) { fputs(line, f); fclose(f); }
+}
+
 /* A64HookFunction(symbol, replace, result): calls to `symbol` go to `replace`; *result reaches
  * the function as it was. */
 HLE(A64HookFunction) {
@@ -75,11 +90,48 @@ HLE(A64HookFunction) {
     if (result) *P(u64, result) = original ? original : target;
 }
 
-/* A64InlineHook(address, callback): a callback at one instruction, with the registers - code
- * a recompiled function does not have, so not here (it would be a code patch at build time). */
+/* A64InlineHook(address, callback): callback(InlineCtx *) runs before the instruction at address,
+ * with the registers to read and change. Recompiled code has that call only where the build put it:
+ * the address goes into hooks.txt as an inline point (tools/recomp.py inline_points), and the next
+ * build calls rt_inline_hook there. */
+typedef void InlineNative(Cpu *c, u64 arg);
+static struct { u64 at, callback; InlineNative *native; u64 arg; } inline_hooks[512];
+static u32 inline_n;
+static void note_inline_point(u64 at);
+
+static void add_inline_hook(u64 at, u64 callback, InlineNative *native, u64 arg) {
+    if (inline_n < sizeof inline_hooks / sizeof *inline_hooks) {
+        inline_hooks[inline_n].at = at; inline_hooks[inline_n].callback = callback;
+        inline_hooks[inline_n].native = native; inline_hooks[inline_n].arg = arg;
+        __atomic_store_n(&inline_n, inline_n + 1, __ATOMIC_RELEASE);
+    }
+    note_inline_point(at);
+}
+
 HLE(A64InlineHook) {
-    char a[96];
-    LOG("A64InlineHook at %s: inline hooks are not supported yet, left out", rt_describe(c->x[0], a, sizeof a));
+    char a[96], b[96];
+    LOG("A64InlineHook at %s -> %s", rt_describe(c->x[0], a, sizeof a), rt_describe(c->x[1], b, sizeof b));
+    add_inline_hook(c->x[0], c->x[1], NULL, 0);
+}
+
+/* (generated code, at an inline point) skyline-rs' InlineCtx: x0-x30, sp, then q0-q31. */
+void rt_inline_hook(Cpu *c, u64 at) {
+    u32 n = __atomic_load_n(&inline_n, __ATOMIC_ACQUIRE);
+    for (u32 i = 0; i < n; i++) {
+        if (inline_hooks[i].at != at) continue;
+        if (inline_hooks[i].native) { inline_hooks[i].native(c, inline_hooks[i].arg); continue; }
+        Cpu saved = *c;
+        u64 ctx = (c->sp - 0x400) & ~15ull;
+        for (int r = 0; r < 31; r++) *P(u64, ctx + 8ull * r) = c->x[r];
+        *P(u64, ctx + 0xF8) = c->sp;
+        memcpy(P(void, ctx + 0x100), c->v, 0x200);
+        c->sp = ctx - 0x100;
+        c->x[0] = ctx;
+        rt_call(c, inline_hooks[i].callback);
+        *c = saved;
+        for (int r = 0; r < 31; r++) c->x[r] = *P(u64, ctx + 8ull * r);
+        memcpy(c->v, P(void, ctx + 0x100), 0x200);
+    }
 }
 
 /* sky_memcpy(dest, src, n): plugins patch code and read-only data with it. Data changes work;
@@ -356,6 +408,156 @@ static void created(Cpu *c, int which) {
 FACTORY(0) FACTORY(1) FACTORY(2) FACTORY(3) FACTORY(4) FACTORY(5) FACTORY(6) FACTORY(7) FACTORY(8) FACTORY(9) FACTORY(10)
 static GuestFn *const factory_hooks[NFACTORIES] = {factory_0, factory_1, factory_2, factory_3, factory_4, factory_5,
                                                    factory_6, factory_7, factory_8, factory_9, factory_10};
+
+/* ---- weapons plugins clone (smashline_clone_weapon): a fighter gets another fighter's article ---- */
+/* The game asks for a fighter's static data (main+0x64b730: kind -> StaticFighterData, its article
+ * table at +8: {ArticleDescriptor *descriptors (32 bytes each, weapon id first); count}); the
+ * fighters with new articles get a copy with them appended, max counts changed as plugins say
+ * (smashline cloning/weapons.rs). */
+#define STATIC_FIGHTER_DATA 0x64b730
+static u64 static_data_original;
+static struct { int owner, original_owner, weapon; } new_articles[128];
+static u32 new_article_n;
+static struct { int weapon, count; } weapon_counts[128];
+static u32 weapon_count_n;
+static u64 static_cache[FIGHTER_COUNT];
+static struct { int weapon, old_owner, owner; u64 owner_name, new_name; } new_agents[128];
+static u32 new_agent_n;
+static volatile int current_owner = -1;   /* (the fighter being set up: main+0x6079d0) */
+static SRWLOCK weapons_lock = SRWLOCK_INIT;
+
+static int fighter_index(u64 str, u64 len) {
+    char name[64];
+    if (!str || len >= sizeof name) return -1;
+    memcpy(name, P(char, str), len);
+    name[len] = 0;
+    for (int k = 0; k < FIGHTER_COUNT; k++) {
+        const char *n = guest_name(FIGHTER_NAMES, k, FIGHTER_COUNT);
+        if (n && !strcmp(n, name)) return k;
+    }
+    LOG("smashline: no fighter called %s", name);
+    return -1;
+}
+
+/* (original owner {ptr, len}, original article id, new owner {ptr, len}, new name {ptr, len}, use original code) -> id */
+HLE(smashline_clone_weapon) {
+    int from = fighter_index(c->x[0], c->x[1]), weapon = (int)c->x[2], to = fighter_index(c->x[3], c->x[4]);
+    char name[64] = "";
+    if (c->x[5] && c->x[6] < sizeof name) { memcpy(name, P(char, c->x[5]), c->x[6]); name[c->x[6]] = 0; }
+    AcquireSRWLockExclusive(&weapons_lock);
+    int id = 0;
+    for (u32 i = 0; i < new_article_n; i++)
+        if (new_articles[i].owner == to) {
+            if (new_articles[i].original_owner == from && new_articles[i].weapon == weapon) { ReleaseSRWLockExclusive(&weapons_lock); c->x[0] = (u64)id; return; }
+            id++;
+        }
+    if (from >= 0 && to >= 0 && new_article_n < sizeof new_articles / sizeof *new_articles) {
+        new_articles[new_article_n].owner = to; new_articles[new_article_n].original_owner = from;
+        new_articles[new_article_n++].weapon = weapon;
+        memset(static_cache, 0, sizeof static_cache);
+        if (new_agent_n < sizeof new_agents / sizeof *new_agents) {   /* (the names its data goes by: the new owner's) */
+            char owner[64] = "";
+            const char *n = guest_name(FIGHTER_NAMES, to, FIGHTER_COUNT);
+            if (n) snprintf(owner, sizeof owner, "%s", n);
+            new_agents[new_agent_n].weapon = weapon; new_agents[new_agent_n].old_owner = from; new_agents[new_agent_n].owner = to;
+            new_agents[new_agent_n].owner_name = rt_guest_copy(owner, strlen(owner) + 1);
+            new_agents[new_agent_n].new_name = rt_guest_copy(name, strlen(name) + 1);
+            new_agent_n++;
+        }
+    }
+    ReleaseSRWLockExclusive(&weapons_lock);
+    LOG("smashline: weapon %d of fighter %d cloned to fighter %d as %s (article %d)", weapon, from, to, name, id);
+    c->x[0] = (u64)id;
+}
+HLE(smashline_update_weapon_count) {   /* (article id, new count) */
+    AcquireSRWLockExclusive(&weapons_lock);
+    if (weapon_count_n < sizeof weapon_counts / sizeof *weapon_counts) {
+        weapon_counts[weapon_count_n].weapon = (int)c->x[0];
+        weapon_counts[weapon_count_n++].count = (int)c->x[1];
+        memset(static_cache, 0, sizeof static_cache);
+    }
+    ReleaseSRWLockExclusive(&weapons_lock);
+}
+HLE(smashline_whitelist_kirby_copy_article) {
+    LOG("smashline: Kirby copy article %d of fighter %d: not supported yet (Kirby's copy keeps its own)", (int)c->x[1], (int)c->x[0]);
+}
+HLE(smashline_add_param_object) {   /* (fighter {ptr, len}, name {ptr, len}) */
+    LOG("smashline: param object for fighter %d: not supported yet, left out", fighter_index(c->x[0], c->x[1]));
+}
+HLE(smashline_get_action_registry) { c->x[0] = 0; LOG("smashline: action registry (script files): not supported, none"); }
+HLE(smashline_reload_script) { (void)c; }
+HLE(smashline_remove_by_plugin_range) { (void)c; }
+
+/* While a fighter is set up (main+0x6079d0: (object, id, kind, entry, hash)), the game looks up its
+ * articles' data by owner and name: for a cloned one, the new owner's and name (inline hooks at
+ * smashline's places: the value a register is about to be used as, replaced). */
+#define FIGHTER_INIT 0x6079d0
+static u64 fighter_init_original;
+static void fighter_init(Cpu *c) {
+    int was = current_owner;
+    current_owner = (int)c->x[2];
+    rt_call(c, fighter_init_original);
+    current_owner = was;
+}
+enum { SWAP_OWNER, SWAP_OWNER_NAME, SWAP_NAME };
+static void swap_weapon(Cpu *c, u64 arg) {   /* (arg: kind << 16 | source register << 8 | destination register) */
+    int kind = (int)(arg >> 16), src = (int)(arg >> 8 & 0xFF), dst = (int)(arg & 0xFF), owner = current_owner;
+    if (owner < 0) return;
+    for (u32 i = 0; i < new_agent_n; i++)
+        if (new_agents[i].weapon == (int)c->x[src] && new_agents[i].owner == owner) {
+            c->x[dst] = kind == SWAP_OWNER ? (u64)new_agents[i].owner : kind == SWAP_OWNER_NAME ? new_agents[i].owner_name : new_agents[i].new_name;
+            return;
+        }
+}
+static const struct { u64 offset; int kind, src, dst; } WEAPON_SWAPS[] = {
+    {0x33b6628 + 0x5B0, SWAP_OWNER, 21, 26}, {0x33acf78 + 0x5B0, SWAP_OWNER, 22, 8}, {0x33aee38 + 0x5B0, SWAP_OWNER, 22, 8},
+    {0x33aded8 + 0x5B0, SWAP_OWNER, 22, 8}, {0x33ac040 + 0x5B0, SWAP_OWNER, 22, 8},
+    {0x17e0a4c - 0x40, SWAP_OWNER_NAME, 26, 25}, {0x33ace7c + 0x5B0, SWAP_OWNER_NAME, 8, 2}, {0x33aed3c + 0x5B0, SWAP_OWNER_NAME, 8, 2},
+    {0x33adddc + 0x5B0, SWAP_OWNER_NAME, 8, 2}, {0x33abf54 + 0x5B0, SWAP_OWNER_NAME, 8, 2},
+    {0x17e098c - 0x40, SWAP_NAME, 23, 22}, {0x33b6830 + 0x5B0, SWAP_NAME, 21, 27}, {0x33b69f0 + 0x5B0, SWAP_NAME, 21, 2},
+    {0x33b6d14 + 0x5B0, SWAP_NAME, 21, 2}, {0x33ace8c + 0x5B0, SWAP_NAME, 8, 3}, {0x33aed4c + 0x5B0, SWAP_NAME, 8, 3},
+    {0x33addec + 0x5B0, SWAP_NAME, 8, 3}, {0x33abf64 + 0x5B0, SWAP_NAME, 8, 3},
+};
+
+static void static_data(Cpu *c) {
+    int kind = (int)c->x[0];
+    rt_call(c, static_data_original);
+    u64 data = c->x[0];
+    if (!data || kind < 0 || kind >= FIGHTER_COUNT || (!new_article_n && !weapon_count_n)) return;
+    if (static_cache[kind]) { c->x[0] = static_cache[kind]; return; }
+    u64 info = *P(u64, data + 8);
+    u64 descs = info ? *P(u64, info) : 0, count = info ? *P(u64, info + 8) : 0;
+    u32 extra = 0;
+    for (u32 i = 0; i < new_article_n; i++) if (new_articles[i].owner == kind) extra++;
+    int counts_change = 0;
+    for (u64 k = 0; k < count && !counts_change; k++)
+        for (u32 j = 0; j < weapon_count_n; j++) if (weapon_counts[j].weapon == *P(i32, descs + 32 * k)) counts_change = 1;
+    if (!extra && !counts_change) return;
+    u64 table = rt_callsym(c, "malloc", 1, (count + extra) * 32 + 16 + 88);
+    if (!table) { c->x[0] = data; return; }
+    memcpy(P(void, table), P(void, descs), count * 32);
+    u64 n = count;
+    for (u32 i = 0; i < new_article_n; i++) {
+        if (new_articles[i].owner != kind) continue;
+        c->x[0] = (u64)new_articles[i].original_owner;
+        rt_call(c, static_data_original);
+        u64 src = c->x[0], sinfo = src ? *P(u64, src + 8) : 0;
+        u64 sd = sinfo ? *P(u64, sinfo) : 0, sc = sinfo ? *P(u64, sinfo + 8) : 0;
+        for (u64 k = 0; k < sc; k++)
+            if (*P(i32, sd + 32 * k) == new_articles[i].weapon) { memcpy(P(void, table + 32 * n), P(void, sd + 32 * k), 32); n++; break; }
+    }
+    for (u64 k = 0; k < n; k++)
+        for (u32 j = 0; j < weapon_count_n; j++)
+            if (weapon_counts[j].weapon == *P(i32, table + 32 * k)) *P(i32, table + 32 * k + 4) = weapon_counts[j].count;
+    u64 new_info = table + 32 * (count + extra), new_data = new_info + 16;
+    *P(u64, new_info) = table;
+    *P(u64, new_info + 8) = n;
+    memcpy(P(void, new_data), P(void, data), 88);
+    *P(u64, new_data + 8) = new_info;
+    static_cache[kind] = new_data;
+    LOG("fighter %d: %llu articles, %llu of them added by plugins", kind, (unsigned long long)n, (unsigned long long)(n - count));
+    c->x[0] = new_data;
+}
 
 /* ---- status scripts ---- */
 /* The status agent (L2CFighterBase, or L2CWeaponCommon) has its status functions put in by its
@@ -667,13 +869,25 @@ HLE(disable_ui_chara_hash_online) { (void)c; }
 HLE(play_bgm) { (void)c; }
 HLE(is_online) { c->x[0] = 0; }
 HLE(csk_collection_version) { static u64 v; if (!v) { u32 ver[3] = {5, 0, 6}; v = rt_guest_copy(ver, sizeof ver); } c->x[0] = v; }
-#define CSK_UNSUPPORTED(name) HLE(name) { (void)c; LOG("CSK: " #name " is NOT SUPPORTED yet, left out"); }
-CSK_UNSUPPORTED(add_series_db_entry_info) CSK_UNSUPPORTED(add_bgm_db_entry_info) CSK_UNSUPPORTED(add_stream_set_entry_info)
-CSK_UNSUPPORTED(add_assigned_info_entry_info) CSK_UNSUPPORTED(add_stream_property_entry_info) CSK_UNSUPPORTED(add_new_sli_entry)
-CSK_UNSUPPORTED(add_new_bgm_property_entry) CSK_UNSUPPORTED(add_tracks_to_playlist) CSK_UNSUPPORTED(add_stage_db_entry)
-CSK_UNSUPPORTED(add_ui_stage_db_resources_entry) CSK_UNSUPPORTED(add_gametitle_db_entry_info) CSK_UNSUPPORTED(add_tips_db_entry_info)
-CSK_UNSUPPORTED(add_amiibo_db_entry_info) CSK_UNSUPPORTED(add_mii_body_db_entry_info) CSK_UNSUPPORTED(add_mii_hat_db_entry_info)
-CSK_UNSUPPORTED(load_ui_file) CSK_UNSUPPORTED(change_entry_chara_ui)
+/* (the rest of the CSK Collection's tables: not yet - each left out, said once) */
+static void csk_unsupported(const char *name) { LOG("CSK: %s is NOT SUPPORTED yet, left out", name); }
+HLE(add_series_db_entry_info) { (void)c; csk_unsupported("add_series_db_entry_info"); }
+HLE(add_bgm_db_entry_info) { (void)c; csk_unsupported("add_bgm_db_entry_info"); }
+HLE(add_stream_set_entry_info) { (void)c; csk_unsupported("add_stream_set_entry_info"); }
+HLE(add_assigned_info_entry_info) { (void)c; csk_unsupported("add_assigned_info_entry_info"); }
+HLE(add_stream_property_entry_info) { (void)c; csk_unsupported("add_stream_property_entry_info"); }
+HLE(add_new_sli_entry) { (void)c; csk_unsupported("add_new_sli_entry"); }
+HLE(add_new_bgm_property_entry) { (void)c; csk_unsupported("add_new_bgm_property_entry"); }
+HLE(add_tracks_to_playlist) { (void)c; csk_unsupported("add_tracks_to_playlist"); }
+HLE(add_stage_db_entry) { (void)c; csk_unsupported("add_stage_db_entry"); }
+HLE(add_ui_stage_db_resources_entry) { (void)c; csk_unsupported("add_ui_stage_db_resources_entry"); }
+HLE(add_gametitle_db_entry_info) { (void)c; csk_unsupported("add_gametitle_db_entry_info"); }
+HLE(add_tips_db_entry_info) { (void)c; csk_unsupported("add_tips_db_entry_info"); }
+HLE(add_amiibo_db_entry_info) { (void)c; csk_unsupported("add_amiibo_db_entry_info"); }
+HLE(add_mii_body_db_entry_info) { (void)c; csk_unsupported("add_mii_body_db_entry_info"); }
+HLE(add_mii_hat_db_entry_info) { (void)c; csk_unsupported("add_mii_hat_db_entry_info"); }
+HLE(load_ui_file) { (void)c; csk_unsupported("load_ui_file"); }
+HLE(change_entry_chara_ui) { (void)c; csk_unsupported("change_entry_chara_ui"); }
 HLE(get_color_from_entry_id) { c->x[0] = 0; }
 HLE(get_ui_chara_from_entry_id) { c->x[0] = 0; }
 HLE(get_victor_color) { c->x[0] = 0; }
@@ -795,6 +1009,13 @@ void skyline_load_plugins(Cpu *c) {
     snprintf(csk_tmp, sizeof csk_tmp, "%s.tmp", csk_path);
     csk = fopen(csk_tmp, "w");
     if (csk) fprintf(csk, "[\n");
+    static_data_original = rt_hook_function(MAIN_BASE + STATIC_FIGHTER_DATA, rt_native(static_data, "smashline fighter articles"));
+    fighter_init_original = rt_hook_function(MAIN_BASE + FIGHTER_INIT, rt_native(fighter_init, "smashline fighter set-up"));
+    note_hook_target(MAIN_BASE + FIGHTER_INIT);
+    for (u32 k = 0; k < sizeof WEAPON_SWAPS / sizeof *WEAPON_SWAPS; k++)
+        add_inline_hook(MAIN_BASE + WEAPON_SWAPS[k].offset, 0, swap_weapon,
+                        (u64)WEAPON_SWAPS[k].kind << 16 | (u64)WEAPON_SWAPS[k].src << 8 | (u64)WEAPON_SWAPS[k].dst);
+    note_hook_target(MAIN_BASE + STATIC_FIGHTER_DATA);
     pre_battle_original = rt_hook_function(MAIN_BASE + PRE_BATTLE, rt_native(pre_battle, "csk pre-battle"));
     fighter_setup_original = rt_hook_function(MAIN_BASE + FIGHTER_SETUP, rt_native(fighter_setup, "csk fighter set-up"));
     note_hook_target(MAIN_BASE + FIGHTER_SETUP);   /* (called directly too: hookable from the next build on) */

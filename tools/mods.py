@@ -220,13 +220,20 @@ def plugins(folder):
 
 
 def find_roots(top):
-    """The folders under `top` laid out as data.arc is (each a mod's own folder)."""
+    """The folders under `top` laid out as data.arc is (each a mod's own folder). A pack can hold
+    mods in subfolders of one that is itself a mod ("Pack/ui", "Pack/(Moveset) X/fighter"): those
+    are mods of their own (install copies each without the others: nested_roots)."""
     roots = []
     for dp, dirs, _files in os.walk(top):
         if any(d.lower() in TOP for d in dirs):
             roots.append(dp)
-            dirs[:] = []   # (a mod's own folders are not other mods)
+        dirs[:] = [d for d in dirs if d.lower() not in TOP]   # (a mod's own data folders are not other mods)
     return roots
+
+
+def nested_roots(root, roots):
+    """The roots inside `root` (a pack's mods in its subfolders), which its own copy leaves out."""
+    return [r for r in roots if r != root and os.path.commonpath([root, r]) == root]
 
 
 # ---- installing ------------------------------------------------------------------------------
@@ -280,7 +287,9 @@ def install(tree, archive, name=None, meta=None):
             final, k = label, 2
             while os.path.exists(os.path.join(tree.mods, final)):
                 final, k = f"{label} ({k})", k + 1
-            shutil.copytree(root, os.path.join(tree.mods, final))
+            inner = {os.path.normcase(r) for r in nested_roots(root, roots)}
+            shutil.copytree(root, os.path.join(tree.mods, final),
+                            ignore=lambda d, names: [n for n in names if os.path.normcase(os.path.join(d, n)) in inner])
             entry = {"enabled": True}
             entry.update(meta or {})
             state = tree.load()
