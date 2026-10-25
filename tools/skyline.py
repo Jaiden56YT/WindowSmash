@@ -7,6 +7,7 @@ Usage:
   skyline.py build [--tree <dir>] [--jobs N]    sync, then compile and link them into the game
   skyline.py status [--tree <dir>]              what is listed, and whether the game has it built in
   skyline.py probe [--tree <dir>]               start the game once for the plugins' select-screen entries; apply the mods again if they changed
+  skyline.py uptodate [--tree <dir>]            exit 0 when the game needs no build (the installer skips it), else 1, saying why
 
 sync (tools/mods.py apply runs it): each turned-on mod's plugin goes into dump/nro/ (named and
 placed by tools/recomp.py, as a game NRO the runtime harvested would be), its C is generated
@@ -427,6 +428,56 @@ def build(tree, jobs, log=print, again=True):
     return 0
 
 
+# What isn't part of the game's program: an update that changes only these needs no build (the Mods
+# app's files are read as it runs; the tools here run as they are)
+NOT_BUILT = ("tools/modmanager/", "tools/dev/", "tools/mods.py", "tools/std_plugins.py", "tools/csk.py", "tools/miis.py",
+             "tools/unlock_all.py", "tools/install_windowsmash.ps1", "tools/update.py", "tools/arc.py", "tools/prc.py",
+             "tools/msbt.py", "tools/ssbu_online_lobby.py", "tools/ssbu_relay.py", "tools/skyline.py")
+
+
+def needs_build(tree):
+    """Why the game's program needs building again, or None: it's missing, a file that goes into it
+    (the runtime, the recompiler, the build's tools, the plugins' hook lists) is newer than it, a
+    standard plugin isn't fetched, or a plugin that runs isn't compiled in (current)."""
+    programs = [os.path.join(tree, "build-mac", "WindowSmash.app", "Contents", "MacOS", "ssbu"), os.path.join(tree, "build", "ssbu.exe")]
+    built = max((os.path.getmtime(x) for x in programs if os.path.exists(x)), default=0)
+    if not built:
+        return "it isn't built"
+    for top in ("runtime", "tools"):
+        for dp, dirs, files in os.walk(os.path.join(tree, top)):
+            dirs[:] = [d for d in dirs if not d.startswith((".", "__pycache__"))]
+            for n in files:
+                rel = os.path.relpath(os.path.join(dp, n), tree).replace(os.sep, "/")
+                if n.startswith(".") or ".before-" in n or n.endswith((".orig", ".pyc")) or rel.startswith(NOT_BUILT):
+                    continue
+                if os.path.getmtime(os.path.join(dp, n)) > built:
+                    return f"{rel} is newer than it"
+    p = Paths(tree)
+    for n in (p.hooks, os.path.join(p.skyline, "patches.txt")):
+        if os.path.exists(n) and os.path.getmtime(n) > built:
+            return f"{os.path.relpath(n, tree)} is newer than it"
+    import std_plugins
+    for name, plugin in std_plugins.PLUGINS.items():
+        if plugin[5] == "runs" and not os.path.exists(os.path.join(std_plugins.folder(tree), name)):
+            return f"{name} isn't fetched"
+    listed = os.path.join(p.skyline, "plugins.txt")
+    names = [l.split("#")[0].strip() for l in open(listed, encoding="utf-8")] if os.path.exists(listed) else []
+    import mods
+    t = mods.Tree(tree)
+    state = t.load()
+    for n in state["order"]:   # (the turned-on mods' own plugins: ARCropolis loads them from their folders)
+        if state["mods"][n].get("enabled"):
+            for s in plugin_state(tree, n, mods.plugins(os.path.join(t.mods, n))):
+                if s["module"]:
+                    names.append(s["module"])
+                elif s["built"] is None:
+                    return f"{n}'s plugin isn't recompiled yet"
+    for name in names:
+        if name and not built_in(tree, name):
+            return f"the plugin {name} isn't compiled in"
+    return None
+
+
 def status(tree):
     p = Paths(tree)
     names = open(p.list, encoding="utf-8").read().split() if os.path.exists(p.list) else []
@@ -450,5 +501,9 @@ if __name__ == "__main__":
         status(tree)
     elif sys.argv[1] == "probe":   # (the plugins' select-screen entries again, and the mods applied if they changed)
         probe_and_apply(tree)
+    elif sys.argv[1] == "uptodate":
+        why = needs_build(tree)
+        print(f"the game needs a build: {why}" if why else "the game is up to date: no build needed")
+        sys.exit(1 if why else 0)
     else:
         sys.exit(__doc__)

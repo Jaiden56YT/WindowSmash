@@ -65,6 +65,9 @@ Passed to the build: how many files to compile at a time (default: by the instal
 Do not look for a newer WindowSmash (the updated installer is started with it).
 .PARAMETER BuildTools
 For the compiler, install the Visual Studio Build Tools rather than download it into deps\.
+.PARAMETER Rebuild
+Build the game even when nothing that goes into it changed (without it, an update that changed only
+the mod manager or other tools skips the build: tools\skyline.py uptodate).
 #>
 [CmdletBinding()]
 param(
@@ -77,7 +80,8 @@ param(
     [switch]$SkipBuild,
     [int]$Jobs,
     [switch]$NoUpdate,
-    [switch]$BuildTools
+    [switch]$BuildTools,
+    [switch]$Rebuild
 )
 
 $ErrorActionPreference = 'Stop'
@@ -1309,6 +1313,12 @@ function Step-Build {
     if ($Jobs) { $build += @('--jobs', "$Jobs") }
     if ($SkipBuild) { $build += '--prepare-only' }
     if ($DryRun) { Write-Would ('run: ' + ($Script:Python -join ' ') + ' ' + ($build -join ' ')); return $false }
+    # (an update of the mod manager or other tools only: the game is as it was, no build - its own check)
+    if (-not $Rebuild -and -not $SkipBuild -and (Test-Path (Join-Path $Root 'build\ssbu.exe')) -and
+        (Invoke-Python @((Join-Path $Root 'tools\skyline.py'), 'uptodate')) -eq 0) {
+        Write-Info 'nothing that goes into the game changed: no build (Install WindowSmash.bat -Rebuild builds it anyway)'
+        return $true
+    }
     if ($SkipBuild) { Write-Info 'the program, fonts, data, DLC and fighters; not the build itself (-SkipBuild)' }
     else { Write-Info 'the program, fonts, data, DLC and fighters, then the build: 30 minutes to a few hours' }
     if ((Invoke-Python $build) -ne 0) { throw 'The build stopped (the message above says why). Fix that, then run Install WindowSmash.bat again: it carries on where it stopped.' }
@@ -1316,6 +1326,7 @@ function Step-Build {
     # the community's Skyline plugins that mods need (ARCropolis, Smashline 2, One Slot Effects, nro_hook),
     # from their own releases (tools\std_plugins.py checks each), then built into the game with the mods' own
     Write-Info 'the standard Skyline plugins: fetched from their releases and built in (tools\std_plugins.py, tools\skyline.py)'
+    Write-Warn 'building the plugins into the game can take a while: do not start the game until this window says Done'
     if ((Invoke-Python @((Join-Path $Root 'tools\std_plugins.py'), 'fetch')) -ne 0) {
         Write-Warn 'the plugins could not be fetched (see above): mods that need them will not work until this runs again'
     } else {
