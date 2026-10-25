@@ -6,6 +6,7 @@ Usage:
   skyline.py sync  [--tree <dir>]               the turned-on mods' plugins: recompiled, listed to load
   skyline.py build [--tree <dir>] [--jobs N]    sync, then compile and link them into the game
   skyline.py status [--tree <dir>]              what is listed, and whether the game has it built in
+  skyline.py probe [--tree <dir>]               start the game once for the plugins' select-screen entries; apply the mods again if they changed
 
 sync (tools/mods.py apply runs it): each turned-on mod's plugin goes into dump/nro/ (named and
 placed by tools/recomp.py, as a game NRO the runtime harvested would be), its C is generated
@@ -21,6 +22,7 @@ directly as well needs it built in: the runtime lists every hook target it is as
 dump/skyline/hooks.txt, and the targets the generated C calls directly are made hookable
 (tools/recomp.py HOOKABLE) by the next build, which regenerates the C of the modules they are in
 (that takes long for main: tens of minutes)."""
+import hashlib
 import json
 import os
 import re
@@ -67,17 +69,29 @@ def load_record(p):
         return {}
 
 
+STANDARD = ("skyline", "plugins")   # (<tree>/skyline/plugins: the community plugins WindowSmash ships, run as they are)
+
+
+def standard(tree):
+    """[(label, plugin file)] of the standard plugins (<tree>/skyline/plugins/*.nro), by name."""
+    folder = os.path.join(tree, *STANDARD)
+    names = sorted(n for n in os.listdir(folder) if n.lower().endswith(".nro")) if os.path.isdir(folder) else []
+    return [("(standard) " + n, os.path.join(folder, n)) for n in names]
+
+
 def turned_on(tree):
-    """[(mod name, plugin file)] of the turned-on mods, in their order."""
+    """[(mod name, plugin file)]: the standard plugins, then the turned-on mods' in their order. A
+    mod's own copy of a standard plugin (or of one the runtime provides) is left out."""
     import mods
     t = mods.Tree(tree)
     state = t.load()
-    out = []
+    out = standard(tree)
+    have = {os.path.basename(f).lower() for _n, f in out}
     for name in state["order"]:
         if not state["mods"].get(name, {}).get("enabled"):
             continue
         for rel in mods.plugins(os.path.join(t.mods, name)):
-            if os.path.basename(rel).lower() in NATIVE:
+            if os.path.basename(rel).lower() in NATIVE | have:
                 continue
             out.append((name, os.path.join(t.mods, name, rel)))
     return out
@@ -108,8 +122,9 @@ def module_of(p, source, record):
     raise SystemExit(f"{source}: recomp.py did not place it")
 
 
-def generate(p, name, log):
-    """The plugin's image and C, if missing or older than the plugin."""
+def generate(p, name, log, own_exports=False):
+    """The plugin's image and C, if missing or older than the plugin. own_exports: a standard plugin,
+    whose exports stay its own (not the runtime's native versions of the same names)."""
     nro = os.path.join(p.nro, name + ".nro")
     img = os.path.join(p.modules, name + ".reloc.bin")
     out = os.path.join(p.build, name)
@@ -120,13 +135,39 @@ def generate(p, name, log):
         recomp(p, "image", nro, "--out", img)
     if fresh_c:
         log(f"{name}: generating its C")
-        log(recomp(p, "build", nro, "--out", out, "--jobs", "1").strip().splitlines()[-1])
+        if own_exports:
+            os.environ["SSBU_OWN_EXPORTS"] = "1"
+        try:
+            log(recomp(p, "build", nro, "--out", out, "--jobs", "1").strip().splitlines()[-1])
+        finally:
+            os.environ.pop("SSBU_OWN_EXPORTS", None)
+
+
+SEED = os.path.join(HERE, "skyline_seed")   # (tools/skyline_seed: hooks.txt, patches.txt the standard plugins need, 13.0.5)
+
+
+def seed_lists(p):
+    """The standard plugins' hook points and code patches (what their probe boots and a first match
+    would record: tools/skyline_seed), added to dump/skyline's lists, so the first build has them."""
+    if not standard(p.tree):
+        return
+    for name in ("hooks.txt", "patches.txt"):
+        seed = os.path.join(SEED, name)
+        if not os.path.exists(seed):
+            continue
+        dest = os.path.join(p.skyline, name)
+        have = open(dest, encoding="utf-8").read().splitlines() if os.path.exists(dest) else []
+        new = [l for l in open(seed, encoding="utf-8").read().splitlines() if l.strip() and l not in have]
+        if new:
+            with open(dest, "a", encoding="utf-8", newline="\n") as f:
+                f.writelines(l + "\n" for l in new)
 
 
 def sync(tree, log=print):
     """Recompile the turned-on mods' plugins and list them to load; returns the list."""
     p = Paths(tree)
     os.makedirs(p.skyline, exist_ok=True)
+    seed_lists(p)
     have = open(p.hooks, encoding="utf-8").read().split("\n") if os.path.exists(p.hooks) else []
     missing = [h for h in NATIVE_HOOKS if h not in have]
     if missing:
@@ -143,7 +184,7 @@ def sync(tree, log=print):
             log(f"{mod}: plugin {os.path.relpath(source, os.path.join(tree, 'mods', mod))} left out (dump/skyline/skip.txt)")
             continue
         record[build_id] = {"module": name, "mod": mod, "file": os.path.relpath(source, tree)}
-        generate(p, name, log)
+        generate(p, name, log, mod.startswith("(standard) "))
         if name not in names:
             names.append(name)
             log(f"{mod}: plugin {os.path.basename(source)} -> {name}")
@@ -153,6 +194,7 @@ def sync(tree, log=print):
     t = mods.Tree(tree)
     state = t.load()
     with open(os.path.join(p.skyline, "mods.txt"), "w", encoding="utf-8", newline="\n") as f:   # (the runtime's mods: mount)
+        written = set()
         for n in state["order"]:   # (each data root of a mod: a pack keeps its mods in subfolders)
             if state["mods"].get(n, {}).get("enabled"):
                 folder = os.path.join(t.mods, n)
@@ -162,7 +204,18 @@ def sync(tree, log=print):
                         roots.append(dp)
                     dirs[:] = [d for d in dirs if d.lower() not in mods.TOP]   # (not into a root's own data)
                 roots = roots or [folder]
-                f.writelines(os.path.relpath(r, t.mods).replace(os.sep, "/") + "\n" for r in roots)
+                for r in roots:   # (once each: a pack and its parts can name the same folder)
+                    rel = os.path.relpath(r, t.mods).replace(os.sep, "/")
+                    if rel not in written:
+                        written.add(rel)
+                        f.write(rel + "\n")
+        if os.path.isdir(os.path.join(t.mods, mods.CHARACTERS)):   # (the plugins' new characters: last, mods.characters_mod)
+            f.write(mods.CHARACTERS + "\n")
+    # With the real ARCropolis among the standard plugins, it loads the mods' plugins itself (its
+    # chainloader, from each mod's folder, as on the console): only the standard ones are listed
+    if any(m == "(standard) libarcropolis.nro" for m, _s in turned_on(tree)):
+        std = {module_of(p, s, record)[1] for m, s in turned_on(tree) if m.startswith("(standard) ")}
+        names = [n for n in names if n in std]
     text = "".join(f"{n}\n" for n in names)
     old = open(p.list, encoding="utf-8").read() if os.path.exists(p.list) else ""
     if text != old:
@@ -223,14 +276,28 @@ def inline_targets(p):
     return out
 
 
+def patch_lines(p):
+    """{module: text} of the plugins' code patches (dump/skyline/patches.txt), as recomp.py records
+    the ones a module's C was generated with (<build dir>/plugin_patches.txt)."""
+    out = {}
+    path = os.path.join(p.skyline, "patches.txt")
+    if os.path.exists(path):
+        for line in open(path, encoding="utf-8"):
+            parts = line.split()
+            if len(parts) == 4:
+                out[parts[0]] = out.get(parts[0], "") + " ".join(parts[1:]) + "\n"
+    return out
+
+
 def stale_hooks(tree):
-    """The game modules whose generated C lacks hook targets the runtime listed (hooks.txt)."""
+    """The game modules whose generated C lacks hook targets or code patches the runtime listed
+    (hooks.txt, patches.txt)."""
     import recomp as rc
     rc.TREE = tree
     out = []
     p = Paths(tree)
-    hooks, inline = hook_targets(p), inline_targets(p)
-    for mod in sorted(set(hooks) | set(inline)):
+    hooks, inline, patches = hook_targets(p), inline_targets(p), patch_lines(p)
+    for mod in sorted(set(hooks) | set(inline) | set(patches)):
         offs = hooks.get(mod, set())
         table = os.path.join(tree, "build", mod, "g_module.c") if mod in ("main", "subsdk0", "sdk") else \
             os.path.join(tree, "build", "nro", mod, "g_module.c")
@@ -238,6 +305,10 @@ def stale_hooks(tree):
         if not base:
             continue
         text = open(table, encoding="utf-8").read()
+        rec = os.path.join(os.path.dirname(table), "plugin_patches.txt")
+        if patches.get(mod, "") != (open(rec, encoding="utf-8").read() if os.path.exists(rec) else ""):
+            out.append(mod)
+            continue
         if any(f"f_{base + o:x}_orig" not in text for o in offs):
             out.append(mod)
             continue
@@ -274,7 +345,17 @@ def probe(tree, log=print):
                 return json.load(f)
         except (OSError, ValueError):
             return None
-    before = entries()
+    def outputs():   # (the files plugins' file callbacks are for, and what they made: dump/skyline/arc/*.out)
+        out = {}
+        for n in ["callbacks.txt"] + [os.path.join("arc", x) for x in sorted(os.listdir(os.path.join(p.skyline, "arc")))
+                                       if x.endswith(".out")] if os.path.isdir(os.path.join(p.skyline, "arc")) else ["callbacks.txt"]:
+            try:
+                with open(os.path.join(p.skyline, n), "rb") as f:
+                    out[n] = hashlib.sha256(f.read()).hexdigest()
+            except OSError:
+                pass
+        return out
+    before = entries(), outputs()
     env = dict(os.environ, SSBU_SKYLINE_PROBE="1", SDL_AUDIO_DRIVER="dummy", SSBU_CWD=tree, SSBU_TESTRUN="skyline-probe",
                SSBU_LOG=os.path.join(p.skyline, "probe.log"))
     log("starting the game once for the plugins' select-screen entries")
@@ -283,7 +364,18 @@ def probe(tree, log=print):
     except subprocess.TimeoutExpired:
         log("the probe did not finish (see dump/skyline/probe.log)")
         return False
-    return entries() != before
+    return (entries(), outputs()) != before
+
+
+def probe_and_apply(tree, log=print):
+    """Probe, and apply the mods again while that changed what the plugins add (at most 3 times: the
+    file callbacks need an apply for their input, a start for their output, an apply to put it in)."""
+    import mods
+    for _ in range(3):
+        if not probe(tree, log):
+            return
+        log("the plugins' select-screen entries or file changes changed: applying the mods again")
+        mods.apply(mods.Tree(tree), log)
 
 
 def build(tree, jobs, log=print):
@@ -305,10 +397,7 @@ def build(tree, jobs, log=print):
     rc = subprocess.call(cmd)
     if rc:
         return rc
-    if probe(tree, log):
-        log("the plugins' select-screen entries changed: applying the mods again")
-        import mods
-        mods.apply(mods.Tree(tree), log)
+    probe_and_apply(tree, log)
     return 0
 
 
@@ -333,5 +422,7 @@ if __name__ == "__main__":
         sys.exit(build(tree, int(arg("--jobs", "2"))))
     elif sys.argv[1] == "status":
         status(tree)
+    elif sys.argv[1] == "probe":   # (the plugins' select-screen entries again, and the mods applied if they changed)
+        probe_and_apply(tree)
     else:
         sys.exit(__doc__)

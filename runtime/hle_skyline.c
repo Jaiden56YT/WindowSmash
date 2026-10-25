@@ -40,6 +40,8 @@ HLE(getRegionAddress) {
     u64 mod0 = MAIN_BASE + *P(u32, MAIN_BASE + 4);
     u64 addr = 0;
     if (region == 0) addr = MAIN_BASE;
+    else if (region == 1) addr = MAIN_BASE + 0x39c9000;   /* (main 13.0.5's rodata and data: dump/exefs/main's segments) */
+    else if (region == 2) addr = MAIN_BASE + 0x4f17000;
     else if (region == 3) addr = mod0 + *P(i32, mod0 + 8);
     else LOG("getRegionAddress(%u): not known here, 0", region);
     c->x[0] = addr;
@@ -78,10 +80,37 @@ static void note_inline_point(u64 at) {
     if ((f = fopen(path, "a"))) { fputs(line, f); fclose(f); }
 }
 
+/* Plugins built for game 13.0.4 (the CSK Collection 5.0.6): in 13.0.5 the code of main around
+ * 0x32xxxxx-0x37xxxxx moved 0x5B0 along (Smashline's own offsets say "+ 0x5B0" there; at 0x17e0xxx
+ * "- 0x40", and CSK's hooks at 0x18xxxxx and 0x1exxxxx are where they were). A function hook moves
+ * when that lands on a function and its own address doesn't; an inline hook or a patch (which can't
+ * be checked) moves from 0x3200000 on. By the calling plugin's module name. */
+static const char *const FOR_13_0_4[] = {"the_csk_collection"};
+int rt_is_function(u64 addr);   /* (host.c) */
+static u64 version_shift_function(Cpu *c, u64 at);
+static u64 version_shift(Cpu *c, u64 at) {
+    char who[96];
+    rt_describe(c->x[30], who, sizeof who);
+    char *plus = strchr(who, '+');
+    if (plus) *plus = 0;
+    for (u32 i = 0; i < sizeof FOR_13_0_4 / sizeof *FOR_13_0_4; i++)
+        if (!strcmp(who, FOR_13_0_4[i]) && at >= MAIN_BASE + 0x3200000 && at < MAIN_BASE + 0x39c9000) return at + 0x5B0;
+    return at;
+}
+static u64 version_shift_function(Cpu *c, u64 at) {
+    char who[96];
+    rt_describe(c->x[30], who, sizeof who);
+    char *plus = strchr(who, '+');
+    if (plus) *plus = 0;
+    for (u32 i = 0; i < sizeof FOR_13_0_4 / sizeof *FOR_13_0_4; i++)
+        if (!strcmp(who, FOR_13_0_4[i]) && !rt_is_function(at) && rt_is_function(at + 0x5B0)) return at + 0x5B0;
+    return at;
+}
+
 /* A64HookFunction(symbol, replace, result): calls to `symbol` go to `replace`; *result reaches
  * the function as it was. */
 HLE(A64HookFunction) {
-    u64 target = c->x[0], replace = c->x[1], result = c->x[2];
+    u64 target = version_shift_function(c, c->x[0]), replace = c->x[1], result = c->x[2];
     char a[96], b[96];
     note_hook_target(target);
     u64 original = rt_hook_function(target, replace);
@@ -98,6 +127,7 @@ typedef void InlineNative(Cpu *c, u64 arg);
 static struct { u64 at, callback; InlineNative *native; u64 arg; } inline_hooks[512];
 static u32 inline_n;
 static void note_inline_point(u64 at);
+static u64 cave_site(u64 at);
 
 static void add_inline_hook(u64 at, u64 callback, InlineNative *native, u64 arg) {
     if (inline_n < sizeof inline_hooks / sizeof *inline_hooks) {
@@ -109,9 +139,11 @@ static void add_inline_hook(u64 at, u64 callback, InlineNative *native, u64 arg)
 }
 
 HLE(A64InlineHook) {
-    char a[96], b[96];
-    LOG("A64InlineHook at %s -> %s", rt_describe(c->x[0], a, sizeof a), rt_describe(c->x[1], b, sizeof b));
-    add_inline_hook(c->x[0], c->x[1], NULL, 0);
+    char a[96], b[96], s[96];
+    u64 at = version_shift(c, c->x[0]), site = cave_site(at);
+    LOG("A64InlineHook at %s -> %s%s%s", rt_describe(at, a, sizeof a), rt_describe(c->x[1], b, sizeof b),
+        site ? ": a code cave, so at the call that branches to it, " : "", site ? rt_describe(site, s, sizeof s) : "");
+    add_inline_hook(site ? site : at, c->x[1], NULL, 0);
 }
 
 /* (generated code, at an inline point) skyline-rs' InlineCtx: x0-x30, sp, then q0-q31. */
@@ -134,12 +166,53 @@ void rt_inline_hook(Cpu *c, u64 at) {
     }
 }
 
-/* sky_memcpy(dest, src, n): plugins patch code and read-only data with it. Data changes work;
- * a change to code means nothing to the recompiled function. */
+/* sky_memcpy(dest, src, n): plugins patch code and read-only data with it. Data changes work at
+ * once. A change to code means nothing to the recompiled function until the next build lifts the
+ * new instructions: each changed word goes into <data dir>/../skyline/patches.txt, "<module>
+ * <offset> <old word> <new word>" (tools/recomp.py code_patches, tools/skyline.py stale_hooks). */
+const char *rt_code_offset(u64 addr, u64 *off);   /* (host.c) */
+/* Smashline's inline hooks in lua2cpp_common: it writes a `bl` at the hooked call to a code cave
+ * (the original branch, as a `b`, after some nops) and inline-hooks the cave. Recompiled code runs
+ * none of that, so the hook goes before the hooked call itself (the cave's address -> the call's);
+ * tools/recomp.py leaves those patches out (code_patches). */
+static struct { u64 cave, site; } caves[256];
+static u32 cave_n;
+static void note_cave(u64 at, u32 word) {
+    if ((word & 0xFC000000) != 0x94000000 || cave_n == 256) return;   /* bl */
+    i64 imm = (i64)(word & 0x3FFFFFF) << 38 >> 36;
+    caves[cave_n].cave = at + (u64)imm; caves[cave_n++].site = at;
+}
+static u64 cave_site(u64 at) {
+    for (u32 i = 0; i < cave_n; i++) if (caves[i].cave == at) return caves[i].site;
+    return 0;
+}
+
+static void note_code_patch(u64 dest, u64 src, u64 n) {
+    char path[1200], line[160], have[160];
+    snprintf(path, sizeof path, "%s/../skyline/patches.txt", rt_data_dir);
+    for (u64 w = dest & ~3ull; w < dest + n; w += 4) {
+        u64 off;
+        const char *mod = rt_code_offset(w, &off);
+        if (!mod) continue;
+        u32 old = *P(u32, w), now = old;
+        for (int b = 0; b < 4; b++)
+            if (w + b >= dest && w + b < dest + n) now = (now & ~(0xFFu << 8 * b)) | (u32)*P(u8, src + (w + b - dest)) << 8 * b;
+        if (now == old) continue;
+        note_cave(w, now);
+        snprintf(line, sizeof line, "%s %llx %08x %08x\n", mod, (unsigned long long)off, old, now);
+        FILE *f = fopen(path, "r");
+        int seen = 0;
+        while (f && !seen && fgets(have, sizeof have, f)) seen = !strcmp(have, line);
+        if (f) fclose(f);
+        if (!seen && (f = fopen(path, "a"))) { fputs(line, f); fclose(f); }
+    }
+}
 HLE(sky_memcpy) {
     char a[96];
-    LOG("sky_memcpy %#llx bytes to %s", (unsigned long long)c->x[2], rt_describe(c->x[0], a, sizeof a));
-    memcpy(G2H(c->x[0]), G2H(c->x[1]), c->x[2]);
+    u64 to = version_shift(c, c->x[0]);
+    LOG("sky_memcpy %#llx bytes to %s", (unsigned long long)c->x[2], rt_describe(to, a, sizeof a));
+    note_code_patch(to, c->x[1], c->x[2]);
+    memcpy(G2H(to), G2H(c->x[1]), c->x[2]);
     c->x[0] = 0;
 }
 
@@ -148,6 +221,85 @@ HLE(skyline_tcp_send_raw) {   /* (data, size): the plugin's println! */
 }
 
 HLE(get_program_id) { c->x[0] = PROGRAM_ID; }
+
+/* nn::oe::GetDisplayVersion(DisplayVersion *): the game's version as the console shows it (char[16]).
+ * The game doesn't ask; plugins check it (ARCropolis). The SDK's own asks a system service that
+ * isn't here, so its dispatch entry gets this (skyline_load_plugins). */
+static void display_version(Cpu *c) {
+    memset(G2H(c->x[0]), 0, 16);
+    memcpy(G2H(c->x[0]), "13.0.5", 6);
+}
+
+/* The SDK functions plugins call that the game never does, whose SDK code would ask system services
+ * that aren't here: their dispatch entries get these when plugins load (plugin_shims). */
+static void show_application_error(Cpu *c) {   /* (ApplicationErrorArg: the dialog's text at 0x10, the full screen's at 0x810) */
+    u64 arg = c->x[0];   /* (on the console the player closes it and the game goes on: a panic aborts by itself after) */
+    fprintf(stderr, "[skyline] a plugin showed an error: %.1000s\n  %.1500s\n", P(char, arg + 0x10), P(char, arg + 0x810));
+    fflush(stderr);
+}
+static void exit_application(Cpu *c) { (void)c; fprintf(stderr, "[skyline] a plugin exited the game\n"); fflush(stderr); ExitProcess(0); }
+static void nothing(Cpu *c) { c->x[0] = 0; }
+
+/* nn::crypto::GenerateSha256Hash(out, out size, data, size): the SDK's uses the CPU's SHA-256
+ * instructions, which the recompiler doesn't translate (ARCropolis hashes the plugins it loads). */
+static void sha256(const u8 *data, u64 n, u8 out[32]) {
+    static const u32 K[64] = {
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01,
+        0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+        0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+        0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08,
+        0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+    u32 h[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+#define ROR(x, r) ((x) >> (r) | (x) << (32 - (r)))
+    u64 blocks = (n + 9 + 63) / 64;
+    for (u64 b = 0; b < blocks; b++) {
+        u8 block[64];
+        for (int i = 0; i < 64; i++) {
+            u64 at = b * 64 + (u64)i;
+            u64 len_at = blocks * 64 - 8;
+            block[i] = at < n ? data[at] : at == n ? 0x80 : at >= len_at ? (u8)((n * 8) >> (8 * (7 - (at - len_at)))) : 0;
+        }
+        u32 w[64], a = h[0], bb = h[1], cc = h[2], d = h[3], e = h[4], f = h[5], g = h[6], hh = h[7];
+        for (int i = 0; i < 16; i++) w[i] = (u32)block[4 * i] << 24 | (u32)block[4 * i + 1] << 16 | (u32)block[4 * i + 2] << 8 | block[4 * i + 3];
+        for (int i = 16; i < 64; i++) {
+            u32 s0 = ROR(w[i - 15], 7) ^ ROR(w[i - 15], 18) ^ (w[i - 15] >> 3), s1 = ROR(w[i - 2], 17) ^ ROR(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+        }
+        for (int i = 0; i < 64; i++) {
+            u32 t1 = hh + (ROR(e, 6) ^ ROR(e, 11) ^ ROR(e, 25)) + ((e & f) ^ (~e & g)) + K[i] + w[i];
+            u32 t2 = (ROR(a, 2) ^ ROR(a, 13) ^ ROR(a, 22)) + ((a & bb) ^ (a & cc) ^ (bb & cc));
+            hh = g; g = f; f = e; e = d + t1; d = cc; cc = bb; bb = a; a = t1 + t2;
+        }
+        h[0] += a; h[1] += bb; h[2] += cc; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
+    }
+#undef ROR
+    for (int i = 0; i < 32; i++) out[i] = (u8)(h[i / 4] >> (24 - 8 * (i % 4)));
+}
+static void sha256_hash(Cpu *c) {   /* (out, out size, data, size) */
+    u8 digest[32];
+    sha256(P(u8, c->x[2]), c->x[3], digest);
+    memcpy(G2H(c->x[0]), digest, c->x[1] < 32 ? c->x[1] : 32);
+}
+static void unavailable(Cpu *c) { c->x[0] = RESULT(123, 1); }   /* (nn::ssl: no SSL here - update checks give up) */
+static void plugin_shims(void) {
+    static const struct { const char *name; GuestFn *fn; } SHIMS[] = {
+        {"_ZN2nn2oe17GetDisplayVersionEPNS0_14DisplayVersionE", display_version},
+        {"_ZN2nn3err20ShowApplicationErrorERKNS0_19ApplicationErrorArgE", show_application_error},
+        {"_ZN2nn2oe15ExitApplicationEv", exit_application},
+        {"_ZN2nn3hid6detail22SetSupportedNpadIdTypeEPKji", nothing},
+        {"_ZN2nn3ssl10InitializeEv", unavailable},
+        {"_ZN2nn6crypto18GenerateSha256HashEPvmPKvm", sha256_hash},
+    };
+    for (u32 i = 0; i < sizeof SHIMS / sizeof *SHIMS; i++) {
+        u64 at = rt_symbol(SHIMS[i].name);
+        if (at) rt_hook_function(at, rt_native(SHIMS[i].fn, SHIMS[i].name));
+    }
+    void fs_plugin_shims(void), rtld_plugin_shims(void);   /* (hle_fs.c, hle_rtld.c) */
+    fs_plugin_shims();
+    rtld_plugin_shims();
+}
 
 /* get_plugin_addresses(addr, *start, *end): the plugin's module around an address */
 HLE(get_plugin_addresses) {
@@ -331,6 +483,15 @@ static const char *guest_name(u64 table, int i, int count) {
     if (i < 0 || i >= count) return NULL;
     u64 ptr = *P(u64, table + 8ull * i);
     return ptr >= MAIN_BASE && ptr < MAIN_BASE + 0x8000000 ? P(const char, ptr) : NULL;
+}
+
+/* A fighter's kind by its name ("palutena"): -1 if none (the bench, hle_bench.c). */
+int skyline_fighter_kind(const char *name) {
+    for (int k = 0; k < FIGHTER_COUNT; k++) {
+        const char *n = guest_name(FIGHTER_NAMES, k, FIGHTER_COUNT);
+        if (n && !strcmp(n, name)) return k;
+    }
+    return -1;
 }
 
 typedef struct { u64 hash; int slot, weapon; char name[64]; } Agent;
@@ -650,6 +811,10 @@ static void status_created_weapon(Cpu *c) { status_created(c, 1); }
  * va_list): smashline's call_line_status_hook), each plugin callback for that agent, or for every
  * fighter or weapon. The other lines' callbacks are inline hooks in Smashline: not yet. */
 #define LINE_STATUS_OFFSET 0x3250
+int bench_on(void);                                      /* (hle_bench.c: the character test bench) */
+void bench_fighter_setup(u64 rec);
+void bench_fighter_frame(const char *name, int slot);
+void bench_note(const char *event);
 static u64 line_status_original;
 
 static void line_status(Cpu *c) {
@@ -658,6 +823,7 @@ static void line_status(Cpu *c) {
     u64 result = c->x[0];
     Agent a = agent_of(*P(u64, fighter + 0x38), -1);
     if (!a.hash) return;
+    if (!a.weapon) bench_fighter_frame(a.name, a.slot);
     u64 common = a.weapon ? WEAPON_HASH : FIGHTER_HASH;
     u32 n = line_n;
     int is_claimed = -1;
@@ -679,7 +845,7 @@ static void line_status(Cpu *c) {
 
 /* A module the game loaded (host.c): the hooks that go into it. */
 void skyline_module_loaded(const char *name, u64 base) {
-    if (!line_n || strcmp(name, "lua2cpp_common") || line_status_original) return;
+    if ((!line_n && !bench_on()) || strcmp(name, "lua2cpp_common") || line_status_original) return;
     line_status_original = rt_hook_function(base + LINE_STATUS_OFFSET, rt_native(line_status, "smashline line callbacks"));
     LOG("lua2cpp_common loaded: Main line callbacks %s", line_status_original ? "hooked" : "NOT hooked (no function there)");
 }
@@ -698,15 +864,95 @@ HLE(arcrop_require_api_version) { (void)c; }
 HLE(arcrop_api_version) { static u64 version; if (!version) { u32 v[2] = {1, 8}; version = rt_guest_copy(v, sizeof v); } c->x[0] = version; }
 HLE(arcrop_is_mod_enabled) { c->x[0] = 1; }    /* (hash of a mod's folder): the turned-on mods are the ones applied */
 HLE(arcrop_is_file_loaded) { c->x[0] = 1; }
+/* File callbacks: arcrop_register_callback(hash, size, fn(hash, buffer, size, *out size) -> bool). On
+ * the console ARCropolis runs one as the game loads that file. Here they run once the plugins' mains
+ * have (run_file_callbacks), on the file as the mods are applied: <data dir>/../skyline/arc/<hash>.in,
+ * which tools/mods.py writes for each hash listed in skyline/callbacks.txt; what they make goes to
+ * <hash>.out, which the next apply puts in the game's data (tools/skyline.py probe applies again when
+ * that changed). arcrop_load_file and arcrop_get_decompressed_size read the same .in (a later
+ * callback for the same file: what the one before made). */
+static struct { u64 hash, size, fn; } file_callbacks[256];
+static u32 file_callback_n;
+static struct { u64 hash; u8 *data; size_t size; } arc_now[64];   /* (while the callbacks run: each file as it is now) */
+static u32 arc_now_n;
 HLE(arcrop_register_callback) {
-    LOG("arcrop_register_callback for file %#llx: file callbacks are NOT SUPPORTED yet, left out", (unsigned long long)c->x[0]);
+    char a[96];
+    LOG("arcrop file callback for %#llx (up to %#llx bytes): %s", (unsigned long long)c->x[0], (unsigned long long)c->x[1],
+        rt_describe(c->x[2], a, sizeof a));
+    if (file_callback_n < 256) {
+        file_callbacks[file_callback_n].hash = c->x[0] & 0xFFFFFFFFFFull;
+        file_callbacks[file_callback_n].size = c->x[1];
+        file_callbacks[file_callback_n++].fn = c->x[2];
+    }
+}
+static int arc_file(u64 hash, u8 **data, size_t *size) {
+    hash &= 0xFFFFFFFFFFull;
+    for (u32 i = 0; i < arc_now_n; i++)
+        if (arc_now[i].hash == hash) { *data = arc_now[i].data; *size = arc_now[i].size; return 1; }
+    char path[1200];
+    snprintf(path, sizeof path, "%s/../skyline/arc/%010llx.in", rt_data_dir, (unsigned long long)hash);
+    FILE *f = fopen(path, "rb");
+    if (!f || arc_now_n == 64) { if (f) fclose(f); return 0; }
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    u8 *buf = malloc(n > 0 ? (size_t)n : 1);
+    if (n > 0 && fread(buf, 1, (size_t)n, f) != (size_t)n) n = 0;
+    fclose(f);
+    arc_now[arc_now_n].hash = hash; arc_now[arc_now_n].data = buf; arc_now[arc_now_n++].size = n > 0 ? (size_t)n : 0;
+    *data = buf; *size = n > 0 ? (size_t)n : 0;
+    return 1;
+}
+HLE(arcrop_get_decompressed_size) {   /* (hash, *size) -> bool */
+    u8 *d; size_t n;
+    int ok = arc_file(c->x[0], &d, &n);
+    if (ok && c->x[1]) *P(u64, c->x[1]) = n;
+    c->x[0] = (u64)ok;
+}
+HLE(arcrop_load_file) {   /* (hash, buffer, length, *out size) -> bool */
+    u8 *d; size_t n;
+    int ok = arc_file(c->x[0], &d, &n) && n <= c->x[2];
+    if (ok) memcpy(G2H(c->x[1]), d, n);
+    if (ok && c->x[3]) *P(u64, c->x[3]) = n;
+    c->x[0] = (u64)ok;
+}
+static void run_file_callbacks(Cpu *c) {
+    char path[1200];
+    snprintf(path, sizeof path, "%s/../skyline/callbacks.txt", rt_data_dir);
+    FILE *list = fopen(path, "w");
+    for (u32 i = 0; i < file_callback_n; i++) {
+        u64 h = file_callbacks[i].hash;
+        if (list) fprintf(list, "%010llx %llx\n", (unsigned long long)h, (unsigned long long)file_callbacks[i].size);
+        u8 *d; size_t n;
+        if (!arc_file(h, &d, &n)) { LOG("file callback for %#llx: no skyline/arc/%010llx.in yet (the next apply writes it)", (unsigned long long)h, (unsigned long long)h); continue; }
+        size_t room = file_callbacks[i].size > n ? file_callbacks[i].size : n;
+        u64 buf = rt_callsym(c, "malloc", 1, (u64)room), out = rt_callsym(c, "malloc", 1, (u64)8);
+        if (!buf || !out) continue;
+        memcpy(G2H(buf), d, n);
+        *P(u64, out) = n;
+        c->x[0] = h; c->x[1] = buf; c->x[2] = room; c->x[3] = out;
+        rt_call(c, file_callbacks[i].fn);
+        int ok = (c->x[0] & 1) && *P(u64, out) <= room;
+        size_t got = ok ? *P(u64, out) : 0;
+        LOG("file callback for %#llx: %s (%zu -> %zu bytes)", (unsigned long long)h, ok ? "changed it" : "left it", n, got);
+        snprintf(path, sizeof path, "%s/../skyline/arc/%010llx.out", rt_data_dir, (unsigned long long)h);
+        if (!ok) remove(path);
+        if (ok) {   /* (the next callback for this file, and the .out, get what this one made) */
+            u8 *now = malloc(got ? got : 1);
+            memcpy(now, G2H(buf), got);
+            for (u32 k = 0; k < arc_now_n; k++) if (arc_now[k].hash == h) { free(arc_now[k].data); arc_now[k].data = now; arc_now[k].size = got; }
+            FILE *f = fopen(path, "wb");
+            if (f) { fwrite(now, 1, got, f); fclose(f); }
+        }
+        rt_callsym(c, "free", 1, buf);
+        rt_callsym(c, "free", 1, out);
+    }
+    if (list) fclose(list);
 }
 HLE(arcrop_register_callback_with_path) {
     LOG("arcrop_register_callback_with_path for %#llx: NOT SUPPORTED yet, left out", (unsigned long long)c->x[0]);
 }
 HLE(arcrop_register_extension_callback) { LOG("arcrop_register_extension_callback: NOT SUPPORTED yet, left out"); }
-HLE(arcrop_get_decompressed_size) { c->x[0] = 0; }
-HLE(arcrop_load_file) { c->x[0] = 0; }
 
 /* ---- the CSK Collection's API: new characters on the select screen --------------------- */
 /* Plugins add character entries (ui_chara_db, ui_layout_db) as Rust structs (the_csk_collection_api:
@@ -749,7 +995,49 @@ static void layout_fields(void) {
 #undef ADD
 }
 
-static FILE *csk;   /* (open while plugins load: the json being written) */
+static FILE *csk;   /* (the json being written: <data dir>/../skyline/csk.json.tmp, open from the plugins' loading on) */
+static char csk_path[1200], csk_tmp[1220];
+static int csk_loaded;   /* (the plugins' mains have run: each entry from now on is published at once) */
+/* csk.json: what is written so far, closed as a list - if it changed (then the mods need applying again) */
+static SRWLOCK csk_lock = SRWLOCK_INIT;
+static void csk_publish(void) {
+    if (!csk) return;
+    AcquireSRWLockExclusive(&csk_lock);
+    fflush(csk);
+    FILE *in = fopen(csk_tmp, "rb");
+    if (!in) { ReleaseSRWLockExclusive(&csk_lock); return; }
+    fseek(in, 0, SEEK_END);
+    long n = ftell(in);
+    fseek(in, 0, SEEK_SET);
+    char *text = malloc((size_t)n + 8);
+    size_t got = fread(text, 1, (size_t)n, in);
+    fclose(in);
+    memcpy(text + got, "\n]\n", 3);
+    got += 3;
+    FILE *old_f = fopen(csk_path, "rb");
+    int same = 0;
+    if (old_f) {
+        char *old = malloc(got + 1);
+        same = fread(old, 1, got + 1, old_f) == got && !memcmp(old, text, got);
+        free(old);
+        fclose(old_f);
+    }
+    if (!same) {
+        FILE *out = fopen(csk_path, "wb");
+        if (out) { fwrite(text, 1, got, out); fclose(out); }
+        fprintf(stderr, "[skyline] the plugins' character entries changed (%s): the mods need applying again for them to show\n", csk_path);
+    }
+    free(text);
+    ReleaseSRWLockExclusive(&csk_lock);
+}
+static DWORD WINAPI probe_timer(void *unused) {   /* (SSBU_SKYLINE_PROBE with the real ARCropolis: its chainload is done by then) */
+    (void)unused;
+    Sleep(60000);
+    csk_publish();
+    fprintf(stderr, "[skyline] probe done (60 s after the plugins loaded)\n");
+    fflush(stderr);
+    ExitProcess(0);
+}
 static u64 csk_current;   /* (the ui_chara_id of the entry being written) */
 typedef struct { u64 ui_chara, base; int start; } Redirect;   /* (base: the fighter's own ui_chara, found when needed) */
 static Redirect redirects[64];
@@ -819,6 +1107,8 @@ static void json_map(FILE *f, int type, u64 map, int *first) {
 }
 
 /* An entry struct: id (u64), clone-from id (Option<u64>), then the fields, repr(C)-aligned. */
+static u64 csk_kinds[64][2];   /* (ui_chara, its fighter_kind hash) */
+static u32 csk_kind_n;
 static void json_entry(const char *kind, const char *id_key, const Field *fields, u64 at) {
     if (!csk) return;
     csk_current = !strcmp(kind, "ui_chara_db") ? *P(u64, at) : 0;
@@ -838,6 +1128,8 @@ static void json_entry(const char *kind, const char *id_key, const Field *fields
             if (tag <= 1) json_map(csk, fl->type, p, &first);
         } else {
             u64 val = tag == 0 ? p : tag == 1 ? option_value(fl->type, p) : 0;
+            if (val && csk_current && !strcmp(fl->name, "fighter_kind") && csk_kind_n < 64)
+                csk_kinds[csk_kind_n][0] = csk_current, csk_kinds[csk_kind_n++][1] = *P(u64, val) & 0xFFFFFFFFFFull;
             if (val) {
                 fprintf(csk, "%s\"%s\": [\"%s\", ", first ? "" : ", ", fl->name, FTYPE[fl->type].prc);
                 json_value(csk, fl->type, val);
@@ -852,15 +1144,24 @@ static void json_entry(const char *kind, const char *id_key, const Field *fields
 
 HLE(add_chara_db_entry_info) {
     LOG("CSK: character entry %#llx", (unsigned long long)*P(u64, c->x[0]));
+    AcquireSRWLockExclusive(&csk_lock);
     json_entry("ui_chara_db", "ui_chara_id", CHARA_FIELDS, c->x[0]);
+    ReleaseSRWLockExclusive(&csk_lock);
+    if (csk_loaded) csk_publish();
 }
 HLE(add_chara_layout_db_entry_info) {
     LOG("CSK: character layout entry %#llx", (unsigned long long)*P(u64, c->x[0]));
     if (!LAYOUT_FIELDS[0].name) layout_fields();
+    AcquireSRWLockExclusive(&csk_lock);
     json_entry("ui_layout_db", "ui_layout_id", LAYOUT_FIELDS, c->x[0]);
+    ReleaseSRWLockExclusive(&csk_lock);
+    if (csk_loaded) csk_publish();
 }
 HLE(add_narration_characall_entry) {   /* (C string) -> bool */
+    AcquireSRWLockExclusive(&csk_lock);
     if (csk) { fprintf(csk, "%s  {\"kind\": \"narration\", \"label\": ", csk_items++ ? ",\n" : ""); json_str(csk, guest_str(c->x[0])); fprintf(csk, "}"); }
+    ReleaseSRWLockExclusive(&csk_lock);
+    if (csk_loaded) csk_publish();
     c->x[0] = 1;
 }
 HLE(set_fighter_jingle) { LOG("CSK: fighter jingle for %#llx: %s (left out)", (unsigned long long)c->x[0], guest_str(c->x[1])); }
@@ -912,6 +1213,7 @@ static void scan_for(const char *what, u64 at, u64 size) {
 
 static void pre_battle(Cpu *c) {
     u64 setup = *P(u64, c->x[0] + 0x28);
+    bench_note("pre-battle set-up");
     rt_call(c, pre_battle_original);
     if (!redirect_n || !setup) return;
     u64 list = *P(u64, setup + 0x1010);
@@ -942,6 +1244,7 @@ static u64 ui_path_original;
 static void ui_path(Cpu *c) {
     u64 h = c->x[0] & 0xFFFFFFFFFFull;
     int color = (int)c->x[1];
+    bench_note("portrait path asked");
     for (u32 i = 0; i < redirect_n; i++) {
         Redirect *r = &redirects[i];
         if (color < r->start || color >= r->start + 64) continue;
@@ -957,6 +1260,30 @@ static void ui_path(Cpu *c) {
 static void fighter_setup(Cpu *c) {
     u64 rec = c->x[0], where = 0;
     int entry = *P(u8, rec + 0xa7);
+    if (bench_on()) {   /* (the bench's fighter and costume; a new character's portraits by its costume) */
+        const char *was = guest_name(FIGHTER_NAMES, *P(i8, rec + 8), FIGHTER_COUNT);
+        char from[64];
+        snprintf(from, sizeof from, "ui_chara_%s", was ? was : "");
+        bench_fighter_setup(rec);
+        const char *n = guest_name(FIGHTER_NAMES, *P(i8, rec + 8), FIGHTER_COUNT);
+        if (was && n) {   /* (the select screen's pick, where the record names it: the bench's fighter, for the HUD) */
+            char to[64];
+            snprintf(to, sizeof to, "ui_chara_%s", n);
+            u64 hf = hash40(from, strlen(from)), ht = hash40(to, strlen(to));
+            for (u64 o = 0; o + 8 <= 0x200; o += 8)
+                if ((*P(u64, rec + o) & 0xFFFFFFFFFFull) == hf) *P(u64, rec + o) = (*P(u64, rec + o) & ~0xFFFFFFFFFFull) | ht;
+        }
+        int k = *P(u8, rec + 0x19);
+        char fk[64], ui[64];
+        if (n) snprintf(fk, sizeof fk, "fighter_kind_%s", n), snprintf(ui, sizeof ui, "ui_chara_%s", n);
+        for (u32 i = 0; n && i < redirect_n; i++)
+            for (u32 j = 0; j < csk_kind_n; j++)
+                if (csk_kinds[j][0] == redirects[i].ui_chara && csk_kinds[j][1] == hash40(fk, strlen(fk)) &&
+                    k >= redirects[i].start && k < redirects[i].start + 64)
+                    redirects[i].base = hash40(ui, strlen(ui));
+        rt_call(c, fighter_setup_original);
+        return;
+    }
     Redirect *r = redirect_n ? redirect_in(rec, &where) : NULL;
     if (!r && entry < 8 && entry_chara[entry])
         for (u32 i = 0; i < redirect_n && !r; i++)
@@ -983,6 +1310,12 @@ void skyline_load_plugins(Cpu *c) {
     char path[1200], line[256];
     snprintf(path, sizeof path, "%s/../skyline/plugins.txt", rt_data_dir);
     FILE *f = fopen(path, "r");
+    if (!f && bench_on()) {   /* (no plugins: the bench's own hooks) */
+        fighter_setup_original = rt_hook_function(MAIN_BASE + FIGHTER_SETUP, rt_native(fighter_setup, "bench fighter set-up"));
+        pre_battle_original = rt_hook_function(MAIN_BASE + PRE_BATTLE, rt_native(pre_battle, "csk pre-battle"));
+        ui_path_original = rt_hook_function(MAIN_BASE + UI_PATH, rt_native(ui_path, "csk portrait paths"));
+        return;
+    }
     if (!f) return;
     const char *q = getenv("SSBU_SKYLINE_LOG");
     quiet = q && *q == '0';
@@ -991,7 +1324,16 @@ void skyline_load_plugins(Cpu *c) {
     /* (plugins find Smashline with nn::ro::LookupSymbol: the native one, from now on) */
     rt_wrap_symbol("_ZN2nn2ro12LookupSymbolEPmPKc", lookup_symbol);
     fs_mount_sd();
-    for (u32 k = 0; k < NFACTORIES; k++) {
+    void rtld_init(void);   /* (hle_rtld.c: nn::ro's module lists, LoadModuleInternal) */
+    rtld_init();
+    plugin_shims();
+    /* The real Smashline among the plugins (a standard plugin, tools/skyline.py): it hooks what the
+     * native one would, so the native one stays out */
+    int real_smashline = 0;
+    while (fgets(line, sizeof line, f)) { line[strcspn(line, "\r\n#")] = 0; if (!strcmp(line, "smashline")) real_smashline = 1; }
+    rewind(f);
+    if (real_smashline) LOG("the real Smashline is listed: the native one is left out");
+    for (u32 k = 0; k < NFACTORIES && !real_smashline; k++) {
         factory_original[k] = rt_hook_function(MAIN_BASE + FACTORIES[k].offset, rt_native(factory_hooks[k], "smashline create_agent"));
         if (!factory_original[k]) LOG("create_agent at main+%#llx is not a function: Smashline's acmd scripts will not reach it",
                                       (unsigned long long)FACTORIES[k].offset);
@@ -999,16 +1341,16 @@ void skyline_load_plugins(Cpu *c) {
     FIGHTER_HASH = hash40("fighter", 7);
     WEAPON_HASH = hash40("weapon", 6);
     GuestFn *status_hooks[2] = {status_created_fighter, status_created_weapon};
-    for (int k = 0; k < 2; k++) {
+    for (int k = 0; k < 2 && !real_smashline; k++) {
         status_factory_original[k] = rt_hook_function(MAIN_BASE + STATUS_FACTORIES[k], rt_native(status_hooks[k], "smashline create_agent_status"));
         if (!status_factory_original[k]) LOG("create_agent_status at main+%#llx is not a function: status scripts will not reach it",
                                              (unsigned long long)STATUS_FACTORIES[k]);
     }
-    char csk_path[1200], csk_tmp[1220];
     snprintf(csk_path, sizeof csk_path, "%s/../skyline/csk.json", rt_data_dir);
     snprintf(csk_tmp, sizeof csk_tmp, "%s.tmp", csk_path);
     csk = fopen(csk_tmp, "w");
     if (csk) fprintf(csk, "[\n");
+    if (!real_smashline) {
     static_data_original = rt_hook_function(MAIN_BASE + STATIC_FIGHTER_DATA, rt_native(static_data, "smashline fighter articles"));
     fighter_init_original = rt_hook_function(MAIN_BASE + FIGHTER_INIT, rt_native(fighter_init, "smashline fighter set-up"));
     note_hook_target(MAIN_BASE + FIGHTER_INIT);
@@ -1016,22 +1358,33 @@ void skyline_load_plugins(Cpu *c) {
         add_inline_hook(MAIN_BASE + WEAPON_SWAPS[k].offset, 0, swap_weapon,
                         (u64)WEAPON_SWAPS[k].kind << 16 | (u64)WEAPON_SWAPS[k].src << 8 | (u64)WEAPON_SWAPS[k].dst);
     note_hook_target(MAIN_BASE + STATIC_FIGHTER_DATA);
+    }
     pre_battle_original = rt_hook_function(MAIN_BASE + PRE_BATTLE, rt_native(pre_battle, "csk pre-battle"));
     fighter_setup_original = rt_hook_function(MAIN_BASE + FIGHTER_SETUP, rt_native(fighter_setup, "csk fighter set-up"));
     note_hook_target(MAIN_BASE + FIGHTER_SETUP);   /* (called directly too: hookable from the next build on) */
     ui_path_original = rt_hook_function(MAIN_BASE + UI_PATH, rt_native(ui_path, "csk portrait paths"));
     note_hook_target(MAIN_BASE + UI_PATH);
-    while (fgets(line, sizeof line, f)) {
+    /* every plugin loaded (its exports there for the others), then each main run, as Skyline does:
+     * a plugin whose main has another load the mods' plugins (ARCropolis' chainload) finds Smashline's
+     * exports whatever the order */
+    static char names[64][128];
+    static u64 bases[64];
+    int count = 0;
+    while (fgets(line, sizeof line, f) && count < 64) {
         line[strcspn(line, "\r\n#")] = 0;
         if (!*line) continue;
         u64 base = rt_load_nro_named(c, line);
         if (!base) { fprintf(stderr, "[skyline] plugin %s is not recompiled into this build: left out\n", line); continue; }
-        u64 entry = rt_module_export(base, "main");
-        fprintf(stderr, "[skyline] plugin %s at %#llx: running main\n", line, (unsigned long long)base);
-        if (entry) rt_call(c, entry);
-        fprintf(stderr, "[skyline] plugin %s: main returned\n", line);
+        snprintf(names[count], sizeof names[count], "%s", line);
+        bases[count++] = base;
     }
     fclose(f);
+    for (int i = 0; i < count; i++) {
+        u64 entry = rt_module_export(bases[i], "main");
+        fprintf(stderr, "[skyline] plugin %s at %#llx: running main\n", names[i], (unsigned long long)bases[i]);
+        if (entry) rt_call(c, entry);
+        fprintf(stderr, "[skyline] plugin %s: main returned\n", names[i]);
+    }
     for (int ev = 0; ev < 2; ev++)   /* ArcFilesystemMounted, ModFilesystemMounted */
         for (u32 i = 0; i < event_n; i++)
             if (event_callbacks[i][0] == (u64)ev) {
@@ -1040,23 +1393,14 @@ void skyline_load_plugins(Cpu *c) {
                 c->x[0] = (u64)ev;
                 rt_call(c, event_callbacks[i][1]);
             }
-    if (csk) {
-        fprintf(csk, "\n]\n");
-        fclose(csk);
-        csk = NULL;
-        /* (a change means the mods need applying again: tools/skyline.py sync does) */
-        FILE *old_f = fopen(csk_path, "rb"), *new_f = fopen(csk_tmp, "rb");
-        int same = old_f && new_f;
-        while (same) { int a = fgetc(old_f), b = fgetc(new_f); if (a != b) same = 0; if (a == EOF || b == EOF) break; }
-        if (old_f) fclose(old_f);
-        if (new_f) fclose(new_f);
-        if (same) remove(csk_tmp);
-        else {
-            rename(csk_tmp, csk_path);
-            fprintf(stderr, "[skyline] the plugins' character entries changed (%s): the mods need applying again for them to show\n", csk_path);
-        }
+    if (file_callback_n) run_file_callbacks(c);
+    csk_publish();   /* (a change means the mods need applying again: tools/skyline.py probe does) */
+    csk_loaded = 1;
+    if (getenv("SSBU_SKYLINE_PROBE")) {
+        if (rt_symbol("arcrop_register_callback") && rt_module_export(rt_symbol("arcrop_register_callback") & ~0xFFFFFFull, "main"))
+            CloseHandle(CreateThread(NULL, 0, probe_timer, NULL, 0, NULL));   /* (the real ARCropolis: the mods' plugins run later, as it mounts the mods) */
+        else { fprintf(stderr, "[skyline] probe done\n"); fflush(stderr); ExitProcess(0); }
     }
-    if (getenv("SSBU_SKYLINE_PROBE")) { fprintf(stderr, "[skyline] probe done\n"); fflush(stderr); ExitProcess(0); }
     fprintf(stderr, "[skyline] plugins installed %u acmd scripts, %u status scripts, %u line callbacks\n", acmd_n, status_n, line_n);
     memcpy(c->x, saved, sizeof saved);
 }

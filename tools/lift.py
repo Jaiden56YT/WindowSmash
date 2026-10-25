@@ -86,6 +86,14 @@ DYNAMIC_JUMPS = os.environ.get("SSBU_DYNAMIC_JUMPS") == "1"   # (recomp.py: for 
 # optimiser in knots for half an hour; they stay as they were (the two forms call each other
 # freely: the context is right at every call and return either way).
 REGCACHE_MAX = 20000
+ANY_SP = 1 << 62   # (a landing pad's flag: it takes any sp - recomp.adr_landing_pads)
+# Skyline plugins (recomp.build sets SSBU_FLAGS_XFER): LLVM's machine outliner makes helpers a `bl`
+# reaches that end in a compare the caller then branches on (Rust's integer formatting does), so
+# the flags go out of a function at its returns and calls and come back in after a call and at an
+# entry, in bits 28-31 of the context's FPSR (RES0 on AArch64: AArch32 kept NZCV there). Not for the
+# game's own modules.
+FLAGS_IN = "{ u32 f_ = c->fpsr; nf = f_ >> 31; zf = f_ >> 30 & 1; cf = f_ >> 29 & 1; vf = f_ >> 28 & 1; }"
+FLAGS_OUT = "c->fpsr = (c->fpsr & 0x0FFFFFFFu) | nf << 31 | zf << 30 | cf << 29 | vf << 28;"
 
 _RE_CALL = re.compile(r"(X\(30\) = 0x[0-9A-F]+ull; )(f_[0-9a-f]+\(c\);)")
 _RE_SVC = re.compile(r"(rt_svc\(c, 0x[0-9a-f]+\);)")
@@ -132,6 +140,7 @@ class Lifter(SimdMixin):
         self.table_at = {}       # per function: index of `br` -> set of target offsets
         self.unresolved = []     # table-style `br` sites whose table could not be found
         self.assumed = 0         # tables accepted by validation rather than proof
+        self.xfer = os.environ.get("SSBU_FLAGS_XFER") == "1"   # (FLAGS_IN / FLAGS_OUT)
 
     # ------------------------------------------------------------------ function
     def lift_function(self, start, size):
@@ -155,7 +164,7 @@ class Lifter(SimdMixin):
         if here:   # (the last word in the instruction's place, so the jump table analysis sees it)
             self.words = tuple(here[start + i * 4][-1] if start + i * 4 in here else w for i, w in enumerate(self.words))
         self.sites = self.pads.get(start, [])
-        self.leaders.update(lp for _s, _e, lp in self.sites)   # entered from an exception
+        self.leaders.update(lp & ~ANY_SP for _s, _e, lp in self.sites)   # entered from an exception
         self.analyze_tables()
         reasons = Counter()
         body, falls = [], True
@@ -174,7 +183,7 @@ class Lifter(SimdMixin):
             body.append((pc, stmt, falls))
         if falls and self.fend in self.entries:   # assembly routines may run on into the next one
             self.callees.add(self.fend)
-            body.append((None, f"TAIL(f_{self.base + self.fend:x})", False))
+            body.append((None, (f"{{ {FLAGS_OUT} TAIL(f_{self.base + self.fend:x}) }}" if self.xfer else f"TAIL(f_{self.base + self.fend:x})"), False))
         elif falls:
             body.append((None, f'rt_trap(c, {const(self.base + self.fend)}, "fell off the end of a function");', False))
         decl = []
@@ -184,6 +193,8 @@ class Lifter(SimdMixin):
             body = [(pc, s, f) for (pc, s), (_pc, _s, f) in zip(cached, body)]
         out = [f"void {name}(Cpu *c) {{",
                "    u32 nf = 0, zf = 0, cf = 0, vf = 0; u64 ex_a = 0, ex_v = 0;"] + ["    " + d for d in decl]
+        if self.xfer:
+            out.append("    " + FLAGS_IN)
         for pc, stmt, _falls in body:
             if pc in self.leaders:
                 out.append(f"L_{pc:x}:;")
@@ -195,9 +206,11 @@ class Lifter(SimdMixin):
         if self.fstart <= target < self.fend:
             self.leaders.add(target)
             return f"goto L_{target:x};"
+        if not 0 <= target < len(self.img):   # (a plugin's patch: a branch into its own code)
+            return f"{{ GuestFn *t_ = rt_lookup({const(self.base + target)}); __attribute__((musttail)) return t_(c); }}"
         if target in self.entries:
             self.callees.add(target)
-            return f"TAIL(f_{self.base + target:x})"
+            return (f"{{ {FLAGS_OUT} TAIL(f_{self.base + target:x}) }}" if self.xfer else f"TAIL(f_{self.base + target:x})")
         raise Unsupported("branch into another function's body")
 
     def call(self, target, ret):
@@ -207,10 +220,16 @@ class Lifter(SimdMixin):
             # callee-saved registers, which the native longjmp restores (and sets X(0)).
             # (RT_SETJMP: the host's cheapest setjmp, recomp.h)
             return "if (!RT_SETJMP(*rt_setjmp(c))) X(0) = 0;"
+        if not 0 <= target < len(self.img):   # (a plugin's patch: a call into its own code)
+            return self.landing(ret, f"X(30) = {const(self.base + ret)}; rt_lookup({const(self.base + target)})(c);")
         self.callees.add(target)
+        if self.xfer:
+            return self.landing(ret, f"{FLAGS_OUT} X(30) = {const(self.base +ret)}; f_{self.base + target:x}(c); {FLAGS_IN}")
         return self.landing(ret, f"X(30) = {const(self.base +ret)}; f_{self.base + target:x}(c);")
 
     def call_indirect(self, rn, ret):
+        if self.xfer:
+            return self.landing(ret, f"{{ u64 t_ = {reg(rn)}; {FLAGS_OUT} X(30) = {const(self.base +ret)}; rt_lookup(t_)(c); {FLAGS_IN} }}")
         return self.landing(ret, f"{{ u64 t_ = {reg(rn)}; X(30) = {const(self.base +ret)}; rt_lookup(t_)(c); }}")
 
     def landing(self, ret, call):
@@ -219,14 +238,15 @@ class Lifter(SimdMixin):
         pointer of the frame it resumes, and the frame whose call that is takes it."""
         pc = ret - 4
         for s, e, lp in self.sites:
+            any_sp, lp = lp & ANY_SP, lp & ~ANY_SP   # (a pad that sets its own sp: recomp.adr_landing_pads)
             if s <= pc + 3 < e and self.fstart <= lp < self.fend:
-                return (f"{{ u64 sp_ = SP; int lp_ = 0; __try {{ {call} }} "
+                return (f"{{ u64 sp_ = {'~0ull' if any_sp else 'SP'}; int lp_ = 0; __try {{ {call} }} "
                         f"__except (rt_eh_filter(GetExceptionInformation(), sp_, {const(self.base + lp)})) {{ lp_ = 1; }} "
                         f"if (lp_) goto L_{lp:x}; }}")
         return call
 
     def ret(self, rn):
-        return "return;"
+        return f"{{ {FLAGS_OUT} return; }}" if self.xfer else "return;"
 
     # ------------------------------------------------------------------ dispatch
     def insn(self, w, pc):
@@ -476,7 +496,8 @@ class Lifter(SimdMixin):
             # an import stub (adrp x16; ldr x17, [x16, #got]; add x16, x16, #got; br x17): its
             # target is the same every time, so it keeps it rather than looking it up per call
             return f"{{ static RtCache k_; GuestFn *t_ = rt_target({reg(rn)}, &k_); __attribute__((musttail)) return t_(c); }}"
-        return f"{{ GuestFn *t_ = rt_lookup({reg(rn)}); __attribute__((musttail)) return t_(c); }}"
+        out = "" if not self.xfer else FLAGS_OUT + " "
+        return f"{{ {out}GuestFn *t_ = rt_lookup({reg(rn)}); __attribute__((musttail)) return t_(c); }}"
 
     def find_def(self, r, i):
         """Index of the nearest instruction before index i that writes xR, or None if
@@ -487,11 +508,32 @@ class Lifter(SimdMixin):
             if (w >> 25) & 0xE == 0xA and w >> 20 != 0xD53:   # branches, exceptions, system
                 if w & 0xFC000000 == 0x14000000 or w & 0xFFFFFC1F in (0xD65F0000, 0xD61F0000):
                     return None                           # b / ret / br: nothing falls through
-                if (w & 0xFC000000 == 0x94000000 or w & 0xFFFFFC1F == 0xD63F0000) and (r <= 18 or r == 30):
+                if (w & 0xFC000000 == 0x94000000 or w & 0xFFFFFC1F == 0xD63F0000) and (r <= 18 or r == 30) and \
+                        self.call_writes(w, j, r):
                     return None                           # calls clobber caller-saved registers
             elif r in gpr_defs(w):
                 return j
         return None
+
+    def call_writes(self, w, j, r):
+        """Whether the call at index j (word w) may change xR. A call does, by the ABI - but in a
+        Skyline plugin (SSBU_DYNAMIC_JUMPS) a `bl` to one of LLVM's machine outliner's helpers keeps
+        every register the helper doesn't write: a short straight run to a `ret` that calls nothing."""
+        if not DYNAMIC_JUMPS or r == 30 or w & 0xFC000000 != 0x94000000:
+            return True
+        t = self.fstart + j * 4 + sx(w & 0x3FFFFFF, 26) * 4
+        for k in range(32):
+            a = t + 4 * k
+            if a < 0 or a + 4 > len(self.img):
+                return True
+            x = struct.unpack_from("<I", self.img, a)[0]
+            if x & 0xFFFFFC1F == 0xD65F0000:              # ret
+                return False
+            if (x >> 25) & 0xE == 0xA and x >> 20 != 0xD53:  # any other branch: not a plain helper
+                return True
+            if r in gpr_defs(x):
+                return True
+        return True
 
     def analyze_tables(self):
         """Resolve each `br` of the current function that is a compiler jump-table dispatch:
@@ -546,7 +588,8 @@ class Lifter(SimdMixin):
                 seen.add(j)
                 w = ws[j]
                 if (w >> 25) & 0xE == 0xA and w >> 20 != 0xD53:
-                    if (w & 0xFC000000 == 0x94000000 or w & 0xFFFFFC1F == 0xD63F0000) and (r <= 18 or r == 30):
+                    if (w & 0xFC000000 == 0x94000000 or w & 0xFFFFFC1F == 0xD63F0000) and (r <= 18 or r == 30) and \
+                            self.call_writes(w, j, r):
                         if strict:
                             return None
                         continue

@@ -115,7 +115,7 @@ $ZstdCheck = 'import sys, importlib.util as u; sys.exit(0 if u.find_spec(''zstan
 # where updates come from: this repository's branch
 $RepoOwner = 'Jaiden56YT'
 $RepoName = 'WindowSmash'
-$UpdateBranch = 'main'
+$UpdateBranch = 'plugins-test'
 $RepoApi = "https://api.github.com/repos/$RepoOwner/$RepoName"
 $SourceVersionFile = 'tools\source_version.txt'   # "<commit> <date>": GitHub's ZIP download fills it in
 
@@ -1313,6 +1313,16 @@ function Step-Build {
     else { Write-Info 'the program, fonts, data, DLC and fighters, then the build: 30 minutes to a few hours' }
     if ((Invoke-Python $build) -ne 0) { throw 'The build stopped (the message above says why). Fix that, then run Install WindowSmash.bat again: it carries on where it stopped.' }
     if ($SkipBuild) { return $false }
+    # the community's Skyline plugins that mods need (ARCropolis, Smashline 2, One Slot Effects, nro_hook),
+    # from their own releases (tools\std_plugins.py checks each), then built into the game with the mods' own
+    Write-Info 'the standard Skyline plugins: fetched from their releases and built in (tools\std_plugins.py, tools\skyline.py)'
+    if ((Invoke-Python @((Join-Path $Root 'tools\std_plugins.py'), 'fetch')) -ne 0) {
+        Write-Warn 'the plugins could not be fetched (see above): mods that need them will not work until this runs again'
+    } else {
+        $sky = @((Join-Path $Root 'tools\skyline.py'), 'build')
+        if ($Jobs) { $sky += @('--jobs', "$Jobs") }
+        if ((Invoke-Python $sky) -ne 0) { Write-Warn 'building the plugins in stopped (see above); the game itself is built' }
+    }
     return $true
 }
 

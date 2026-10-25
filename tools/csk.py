@@ -66,6 +66,7 @@ def apply(data, entries, db_kind):
         raise prc.Error("no db_root list")
     rows = rows[1]
     notes = []
+    last = last_place(rows)
 
     def find(h):
         for i, (_kind, st) in enumerate(rows):
@@ -115,7 +116,57 @@ def apply(data, entries, db_kind):
                 notes.append(f"{db_kind}: field {k:#x} left out (the game's entries have no such field)")
         notes.append(f"{db_kind}: {'changed' if at is not None else 'added'} {e[id_name]}"
                      + (f" (a copy of {e['clone_from']})" if at is None and e.get("clone_from") else ""))
+    if db_kind == "ui_chara_db":
+        notes += place_beyond(rows, last)
     return prc.write(root), notes
+
+
+DISP_ORDER, RANDOM_PLACE = prc.hash40("disp_order"), 99   # (99: the Random tile)
+
+
+def last_place(rows):
+    """The last fighter's place on the select screen (86 in 13.0.5), before any entry is added."""
+    return max((dict(st).get(DISP_ORDER, (None, -1))[1] for _k, st in rows
+                if -1 < dict(st).get(DISP_ORDER, (None, -1))[1] < RANDOM_PLACE), default=0)
+
+
+def place_beyond(rows, last):
+    """Entries asking for a place past the last fighter's go right after it. The grid takes as many
+    tiles as there are entries (two at one place sit side by side), but a place between the last
+    fighter's and Random's (87-98) or past them collapses it to one column (and with more, the game
+    stops)."""
+    notes = []
+    for _kind, st in rows:
+        for i, (k, p) in enumerate(st):
+            if k == DISP_ORDER and p[1] is not None and p[1] > last and p[1] != RANDOM_PLACE:
+                notes.append(f"ui_chara_db: select-screen place {p[1]} is past the last fighter's ({last}): {last} instead")
+                st[i] = (k, (p[0], last))
+    return notes
+
+
+NEW_TILES = 4   # (the select screen's layout: a fifth new tile takes a 14th column, and the game aborts while loading the menus)
+
+
+def limit_new(entries, log=print):
+    """The entries with at most NEW_TILES new characters (the first ones, in the plugins' order); the
+    others are left off the select screen (their costumes still work, by number)."""
+    keep, dropped = [], []
+    new_ids = [e["ui_chara_id"] for e in entries if e.get("kind") == "ui_chara_db" and int(e["ui_chara_id"], 16) not in KNOWN]
+    allowed = set(new_ids[:NEW_TILES])
+    for e in entries:
+        if e.get("kind") == "ui_chara_db" and e["ui_chara_id"] in new_ids and e["ui_chara_id"] not in allowed:
+            dropped.append(e.get("set", {}).get("name_id", ["", e["ui_chara_id"]])[1])
+            continue
+        if e.get("kind") == "ui_layout_db" and e.get("set", {}).get("ui_chara_id", ["", ""])[1] in set(new_ids) - allowed:
+            continue
+        keep.append(e)
+    if dropped:
+        log(f"Skyline plugins: only {NEW_TILES} new characters fit the select screen: left off - " + ", ".join(dropped) +
+            " (turn others off to show them)")
+    return keep
+
+
+KNOWN = set()   # (ui_chara ids the game has: none of the plugins' new ones are; csk.apply changes those in place)
 
 
 def main():

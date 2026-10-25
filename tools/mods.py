@@ -435,6 +435,8 @@ LINKED = [("eflame", "elight", "element"), ("ptrainer", "pzenigame", "pfushigiso
 # a costume's own effects (effect/fighter/sonic/ef_sonic_c06.eff): only the One Slot Effects
 # Skyline plugin reads them; added to the game as a mod's config.json says (to the costume's
 # directory), the game stops loading the fighter - so they are left out, the fighter's own effects used
+ONE_SLOT_PLUGIN = False   # (apply: the One Slot Effects plugin is among the standard plugins, <tree>/skyline/plugins, so
+                          # a costume's own effect file goes in as a new file, as ARCropolis adds it on the console)
 ONE_SLOT_EFFECT = re.compile(r"^effect/fighter/[^/]+/ef_[^/]+_c\d+\.eff$", re.I)   # a costume slot in a directory's path (fighter/mario/c08, .../c08/camera)
 
 
@@ -786,7 +788,7 @@ class Table:
                 continue
             for f in files:
                 fh, fp = config_hash(f)
-                if fp and ONE_SLOT_EFFECT.match(fp):
+                if fp and ONE_SLOT_EFFECT.match(fp) and not ONE_SLOT_PLUGIN:
                     continue
                 self.listed.setdefault(d, []).append((fh, fp))
                 self.listed_in.setdefault(fh, d)
@@ -1472,9 +1474,22 @@ def pieces(entries, size, a, b, to):
 
 def apply(tree, log=print):
     """Make romfs.cfg read the turned-on mods (or the game as it is, when none is on)."""
+    global ONE_SLOT_PLUGIN
+    ONE_SLOT_PLUGIN = os.path.exists(os.path.join(tree.root, "skyline", "plugins", "libone_slot_eff.nro"))
     lines = vanilla_cfg(tree)
     state = tree.load()
     on = [n for n in state["order"] if state["mods"].get(n, {}).get("enabled")]
+    if os.path.exists(os.path.join(tree.root, "skyline", "plugins", "libarcropolis.nro")):
+        # the real ARCropolis is among the standard plugins: it reads the turned-on mods from
+        # sd:/ultimate/mods (runtime/hle_fs.c) as the game loads, so the game keeps its own data
+        characters_mod(tree, log)
+        sync_plugins(tree, log)
+        shutil.copyfile(tree.vanilla_cfg, tree.cfg)
+        os.makedirs(tree.work, exist_ok=True)
+        with open(os.path.join(tree.work, "applied.json"), "w", encoding="utf-8") as f:
+            json.dump({"mods": on, "files": 0, "skipped": {}, "arcropolis": True}, f)
+        log(f"{len(on)} mod(s) on: ARCropolis loads them as the game runs (the game's own data stays as it is)")
+        return {"mods": on, "files": 0, "skipped": {}}
     if not on:
         sync_plugins(tree, log)
         shutil.copyfile(tree.vanilla_cfg, tree.cfg)
@@ -1492,6 +1507,100 @@ def apply(tree, log=print):
         close_image(image)
     sync_plugins(tree, log)
     return result
+
+
+def plugin_file_callbacks(tree, table, log):
+    """Files Skyline plugins change as the game loads them (ARCropolis' file callbacks, which the
+    runtime runs when it starts: runtime/hle_skyline.c). For each file listed in
+    dump/skyline/callbacks.txt, its bytes as the mods make it go to dump/skyline/arc/<hash>.in; what the
+    plugins made of those bytes (<hash>.out, from the last start) goes in the game's data. A .out made
+    from other bytes is dropped (tools/skyline.py probe starts the game again and applies)."""
+    folder = os.path.join(tree.root, "dump", "skyline", "arc")
+    listed = os.path.join(tree.root, "dump", "skyline", "callbacks.txt")
+    if not os.path.exists(listed):
+        return
+    os.makedirs(folder, exist_ok=True)
+    for line in open(listed, encoding="utf-8"):
+        parts = line.split()
+        if not parts:
+            continue
+        h = int(parts[0], 16)
+        p = table.path_index_of(h)
+        if p is None:
+            log(f"Skyline plugins: a file callback for {h:#012x}, which the game doesn't have: left out")
+            continue
+        full = table.entry("paths", p, "<Q")[0]
+        info = table.entry("info_indices", full >> 40, "<2I")[1]
+        _, _, to_data, flags = table.entry("infos", info, "<4I")
+        targets = sorted({tuple(table.entry("info_to_datas", to_data + r, "<3I")[:2])
+                          for r in (range(1, table.arc.regions + 1) if flags & 0x8000 else (0,))})
+        f0, d0 = targets[0]
+        if d0 in table.replaced.get(f0, {}):
+            stored, _size, dflags = table.replaced[f0][d0]
+            data = unzstd(stored, "a modded file") if dflags & 3 else stored
+        else:
+            data = table.original(f0, d0)
+        src, out = os.path.join(folder, f"{h:010x}.in"), os.path.join(folder, f"{h:010x}.out")
+        if not os.path.exists(src) or open(src, "rb").read() != data:
+            with open(src, "wb") as f:
+                f.write(data)
+            if os.path.exists(out):
+                os.remove(out)   # (made from other bytes)
+        if os.path.exists(out):
+            new = open(out, "rb").read()
+            for folder_i, d in targets:
+                table.replace(folder_i, d, new)
+            log(f"Skyline plugins: {h:#012x} changed by a plugin's file callback ({len(data)} -> {len(new)} bytes)")
+
+
+CHARACTERS = ".characters"   # (mods/.characters: the plugins' new characters as a mod ARCropolis loads last)
+
+
+def characters_mod(tree, log):
+    """With the real ARCropolis: the select-screen entries Skyline plugins add (dump/skyline/csk.json,
+    the CSK Collection's API, which runs natively) merged into the game's ui_chara_db / ui_layout_db,
+    as files of a mod of their own (mods/.characters, hidden from the menu; the runtime lists it to
+    ARCropolis last, runtime/hle_fs.c). The mods' own .prcxml patches go on top, as ARCropolis does."""
+    folder = os.path.join(tree.mods, CHARACTERS)
+    entries = csk.load(tree.root)
+    shutil.rmtree(folder, ignore_errors=True)
+    hidden_path = os.path.join(tree.root, "dump", "skyline", "hidden.txt")
+    hidden = []   # (mods' own copies of the files made here: the runtime hides them from ARCropolis)
+    if not entries:
+        open(hidden_path, "w").close()
+        return
+    state = tree.load()
+    on = [n for n in state["order"] if state["mods"].get(n, {}).get("enabled")]
+    entries = csk.limit_new(entries, log)
+    image = RomfsImage(tree.vanilla_cfg)
+    try:
+        arc_at = next(o for p, o, s in romfs_entries(image) if p == "data.arc")
+        table = Table(Arc(lambda off, n: image.read(arc_at + off, n)))
+        for target in csk.targets(entries):
+            found = table.file_targets(target)
+            if not found:
+                continue
+            base = table.original(*found[0])
+            for name in on:   # (a mod's whole copy of the file: the last one, with the characters added to it)
+                for root in find_roots(os.path.join(tree.mods, name)) or [os.path.join(tree.mods, name)]:
+                    own = os.path.join(root, *target.split("/"))
+                    if os.path.isfile(own):
+                        with open(own, "rb") as f:
+                            base = f.read()
+                        hidden.append(os.path.relpath(own, tree.mods).replace(os.sep, "/"))
+            data, notes = csk.apply(base, entries, "ui_layout_db" if target == csk.LAYOUT_DB else "ui_chara_db")
+            out = os.path.join(folder, *target.split("/"))
+            os.makedirs(os.path.dirname(out), exist_ok=True)
+            with open(out, "wb") as f:
+                f.write(data)
+            for note in notes:
+                log(f"Skyline plugins: {note}")
+    finally:
+        close_image(image)
+    with open(hidden_path, "w", encoding="utf-8", newline="\n") as f:
+        f.writelines(h + "\n" for h in hidden)
+    if hidden:
+        log("the new characters' select-screen files include these mods' own copies: " + ", ".join(hidden))
 
 
 def sync_plugins(tree, log):
@@ -1608,7 +1717,7 @@ def _apply(tree, image, lines, state, on, log):
             targets = table.file_targets(path)
             with open(src, "rb") as f:
                 data = f.read()
-            if targets is None and ONE_SLOT_EFFECT.match(path):
+            if targets is None and ONE_SLOT_EFFECT.match(path) and not ONE_SLOT_PLUGIN:
                 skipped.setdefault(name, []).append(path)
                 log(f"{name}: {path.rsplit('/', 1)[1]} left out: one-slot effects need the One Slot Effects plugin "
                     "(not supported yet) - this costume uses the fighter's own effects")
@@ -1674,6 +1783,7 @@ def _apply(tree, image, lines, state, on, log):
                 table.replace(folder, d, data)
             for path, _src, name in patches[key]:
                 merged.setdefault(name, []).append(path)
+        plugin_file_callbacks(tree, table, log)
         if table.kept_shared:
             log(f"{len(table.kept_shared)} file{'s' if len(table.kept_shared) > 1 else ''} kept shared with the fighter's other "
                 "costumes (made a costume's own, they'd stop those costumes' matches loading): the mod's version shows on "

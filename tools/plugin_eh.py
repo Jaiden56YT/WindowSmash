@@ -53,6 +53,8 @@ def _stores(w):
         return [(base + (w & 31), at), (base + ((w >> 10) & 31), at + 8)], (imm if mode == 3 else 0)
     if w & 0xFFE00C00 == 0xF8000C00 and (w >> 5) & 31 == SP:   # str x, [sp, #imm]! (pre-index)
         return [(w & 31, 0)], sx((w >> 12) & 0x1FF, 9)
+    if w & 0xFFE00C00 == 0xFC000C00 and (w >> 5) & 31 == SP:   # str d, [sp, #imm]! (pre-index: a function keeping d8 first)
+        return [(64 + (w & 31), 0)], sx((w >> 12) & 0x1FF, 9)
     if w & 0xFFC00000 == 0xF9000000 and (w >> 5) & 31 == SP:   # str x, [sp, #imm]
         return [(w & 31, ((w >> 10) & 0xFFF) * 8)], 0
     if w & 0xFFC00000 == 0xFD000000 and (w >> 5) & 31 == SP:   # str d, [sp, #imm]

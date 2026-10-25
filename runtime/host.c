@@ -78,6 +78,13 @@ const char *rt_describe(u64 addr, char *buf, size_t n) {
     return buf;
 }
 
+/* The module whose code (text) holds addr, and the offset there: NULL if none. */
+const char *rt_code_offset(u64 addr, u64 *off) {
+    for (u32 m = 0; m < module_count; m++)
+        if (addr - modules[m]->base < modules[m]->text_size) { *off = addr - modules[m]->base; return modules[m]->name; }
+    return NULL;
+}
+
 /* Guest function containing a host code address, or 0 for runtime code. */
 static u64 guest_of(u64 pc) {
     u32 lo = 0, hi = by_host_count;
@@ -803,8 +810,18 @@ static void map_module(u32 m, const char *dir) {
     if (image != G2H(mod->base)) rt_fatal("cannot map %s at %#llx", mod->name, mod->base);
     if (fread(image, 1, mod->image_size, f) < mod->text_size) rt_fatal("%s is truncated", path);
     fclose(f);
+    /* code, read-only data, data: as the console maps them (plugins find a module's sections with
+     * QueryMemory, hle_rtld.c). An NRO's header says where; the boot modules' are 13.0.5's. */
+    u64 ro = text, data = text;
+    static const struct { const char *name; u64 ro, data; } BOOT[] = {
+        {"main", 0x39c9000, 0x4f17000}, {"subsdk0", 0x36d000, 0x5c7000}, {"sdk", 0x541000, 0xbda000}};
+    if (*(u32 *)(image + 0x10) == 0x304F524E) { ro = *(u32 *)(image + 0x28); data = *(u32 *)(image + 0x30); }
+    else for (u32 b = 0; b < 3; b++)
+        if (!strcmp(mod->name, BOOT[b].name) && BOOT[b].ro == text) { ro = BOOT[b].ro; data = BOOT[b].data; }
+    if (ro != text || data < ro || data > size) ro = data = text;
     kernel_add_region(mod->base, text, 3, 5);                        /* code */
-    kernel_add_region(mod->base + text, size - text, 4, 3);          /* data */
+    kernel_add_region(mod->base + ro, data - ro, 3, 1);              /* read-only data */
+    kernel_add_region(mod->base + data, size - data, 4, 3);          /* data */
 
     for (u64 a = mod->base; a < mod->base + size; a += 1ull << SLOT_SHIFT) {
         u64 slot = (a - SLOT_BASE) >> SLOT_SHIFT;
@@ -918,6 +935,7 @@ static void load(const char *dir) {
  * its load address, or 0 if no recompiled module matches the image. */
 static u64 load_nro(Cpu *c, const char *id, const char *name);
 void skyline_module_loaded(const char *name, u64 base);   /* (hle_skyline.c: the plugins' hooks into it) */
+void rtld_module_loaded(u64 base, u64 size);               /* (hle_rtld.c: nn::ro's lists) */
 
 u64 rt_load_nro(Cpu *c, u64 image) {
     char id[65];
@@ -948,6 +966,7 @@ static u64 load_nro(Cpu *c, const char *id, const char *name) {
     printf("[ro] loaded %s at %#llx: %u functions, %u exports, %u symbol relocations\n",
            mod->name, mod->base, mod->func_count, mod->export_count, relocs);
     fflush(stdout);
+    rtld_module_loaded(mod->base, mod->image_size);
     if (mod->init != mod->base) rt_call(c, mod->init);
     skyline_module_loaded(mod->name, mod->base);
     return mod->base;
@@ -956,6 +975,11 @@ static u64 load_nro(Cpu *c, const char *id, const char *name) {
 /* Skyline plugins (hle_skyline.c): a recompiled NRO loaded by its module name, not by an image the
  * game hands over; 0 if no such module was recompiled in. */
 u64 rt_load_nro_named(Cpu *c, const char *name) { return load_nro(c, NULL, name); }
+
+/* The loaded modules, for nn::ro's lists (hle_rtld.c): boot modules first. */
+u32 rt_module_count(void) { return module_count; }
+u64 rt_module_base(u32 i) { return i < module_count ? modules[i]->base : 0; }
+u64 rt_module_size(u32 i) { return i < module_count ? modules[i]->image_size : 0; }
 
 /* The address a loaded module exports a name at, looked up in that module alone (every plugin
  * exports its own `main`); 0 if it does not. */
@@ -970,6 +994,14 @@ u64 rt_module_export(u64 base, const char *symbol) {
 /* What a weak reference to the name binds to: an export, else a native implementation (HLE),
  * else 0 - as nn::ro::LookupSymbol finds a name. */
 u64 rt_resolve_weak(const char *name) { return resolve(name, 1); }
+
+/* Whether a loaded module has a function entry at addr (hle_skyline.c: plugins built for another game version). */
+int rt_is_function(u64 addr) {
+    u64 slot = (addr - SLOT_BASE) >> SLOT_SHIFT;
+    u16 slot_m = slot < SLOT_COUNT ? slot_module[slot] : 0;
+    u64 off = slot_m ? addr - modules[slot_m - 1]->base : ~0ull;
+    return slot_m && off < modules[slot_m - 1]->text_size && !(off & 3) && code[slot_m - 1][off >> 2] != NULL;
+}
 
 /* Skyline's A64HookFunction, for the calls that go through the dispatch tables: every indirect
  * call to `target` (a function entry of a loaded module) goes to `replace` from now on. Returns

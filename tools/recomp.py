@@ -213,10 +213,11 @@ def inline_points(name):
 
 def module_fingerprint(fp, name):
     """tools_fingerprint, with the module's hook targets: a new one generates its C again."""
-    hooks, inline = hookable(name), inline_points(name)
-    if not hooks and not inline:
+    hooks, inline, patches = hookable(name), inline_points(name), plugin_patches(name)
+    if not hooks and not inline and not patches:
         return fp
-    return modcache.fingerprint(fp + "\nhooks " + " ".join(f"{h:x}" for h in hooks) + "\ninline " + " ".join(f"{h:x}" for h in inline))
+    return modcache.fingerprint(fp + "\nhooks " + " ".join(f"{h:x}" for h in hooks) + "\ninline " + " ".join(f"{h:x}" for h in inline) +
+                                "\npatches " + " ".join(f"{o:x}:{w:x}" for o, _v, w in patches))
 
 
 def tools_fingerprint():
@@ -294,9 +295,65 @@ CODE_PATCHES = {
 }
 
 
-def code_patches(mod, name):
-    """offset -> [words] of CODE_PATCHES for this module, each checked against its code."""
+def plugin_patches(name):
+    """[(offset, old word, new word)] the Skyline plugins write into module `name`'s code
+    (dump/skyline/patches.txt, which the runtime writes: sky_memcpy)."""
+    path = os.path.join(TREE, "dump", "skyline", "patches.txt")
+    out = []
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                p = line.split()
+                if len(p) == 4 and p[0] == name:
+                    out.append((int(p[1], 16), int(p[2], 16), int(p[3], 16)))
+    return out
+
+
+ANY_SP = 1 << 62   # (a landing pad that sets its own sp: whatever sp the unwinder resumes it with - lift.py landing)
+
+
+def adr_landing_pads(mod, funcs):
+    """{function start: [(range start, range end, landing pad)]} for plugin code that resumes an
+    exception at a label of its own, not through an LSDA: a function that takes the address of a
+    label inside itself (`adr xN, label`) has it as the landing pad of each call after that - as
+    Smashline's interpreter does (__smashline_interpreter_landing_pad, which its libunwind patch
+    resumes at)."""
     out = {}
+    for start, size in funcs:
+        words = struct.unpack_from(f"<{size // 4}I", mod.image, start)
+        pad = None
+        for i, w in enumerate(words):
+            pc = start + 4 * i
+            if w & 0x9F000000 == 0x10000000:   # adr
+                imm = ((w >> 5) & 0x7FFFF) << 2 | (w >> 29) & 3
+                t = pc + (imm - (1 << 21) if imm & (1 << 20) else imm)
+                if start <= t < start + size and t > pc:
+                    pad = t + 4 if words[(t - start) // 4] == 0xD503201F else t   # (resumed past a leading nop)
+            elif pad is not None and w & 0xFC000000 == 0x94000000 and pc < pad:   # bl, before the pad
+                out.setdefault(start, []).append((pc, pc + 4, pad | ANY_SP))
+    return out
+
+
+def code_patches(mod, name):
+    """offset -> [words] of CODE_PATCHES and the plugins' patches for this module, each checked
+    against its code."""
+    out = {}
+    patches = plugin_patches(name)
+    # Smashline's inline hooks: a `bl` to a code cave at the hooked call, the cave nops and a `b` to
+    # the original target; the runtime puts the hook before the call instead (hle_skyline.c
+    # A64InlineHook), so a call site with an inline point keeps its code and the cave stays as it was
+    inline, caves = set(inline_points(name)), set()
+    for off, _was, now in patches:
+        if now & 0xFC000000 == 0x94000000 and off in inline:
+            cave = off + (((now & 0x3FFFFFF) ^ 0x2000000) - 0x2000000) * 4
+            caves |= {off} | set(range(cave, cave + 0x18, 4))
+    for off, was, now in patches:
+        if off in caves:
+            continue
+        if off + 4 <= len(mod.image) and mod.u32(off) == was:
+            out[off] = [now]
+        else:
+            print(f"{name}: a plugin's code patch at {off:#x} left out: not {was:08x} there")
     for off, was, words, what in CODE_PATCHES.get(mod.build_id, []):
         if mod.u32(off) == was:
             out[off] = words
@@ -655,11 +712,13 @@ def build(path, outdir, jobs, per_file):
     if plain:
         os.environ["SSBU_REGCACHE"] = "0"
         os.environ["SSBU_DYNAMIC_JUMPS"] = "1"
+        os.environ["SSBU_FLAGS_XFER"] = "1"
     try:
         _build(mod, found, funcs, path, outdir, jobs, per_file)
     finally:
         if plain:
             os.environ.pop("SSBU_DYNAMIC_JUMPS", None)
+            os.environ.pop("SSBU_FLAGS_XFER", None)
             if regcache_was is None:
                 del os.environ["SSBU_REGCACHE"]
             else:
@@ -671,7 +730,9 @@ def _build(mod, found, funcs, path, outdir, jobs, per_file):
     os.makedirs(outdir, exist_ok=True)
     modcache.clear_stamp(outdir)   # (until generated and compiled again)
     hle = hle_names()
-    forward = {v: f"hle_{n}" for n, v, _s, info, _x in mod.exports if n in hle and info & 0xF == 2}
+    # (a standard plugin - the real Smashline, CSK Collection... - keeps its own exports: SSBU_OWN_EXPORTS, tools/skyline.py)
+    forward = {} if os.environ.get("SSBU_OWN_EXPORTS") == "1" else \
+        {v: f"hle_{n}" for n, v, _s, info, _x in mod.exports if n in hle and info & 0xF == 2}
     forward.update(unwind_jumpto(mod, found))
     forward.update(resolve_wraps(mod, base, dict(funcs), name))
     sizes = dict(funcs)
@@ -679,7 +740,12 @@ def _build(mod, found, funcs, path, outdir, jobs, per_file):
     forward.update({off: ("hook", None) for off in hooks})
     from eh import landing_pads
     pads = landing_pads(mod)
+    if os.environ.get("SSBU_FLAGS_XFER") == "1":   # (a plugin: see adr_landing_pads)
+        for f, sites in adr_landing_pads(mod, funcs).items():
+            pads.setdefault(f, []).extend(sites)
     patches = code_patches(mod, name)
+    write_if_changed(os.path.join(outdir, "plugin_patches.txt"),   # (tools/skyline.py stale_hooks compares)
+                     "".join(f"{o:x} {v:08x} {w:08x}\n" for o, v, w in plugin_patches(name)))
     chunks, cur, count = [], [], 0
     for a, size in funcs:   # a function bigger than the budget gets a file to itself
         if cur and count + size // 4 > per_file:
