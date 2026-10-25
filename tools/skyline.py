@@ -127,6 +127,13 @@ def module_of(p, source, record):
     raise SystemExit(f"{source}: recomp.py did not place it")
 
 
+def c_stale(table):
+    """Whether a plugin's C (its g_module.c) is missing or older than the recompiler: a fix made in it
+    since reaches the plugin only when its C is made again."""
+    made_by = max(os.path.getmtime(os.path.join(HERE, n)) for n in RECOMPILER if os.path.exists(os.path.join(HERE, n)))
+    return not os.path.exists(table) or os.path.getmtime(table) < made_by
+
+
 def generate(p, name, log, own_exports=False):
     """The plugin's image and C, if missing or older than the plugin. own_exports: a standard plugin,
     whose exports stay its own (not the runtime's native versions of the same names)."""
@@ -134,9 +141,7 @@ def generate(p, name, log, own_exports=False):
     img = os.path.join(p.modules, name + ".reloc.bin")
     out = os.path.join(p.build, name)
     table = os.path.join(out, "g_module.c")
-    # (again when the recompiler is newer than the C: a fix in it reaches plugins generated before)
-    made_by = max(os.path.getmtime(os.path.join(HERE, n)) for n in RECOMPILER if os.path.exists(os.path.join(HERE, n)))
-    fresh_c = not os.path.exists(table) or os.path.getmtime(table) < max(os.path.getmtime(nro), made_by)
+    fresh_c = c_stale(table) or os.path.getmtime(table) < os.path.getmtime(nro)
     # (the image goes with the C: its size, and the unwind tables recomp.py adds to a plugin's)
     if fresh_c or not os.path.exists(img) or os.path.getmtime(img) < os.path.getmtime(nro):
         recomp(p, "image", nro, "--out", img)
@@ -148,6 +153,7 @@ def generate(p, name, log, own_exports=False):
             log(recomp(p, "build", nro, "--out", out, "--jobs", "1").strip().splitlines()[-1])
         finally:
             os.environ.pop("SSBU_OWN_EXPORTS", None)
+        os.utime(table)   # (made now: the same C as before is left as it was, dated then - c_stale goes by this)
 
 
 SEED = os.path.join(HERE, "skyline_seed")   # (tools/skyline_seed: hooks.txt, patches.txt the standard plugins need, 13.0.5)
@@ -235,7 +241,16 @@ def sync(tree, log=print):
 
 
 def built_in(tree, name):
-    """Whether the game's program has the plugin compiled in (its nro_table names it)."""
+    """Whether the game's program has the plugin compiled in (its nro_table names it), from C the
+    current recompiler made (an older one's can carry bugs fixed since), and compiled since (Apply
+    makes a plugin's C again; only Build plugins compiles it into the program)."""
+    c = os.path.join(tree, "build", "nro", name, "g_module.c")
+    if c_stale(c):
+        return False
+    programs = [os.path.join(tree, "build-mac", "WindowSmash.app", "Contents", "MacOS", "ssbu"), os.path.join(tree, "build", "ssbu.exe")]
+    built = max((os.path.getmtime(x) for x in programs if os.path.exists(x)), default=0)
+    if os.path.getmtime(c) > built:
+        return False
     for table in (os.path.join(tree, "build-mac", "gen", "nro_table.c"), os.path.join(tree, "build", "rt", "nro_table.c")):
         if os.path.exists(table) and f"rt_module_{name}," in open(table, encoding="utf-8").read():
             return True
