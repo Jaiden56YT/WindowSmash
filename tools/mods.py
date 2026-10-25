@@ -266,6 +266,19 @@ def extract(archive, into):
             if os.path.exists(seven):
                 r = subprocess.run([seven, "x", "-y", f"-o{into}", archive], capture_output=True, text=True)
                 break
+    if r.returncode and archive.lower().endswith(".7z"):   # (no 7-Zip: py7zr, which the installer adds)
+        try:
+            import py7zr
+        except ImportError:
+            py7zr = None
+        if py7zr:
+            with py7zr.SevenZipFile(archive) as z:
+                outside = [n for n in z.getnames() if not os.path.realpath(os.path.join(into, n)).startswith(
+                    os.path.realpath(into) + os.sep)]
+                if outside:
+                    raise Error(f"{os.path.basename(archive)} has a file outside its folder ({outside[0]}): not installed")
+                z.extractall(into)
+            return
     if r.returncode:
         hint = " (install 7-Zip, from 7-zip.org, to open .7z and .rar files)" if os.name == "nt" else ""
         raise Error(f"cannot unpack {os.path.basename(archive)}{hint}: {(r.stderr or r.stdout).strip()[-400:]}")

@@ -221,18 +221,26 @@ static u32 add_mount(const char *name, MountKind kind, const char *root) {
 
 /* ARCropolis' mods: - every turned-on mod's files as one tree, a later mod's file over an earlier's
  * (<data dir>/../skyline/mods.txt: the mods' folders in order, which tools/skyline.py writes). */
-static char mods_list[64][160];
+static char **mods_list;   /* (any number, any length: a big modpack has hundreds of folders) */
 static int mods_count = -1;
 
 static void load_mods_list(void) {
     if (mods_count < 0) {
-        char path[1024], line[200];
+        char path[1024], line[4096];
         snprintf(path, sizeof path, "%s/../skyline/mods.txt", rt_data_dir);
         FILE *f = fopen(path, "r");
+        int cap = 0;
         mods_count = 0;
-        while (f && mods_count < 64 && fgets(line, sizeof line, f)) {
+        while (f && fgets(line, sizeof line, f)) {
             line[strcspn(line, "\r\n")] = 0;
-            if (*line) snprintf(mods_list[mods_count++], sizeof mods_list[0], "%s", line);
+            if (!*line) continue;
+            if (mods_count == cap) {
+                char **more = realloc(mods_list, (cap = cap ? cap * 2 : 64) * sizeof *mods_list);
+                if (!more) break;
+                mods_list = more;
+            }
+            if (!(mods_list[mods_count] = _strdup(line))) break;
+            mods_count++;
         }
         if (f) fclose(f);
     }
@@ -246,7 +254,7 @@ static void mod_folder_name(char *out, size_t n, const char *root) {
     for (char *p = out; *p; p++) if (*p == '/') { memmove(p + 3, p + 1, strlen(p + 1) + 1); memcpy(p, " - ", 3); p += 2; }
 }
 static const char *mod_root_named(const char *name, size_t len) {
-    char flat[260];
+    char flat[4200];
     load_mods_list();
     for (int i = 0; i < mods_count; i++) {
         mod_folder_name(flat, sizeof flat, mods_list[i]);
@@ -258,14 +266,14 @@ static const char *mod_root_named(const char *name, size_t len) {
 /* A mod's own copy of a file mods/.characters has with the plugins' characters added (tools/mods.py
  * characters_mod writes dump/skyline/hidden.txt): left out of ARCropolis' listing, so that one is used. */
 static int hidden_from_arcropolis(const char *dir, const char *name) {
-    static char hidden[16][300];
+    static char hidden[256][600];   /* (one per mod with its own copy of a file .characters has) */
     static int hidden_n = -1;
     if (hidden_n < 0) {
-        char path[1024], line[300];
+        char path[1024], line[600];
         snprintf(path, sizeof path, "%s/../skyline/hidden.txt", rt_data_dir);
         FILE *f = fopen(path, "r");
         hidden_n = 0;
-        while (f && hidden_n < 16 && fgets(line, sizeof line, f)) {
+        while (f && hidden_n < 256 && fgets(line, sizeof line, f)) {
             line[strcspn(line, "\r\n")] = 0;
             if (*line) snprintf(hidden[hidden_n++], sizeof hidden[0], "%s", line);
         }
@@ -577,7 +585,7 @@ HLE(_ZN2nn2fs13OpenDirectoryEPNS0_15DirectoryHandleEPKci) {   /* (handle*, path,
     } else if (!strcmp(m->name, "sd") && !_strnicmp(rest + strspn(rest, "/"), "ultimate/mods", 13) &&
                (!rest[strspn(rest, "/") + 13] || !strcmp(rest + strspn(rest, "/") + 13, "/"))) {
         load_mods_list();   /* (the turned-on mods only: host_path) */
-        char flat[260];
+        char flat[4200];
         for (int i = 0; i < mods_count && (mode & LIST_DIRS); i++) {
             mod_folder_name(flat, sizeof flat, mods_list[i]);
             listing_add(&h, flat, strlen(flat), DIR_ENTRY, 0);
