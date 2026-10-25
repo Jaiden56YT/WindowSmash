@@ -32,12 +32,26 @@ COLOR_START = prc.hash40("color_start_index")
 
 
 def load(tree):
+    """The entries the plugins added (dump/skyline/csk.json), but those of plugins whose mods are turned
+    off now: the json is from the game's last start, so a mod turned off since still has its entries
+    there (each entry names the plugin module that added it; tools/skyline.py's plugins.json maps
+    modules to mods)."""
     path = os.path.join(tree, "dump", "skyline", "csk.json")
     try:
         with open(path, encoding="utf-8") as f:
-            return json.load(f)
+            entries = json.load(f)
     except (OSError, ValueError):
         return []
+    try:
+        with open(os.path.join(tree, "dump", "skyline", "plugins.json"), encoding="utf-8") as f:
+            record = json.load(f)
+        with open(os.path.join(tree, "mods", "mods.json"), encoding="utf-8") as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        return entries
+    on = {n for n, m in state.get("mods", {}).items() if m.get("enabled")}
+    off_modules = {r["module"] for r in record.values() if r.get("mod") not in on and not r.get("mod", "").startswith("(standard)")}
+    return [e for e in entries if e.get("plugin") not in off_modules]
 
 
 def targets(entries):

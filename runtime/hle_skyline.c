@@ -1109,11 +1109,20 @@ static void json_map(FILE *f, int type, u64 map, int *first) {
 /* An entry struct: id (u64), clone-from id (Option<u64>), then the fields, repr(C)-aligned. */
 static u64 csk_kinds[64][2];   /* (ui_chara, its fighter_kind hash) */
 static u32 csk_kind_n;
-static void json_entry(const char *kind, const char *id_key, const Field *fields, u64 at) {
+/* The plugin module that called (its return address), for csk.json: tools/mods.py keeps the entries
+ * of turned-on mods' plugins only. */
+static const char *caller_module(Cpu *c, char *buf, size_t n) {
+    rt_describe(c->x[30], buf, n);
+    char *plus = strchr(buf, '+');
+    if (plus) *plus = 0;
+    return buf;
+}
+static void json_entry(Cpu *c, const char *kind, const char *id_key, const Field *fields, u64 at) {
     if (!csk) return;
+    char who[96];
     csk_current = !strcmp(kind, "ui_chara_db") ? *P(u64, at) : 0;
-    fprintf(csk, "%s  {\"kind\": \"%s\", \"%s\": \"%#llx\", \"clone_from\": ", csk_items++ ? ",\n" : "", kind, id_key,
-            (unsigned long long)*P(u64, at));
+    fprintf(csk, "%s  {\"kind\": \"%s\", \"plugin\": \"%s\", \"%s\": \"%#llx\", \"clone_from\": ", csk_items++ ? ",\n" : "", kind,
+            caller_module(c, who, sizeof who), id_key, (unsigned long long)*P(u64, at));
     if (*P(u8, at + 8) == 1) fprintf(csk, "\"%#llx\"", (unsigned long long)*P(u64, at + 16));
     else fprintf(csk, "null");
     fprintf(csk, ", \"set\": {");
@@ -1145,7 +1154,7 @@ static void json_entry(const char *kind, const char *id_key, const Field *fields
 HLE(add_chara_db_entry_info) {
     LOG("CSK: character entry %#llx", (unsigned long long)*P(u64, c->x[0]));
     AcquireSRWLockExclusive(&csk_lock);
-    json_entry("ui_chara_db", "ui_chara_id", CHARA_FIELDS, c->x[0]);
+    json_entry(c, "ui_chara_db", "ui_chara_id", CHARA_FIELDS, c->x[0]);
     ReleaseSRWLockExclusive(&csk_lock);
     if (csk_loaded) csk_publish();
 }
@@ -1153,13 +1162,18 @@ HLE(add_chara_layout_db_entry_info) {
     LOG("CSK: character layout entry %#llx", (unsigned long long)*P(u64, c->x[0]));
     if (!LAYOUT_FIELDS[0].name) layout_fields();
     AcquireSRWLockExclusive(&csk_lock);
-    json_entry("ui_layout_db", "ui_layout_id", LAYOUT_FIELDS, c->x[0]);
+    json_entry(c, "ui_layout_db", "ui_layout_id", LAYOUT_FIELDS, c->x[0]);
     ReleaseSRWLockExclusive(&csk_lock);
     if (csk_loaded) csk_publish();
 }
 HLE(add_narration_characall_entry) {   /* (C string) -> bool */
     AcquireSRWLockExclusive(&csk_lock);
-    if (csk) { fprintf(csk, "%s  {\"kind\": \"narration\", \"label\": ", csk_items++ ? ",\n" : ""); json_str(csk, guest_str(c->x[0])); fprintf(csk, "}"); }
+    char who[96];
+    if (csk) {
+        fprintf(csk, "%s  {\"kind\": \"narration\", \"plugin\": \"%s\", \"label\": ", csk_items++ ? ",\n" : "", caller_module(c, who, sizeof who));
+        json_str(csk, guest_str(c->x[0]));
+        fprintf(csk, "}");
+    }
     ReleaseSRWLockExclusive(&csk_lock);
     if (csk_loaded) csk_publish();
     c->x[0] = 1;
