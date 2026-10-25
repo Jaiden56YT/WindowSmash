@@ -59,6 +59,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   background: linear-gradient(180deg, var(--bg2), var(--bg));
   border-right: 1px solid var(--line);
   padding: 18px 14px; display: flex; flex-direction: column; gap: 6px;
+  overflow-y: auto;   /* (Apply stays in reach on a short window) */
 }
 .brand { display: flex; gap: 10px; align-items: center; margin: 0 4px 18px; }
 .brand img { width: 40px; height: 40px; }

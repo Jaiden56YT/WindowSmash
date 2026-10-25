@@ -86,9 +86,12 @@ function render(lib) {
   const os = $("#online-state");
   const unsafeOn = lib.unsafe_on || [], sameOn = lib.same_on || [];
   os.classList.toggle("on", !!(unsafeOn.length || sameOn.length));
-  os.classList.toggle("same-only", !unsafeOn.length && !!sameOn.length);
-  os.innerHTML = (unsafeOn.length ? `<b>⚠ Not for public online</b>${esc(unsafeOn.join(", "))} ${unsafeOn.length > 1 ? "are" : "is"} on: play offline or with friends who have ${unsafeOn.length > 1 ? "them" : "it"}.` : "")
-    + (sameOn.length ? `<b>👥 Online: everyone needs ${sameOn.length > 1 ? "these" : "this"}</b>${esc(sameOn.join(", "))} ${sameOn.length > 1 ? "change" : "changes"} more than a look (results screen, stages, movies or animations): everyone in an online room needs the same, or the match or results screen can hang.` : "");
+  os.classList.remove("same-only");
+  // (short: the rail keeps Apply in reach; which mods, on hover)
+  os.innerHTML = unsafeOn.length || sameOn.length
+    ? "<b>⚠ Not for public online</b>Your mods aren't safe for public online. Make sure everyone has the same mods so no one crashes." : "";
+  os.title = [unsafeOn.length ? "Not online safe: " + unsafeOn.join(", ") : "", sameOn.length ? "Everyone needs the same: " + sameOn.join(", ") : ""]
+    .filter(Boolean).join("\n\n");
   $("#apply").disabled = lib.game_running;
   const unbuilt = lib.unbuilt || [];
   $("#build-plugins").hidden = !unbuilt.length;
