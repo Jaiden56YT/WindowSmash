@@ -199,8 +199,8 @@ def mod_files(folder):
                 continue
             full = os.path.join(dp, n)
             path = arc_path(os.path.relpath(full, folder))
-            if is_plugin(path) or path.split("/", 1)[0].lower() in PLUGIN_DATA:
-                continue
+            if is_plugin(path) or path.split("/", 1)[0].lower() in PLUGIN_DATA or "/" not in path:
+                continue   # (and a file at the mod's top - victory.toml, config_param.toml: its plugins' settings, not data.arc's)
             out.append((path, full))
     return out
 

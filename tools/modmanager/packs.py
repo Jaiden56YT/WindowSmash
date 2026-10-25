@@ -415,11 +415,12 @@ def check(tree, names):
             seen.add(tuple(ns))
             out.append({"level": "error", "title": f"{', '.join(ns)} both add {d}",
                         "detail": "Two mods made for the same new costume slot: only one can have it.", "mods": ns})
-    # the same file from two mods (not a costume: UI art, sound, params)
+    # the same file from two mods (not a costume: UI art, sound, params); patches (.prcxml, .prcx, .xmsbt)
+    # change a few entries each and all of them apply, one on top of the other: not a clash
     by_file = {}
     for n, s in sums.items():
         for p in s["files"]:
-            if not SLOT.match(p):
+            if not SLOT.match(p) and os.path.splitext(p)[1].lower() not in mods.PATCHES:
                 by_file.setdefault(p, []).append(n)
     pairs = {}
     for p, ns in by_file.items():
