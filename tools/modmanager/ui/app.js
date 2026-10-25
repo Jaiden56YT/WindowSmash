@@ -100,45 +100,91 @@ function render(lib) {
   const list = $("#lib-list");
   list.innerHTML = "";
   $("#lib-empty").classList.toggle("hidden", lib.mods.length > 0);
-  for (const m of lib.mods) {
-    const title = m.title || m.name;
-    if (q && !(title + " " + (m.category || "") + " " + (m.author || "")).toLowerCase().includes(q)) continue;
-    const img = m.image || m.local_image || "";
-    const el = document.createElement("div");
-    el.className = "mod" + (m.enabled ? "" : " off") + (m.online && m.online.level === "unsafe" ? " unsafe" : "");
-    el.draggable = !q;
-    el.dataset.name = m.name;
-    const badges = [onlineBadge(m.online)];
-    if (m.new_slots) badges.push('<span class="badge gold">new costume slots</span>');
-    if (m.added) badges.push(`<span class="badge">${m.added} new files</span>`);
-    if (m.merged) badges.push(`<span class="badge">${m.merged} patches</span>`);
-    const plugs = m.plugin_state || [], waiting = plugs.filter((p) => !p.built).map((p) => p.file);
-    if (waiting.length) badges.push(`<span class="badge red" title="${esc(waiting.join(", ") + ": its code (the new moves, or the new character) runs once it's compiled into the game. Turn it on, then press Build plugins into the game (a few minutes).")}">plugin not built yet</span>`);
-    else if (plugs.length) badges.push(`<span class="badge gold" title="${esc(plugs.map((p) => p.file).join(", ") + ": compiled into the game, so its new moves and characters work.")}">plugin built in</span>`);
-    if (m.kept_shared) badges.push(`<span class="badge" title="${m.kept_shared} of its files are shared with the fighter's other costumes, and stay shared: made this costume's own, they'd stop those costumes' matches from loading. So its version of them shows on every costume that shares them.">${m.kept_shared} on all costumes</span>`);
-    if (m.skipped) badges.push(`<span class="badge red" title="files the game couldn't take: see the clash check">${m.skipped} not loaded</span>`);
-    el.innerHTML = `
-      <input type="checkbox" class="pick" title="Pick for a modpack" ${state.picked.has(m.name) ? "checked" : ""}>
-      <div class="grip" title="Drag to reorder">⋮⋮</div>
-      ${img ? `<img class="thumb" src="${esc(img)}" alt="" loading="lazy">` : '<div class="thumb"></div>'}
-      <div>
-        <div class="title">${esc(title)}</div>
-        <div class="meta">${m.category ? `<span>${esc(m.category)}</span>` : ""}${m.author ? `<span>by ${esc(m.author)}</span>` : ""}<span>${m.files} files</span>${badges.join("")}</div>
-      </div>
-      <div class="end">
-        ${m.gamebanana ? `<button class="ghost small" data-gb="${m.gamebanana}" title="Its GameBanana page">Page</button>` : ""}
-        <button class="ghost small danger" data-remove title="Uninstall">✕</button>
-        <label class="switch" title="On / off"><input type="checkbox" ${m.enabled ? "checked" : ""}><span></span></label>
-      </div>`;
-    $(".switch input", el).addEventListener("change", (e) => setEnabled([m.name], e.target.checked));
-    $(".pick", el).addEventListener("change", (e) => { e.target.checked ? state.picked.add(m.name) : state.picked.delete(m.name); updatePick(); });
-    $("[data-remove]", el).addEventListener("click", () => removeMod(m));
-    const gb = $("[data-gb]", el);
-    if (gb) gb.addEventListener("click", () => openMod(+gb.dataset.gb));
-    dragify(el);
-    list.appendChild(el);
+  const shown = lib.mods.filter((m) => !q || ((m.title || m.name) + " " + (m.part || "") + " " + (m.category || "") + " " + (m.author || "") + " " + (m.about || "")).toLowerCase().includes(q));
+  const groups = {};   // (parts of one download, shown under one row: its own parts' list opens below it)
+  for (const m of shown) if (m.group) (groups[m.group] = groups[m.group] || []).push(m);
+  for (const m of shown) {
+    const parts = m.group && groups[m.group].length > 1 ? groups[m.group] : null;
+    if (!parts) { list.appendChild(modRow(m, !q)); continue; }
+    if (parts[0] !== m) continue;
+    list.appendChild(groupRow(m.group, lib.groups[m.group] || {}, parts, !q));
   }
   updatePick();
+}
+
+const openGroups = new Set(JSON.parse((() => { try { return localStorage.getItem("openGroups") || "[]"; } catch (e) { return "[]"; } })()));
+function groupRow(key, g, parts, draggable) {
+  const box = document.createElement("div");
+  const on = parts.filter((p) => p.enabled).length;
+  box.className = "group" + (openGroups.has(key) ? " open" : "") + (on ? "" : " off");
+  const img = g.image || "";
+  box.innerHTML = `
+    <div class="mod head">
+      <button class="caret ghost small" title="Show its parts">▸</button>
+      <div></div>
+      ${img ? `<img class="thumb" src="${esc(img)}" alt="" loading="lazy">` : '<div class="thumb"></div>'}
+      <div>
+        <div class="title">${esc(g.title || parts[0].title || parts[0].name)}</div>
+        <div class="meta"><span>${parts.length} parts in one download</span><span>${on} on</span>${
+          parts.some((p) => p.online && p.online.level === "unsafe") ? onlineBadge({ level: "unsafe", reasons: [] }) : ""}</div>
+        <div class="about">${esc(parts.map((p) => p.part).join(" · "))}</div>
+      </div>
+      <div class="end">
+        <label class="switch${on > 0 && on < parts.length ? " mixed" : ""}" title="All its parts on / off"><input type="checkbox" ${on === parts.length ? "checked" : ""}><span></span></label>
+      </div>
+    </div>
+    <div class="parts"></div>`;
+  const all = $(".head .switch input", box);
+  all.indeterminate = on > 0 && on < parts.length;
+  all.addEventListener("change", (e) => setEnabled(parts.map((p) => p.name), e.target.checked));
+  const toggle = () => {
+    box.classList.toggle("open");
+    box.classList.contains("open") ? openGroups.add(key) : openGroups.delete(key);
+    try { localStorage.setItem("openGroups", JSON.stringify([...openGroups])); } catch (e) {}
+  };
+  $(".caret", box).addEventListener("click", toggle);
+  $(".head .title", box).addEventListener("click", toggle);
+  for (const p of parts) $(".parts", box).appendChild(modRow(p, draggable));
+  return box;
+}
+
+function modRow(m, draggable) {
+  const title = m.part || m.title || m.name;
+  const img = m.part ? "" : m.image || m.local_image || "";
+  const el = document.createElement("div");
+  el.className = "mod" + (m.part ? " part" : "") + (m.enabled ? "" : " off") + (m.online && m.online.level === "unsafe" ? " unsafe" : "");
+  el.draggable = draggable;
+  el.dataset.name = m.name;
+  const badges = [onlineBadge(m.online)];
+  if (m.new_slots) badges.push('<span class="badge gold">new costume slots</span>');
+  if (m.added) badges.push(`<span class="badge">${m.added} new files</span>`);
+  if (m.merged) badges.push(`<span class="badge">${m.merged} patches</span>`);
+  const plugs = m.plugin_state || [], waiting = plugs.filter((p) => !p.built).map((p) => p.file);
+  if (waiting.length) badges.push(`<span class="badge red" title="${esc(waiting.join(", ") + ": its code (the new moves, or the new character) runs once it's compiled into the game. Turn it on, then press Build plugins into the game (a few minutes).")}">plugin not built yet</span>`);
+  else if (plugs.length) badges.push(`<span class="badge gold" title="${esc(plugs.map((p) => p.file).join(", ") + ": compiled into the game, so its new moves and characters work.")}">plugin built in</span>`);
+  if (m.kept_shared) badges.push(`<span class="badge" title="${m.kept_shared} of its files are shared with the fighter's other costumes, and stay shared: made this costume's own, they'd stop those costumes' matches from loading. So its version of them shows on every costume that shares them.">${m.kept_shared} on all costumes</span>`);
+  if (m.skipped) badges.push(`<span class="badge red" title="files the game couldn't take: see the clash check">${m.skipped} not loaded</span>`);
+  el.innerHTML = `
+    <input type="checkbox" class="pick" title="Pick for a modpack" ${state.picked.has(m.name) ? "checked" : ""}>
+    <div class="grip" title="Drag to reorder">⋮⋮</div>
+    ${img ? `<img class="thumb" src="${esc(img)}" alt="" loading="lazy">` : '<div class="thumb"></div>'}
+    <div>
+      <div class="title">${esc(title)}</div>
+      <div class="meta">${m.category && !m.part ? `<span>${esc(m.category)}</span>` : ""}${m.author && !m.part ? `<span>by ${esc(m.author)}</span>` : ""}${m.files ? `<span>${m.files} files</span>` : ""}${badges.join("")}</div>
+      ${m.about ? `<div class="about">${esc(m.about)}</div>` : ""}
+    </div>
+    <div class="end">
+      ${m.gamebanana ? `<button class="ghost small" data-gb="${m.gamebanana}" title="Its GameBanana page">Page</button>` : ""}
+      <button class="ghost small danger" data-remove title="Uninstall">✕</button>
+      <label class="switch" title="On / off"><input type="checkbox" ${m.enabled ? "checked" : ""}><span></span></label>
+    </div>`;
+  $(".switch input", el).addEventListener("change", (e) => setEnabled([m.name], e.target.checked));
+  $(".pick", el).addEventListener("change", (e) => { e.target.checked ? state.picked.add(m.name) : state.picked.delete(m.name); updatePick(); });
+  $("[data-remove]", el).addEventListener("click", () => removeMod(m));
+  const gb = $("[data-gb]", el);
+  if (gb) gb.addEventListener("click", () => openMod(+gb.dataset.gb));
+  dragify(el);
+  return el;
 }
 
 function updatePick() {
@@ -167,7 +213,7 @@ function dragify(el) {
     e.stopPropagation();
     const r = el.getBoundingClientRect();
     el.parentNode.insertBefore(dragged, e.clientY > r.top + r.height / 2 ? el.nextSibling : el);
-    const names = $$(".mod", $("#lib-list")).map((x) => x.dataset.name);
+    const names = $$(".mod[data-name]", $("#lib-list")).map((x) => x.dataset.name);
     try { render(await api("/api/order", { names })); } catch (err) { fail(err); }
   });
 }
@@ -177,7 +223,19 @@ $("#lib-filter").addEventListener("input", () => state.lib && render(state.lib))
 const ICON = { error: "⛔", online: "🌐", warn: "⚠️", info: "ℹ️" };
 function renderIssues(issues, into = $("#issues")) {
   if (!issues.length) { into.innerHTML = '<div class="issues-ok"><b>No clashes.</b> These mods should run together.</div>'; return; }
-  into.innerHTML = issues.map((i) => `<div class="issue ${i.level === "online" ? "online-issue" : i.level}"><div class="ic">${ICON[i.level]}</div><div><b>${esc(i.title)}</b><span>${esc(i.detail)}</span></div></div>`).join("");
+  into.innerHTML = issues.map((i, k) => `<div class="issue ${i.level === "online" ? "online-issue" : i.level}"><div class="ic">${ICON[i.level]}</div><div><b>${esc(i.title)}</b><span>${esc(i.detail)}</span>${
+    i.fix ? `<button class="small fix" data-fix="${k}">${esc(i.fix.label)}</button>` : ""}</div></div>`).join("");
+  $$(".fix", into).forEach((b) => b.addEventListener("click", async () => {   // (a fix that is a GameBanana mod: installed and turned on)
+    const f = issues[+b.dataset.fix].fix;
+    b.disabled = true;
+    try {
+      runJob(await api("/api/install/gamebanana", { id: f.gamebanana, file: f.file, title: f.label }), (j) => {
+        if (!j.error) toast("Installed: Apply to game when you're ready");
+        loadLibrary();
+        api("/api/check", {}).then((c) => renderIssues(c.issues)).catch(() => {});
+      });
+    } catch (e) { b.disabled = false; fail(e); }
+  }));
 }
 $("#check").addEventListener("click", async () => {
   try { renderIssues((await api("/api/check", {})).issues); } catch (e) { fail(e); }
@@ -570,7 +628,21 @@ function showSettings() {
   $("#about").innerHTML = `WindowSmash Mods · ${esc(({ darwin: "macOS", win32: "Windows", linux: "Linux" })[lib.platform] || lib.platform || "")}<br>
     WindowSmash folder: <code>${esc(lib.root || "")}</code><br>
     Log (send it if something goes wrong): <code>${esc(lib.log || "")}</code>`;
+  showPlugins();
 }
+const PLUGIN_NAME = { "libarcropolis.nro": "ARCropolis", "libsmashline_plugin.nro": "Smashline 2", "libone_slot_eff.nro": "One Slot Effects",
+  "libthe_csk_collection.nro": "The CSK Collection", "libnro_hook.nro": "nro_hook", "libparam_config.nro": "lib_paramconfig" };
+async function showPlugins() {
+  try {
+    const { plugins } = await api("/api/plugins/standard");
+    $("#std-plugins").innerHTML = plugins.map((p) => `<div><b>${esc(PLUGIN_NAME[p.name] || p.name)}</b> <small>${esc(p.version)}${
+      p.ported ? " · ported to 13.0.5" : ""}</small><span>${p.status !== "runs" ? '<span class="badge">built into WindowSmash</span>'
+      : p.have ? '<span class="badge green">installed</span>' : '<span class="badge gold">downloaded when you build plugins</span>'}</span></div>`).join("");
+  } catch (e) { $("#std-plugins").textContent = ""; }
+}
+$("#std-fetch").addEventListener("click", async () => {
+  try { runJob(await api("/api/plugins/fetch", {}), () => showPlugins()); } catch (e) { fail(e); }
+});
 setTheme(document.documentElement.dataset.theme || "dark");
 
 // ---- keep the app's server alive while this page is open ------------------------------------

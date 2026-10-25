@@ -144,9 +144,9 @@ static const struct { double at; int button; } MENUS[] = {
     {8, B_A}, {10, B_A}, {13, B_B}, {15, B_A}, {18, B_A}, {22, B_A}, {24.5, B_A}, {26, B_A}, {27.5, B_A}, {29, B_A}, {30.5, B_A},
 };
 /* One try at the select screen and the stage select, from its start: the stick up onto the
- * tiles (the first try only), pick, start, the stage. */
+ * tiles (the first try only; far enough for a 91+ grid's smaller tiles too), pick, start, the stage. */
 static const struct { double at, hold; int button, dir; } CSS[] = {
-    {0, 0.35, -1, S_UP}, {1, 0.15, B_A, 0}, {2.5, 0.15, B_A, 0}, {4, 0.15, B_PLUS, 0}, {5.5, 0.15, B_PLUS, 0},
+    {0, 0.55, -1, S_UP}, {1, 0.15, B_A, 0}, {2.5, 0.15, B_A, 0}, {4, 0.15, B_PLUS, 0}, {5.5, 0.15, B_PLUS, 0},
     {8, 0.15, B_A, 0}, {10, 0.15, B_A, 0}, {12, 0.15, B_A, 0},
 };
 #define CSS_FIRST 40.0

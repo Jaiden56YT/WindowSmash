@@ -112,6 +112,9 @@ def run(spec, opponent="mario:0", tag=None, seconds=SECONDS, play=False):
         env = {"SSBU_DISCORD": "off", "SSBU_CWD": TREE, "SSBU_TESTRUN": tag, "SSBU_LOG": log,
                "SSBU_BENCH": f"{spec},{opponent}", "SSBU_BENCH_SECONDS": str(seconds), "SSBU_CAPTURE": out,
                "SSBU_CAPTURE_WINDOW": "1", "SSBU_CAPTURE_EVERY": "6", "SSBU_CAPTURE_MAX": "45"}
+        for i, a in enumerate(sys.argv):   # (--env K=V: more for the runtime, e.g. a debug switch)
+            if a == "--env" and i + 1 < len(sys.argv) and "=" in sys.argv[i + 1]:
+                env.update([sys.argv[i + 1].split("=", 1)])
         if play:   # (the player's: sound on, their pads in the match, no frames captured)
             env.update(SSBU_BENCH_PLAY="1")
             for k in ("SSBU_CAPTURE", "SSBU_CAPTURE_WINDOW", "SSBU_CAPTURE_EVERY", "SSBU_CAPTURE_MAX"):

@@ -22,7 +22,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
 # name: (version, url, file in the zip (None: the url is the .nro), sha256 of the .nro, source, status here)
-# status: "runs" (tools/skyline.py runs it), "native" (the runtime provides it: not fetched by default),
+# status: "runs" (tools/skyline.py runs it; the CSK Collection ported to 13.0.5 first, PORTS), "native" (the runtime
+# provides it: not fetched by default; lib_paramconfig: its main hangs here, and movesets link its code in anyway),
 # "not yet" (doesn't run here yet: docs/PLUGINS-REPORT.md)
 PLUGINS = {
     "libone_slot_eff.nro": ("13.0.5 build (2026-09)", "https://gamebanana.com/dl/1806494",
@@ -32,13 +33,13 @@ PLUGINS = {
     "libthe_csk_collection.nro": ("5.0.6", "https://gamebanana.com/dl/1745532",
                                   "atmosphere/contents/01006A800016E000/romfs/skyline/plugins/libthe_csk_collection.nro",
                                   "4d91c3d771b5c846a58ba31e123ff2aca5847614493235e754930a621c19c892",
-                                  "gamebanana.com/mods/499008 (The CSK Collection)", "native (5.0.6 is built for 13.0.4)"),
+                                  "gamebanana.com/mods/499008 (The CSK Collection)", "runs"),
     "libsmashline_plugin.nro": ("1.6.8", "https://github.com/HDR-Development/smashline/releases/download/v1.6.8/libsmashline_plugin.nro",
                                 None, "a83636e565be0729271aa7c21817da9aa3b8b3e9b3abed7499c1eeae4cb57d5c",
                                 "github.com/HDR-Development/smashline", "runs"),
     "libparam_config.nro": ("6.5", "https://github.com/CSharpM7/lib_paramconfig/releases/download/6.5/libparam_config.nro",
                             None, "f014f3143ca8ff0b9b2dcbacdb07acc598c2a76cacd7f754097ea2a8f896889a",
-                            "github.com/CSharpM7/lib_paramconfig", "not yet (its main hangs)"),
+                            "github.com/CSharpM7/lib_paramconfig", "native"),
     "libnro_hook.nro": ("0.4.0", "https://github.com/ultimate-research/nro-hook-plugin/releases/download/v0.4.0/libnro_hook.nro",
                         None, "ca7aec03aee49fea539dcb92569fea5bc5389f77377ba2a30e4d0b7ebd0255e6",
                         "github.com/ultimate-research/nro-hook-plugin", "runs"),
@@ -47,6 +48,10 @@ PLUGINS = {
                           "92171b2f4dbd7afe9361a55922f01de7f46ffae09f05185c1cea4ab79dba9a1c",
                           "github.com/Raytwo/ARCropolis (GPL-3.0)", "runs"),
 }
+
+
+# plugins built for an older game version: the address map that ports each to 13.0.5 (tools/ports/)
+PORTS = {"libthe_csk_collection.nro": "the_csk_collection-5.0.6.txt"}
 
 
 def arg(name, default=None):
@@ -65,25 +70,33 @@ def download(url):
 
 def fetch(tree, name, log=print):
     version, url, member, sha, _source, _status = PLUGINS[name]
-    data = download(url)
+    data = raw = download(url)
     if member:
-        with zipfile.ZipFile(io.BytesIO(data)) as z:
+        with zipfile.ZipFile(io.BytesIO(raw)) as z:
             data = z.read(member)
     got = hashlib.sha256(data).hexdigest()
     if got != sha:
         raise SystemExit(f"{name}: the download isn't the release checked here ({got[:16]}..., expected {sha[:16]}...): left out")
+    ported = ""
+    if name in PORTS:   # (built for an older game version: its addresses moved to 13.0.5's, tools/port_plugin.py)
+        import port_plugin
+        table, _sha = port_plugin.load_map(os.path.join(HERE, "ports", PORTS[name]))
+        data, done, missing = port_plugin.port(data, table)
+        if missing:
+            raise SystemExit(f"{name}: the port's addresses aren't all in it ({', '.join(hex(v) for v in missing)}): left out")
+        ported = f", ported to 13.0.5 ({len(done)} addresses)"
     os.makedirs(folder(tree), exist_ok=True)
     with open(os.path.join(folder(tree), name), "wb") as f:
         f.write(data)
     if name == "libarcropolis.nro":   # (its in-game menu's files: sd:/ultimate/arcropolis/resources, without which it stops)
-        with zipfile.ZipFile(io.BytesIO(download(url))) as z:
+        with zipfile.ZipFile(io.BytesIO(raw)) as z:
             for m in z.namelist():
                 if m.startswith("ultimate/arcropolis/resources/") and not m.endswith("/"):
                     out = os.path.join(tree, "dump", "skyline", "sd", *m.split("/"))
                     os.makedirs(os.path.dirname(out), exist_ok=True)
                     with open(out, "wb") as f:
                         f.write(z.read(m))
-    log(f"{name} {version}: fetched")
+    log(f"{name} {version}: fetched{ported}")
 
 
 def main():
@@ -94,13 +107,13 @@ def main():
             have = os.path.exists(os.path.join(folder(tree), name))
             print(f"{name:28} {version:24} {'fetched' if have else '-':8} {status:8} {source}")
     elif cmd == "fetch":
-        names = [a for a in sys.argv[2:] if not a.startswith("--") and a != tree and a in PLUGINS] or \
-            [n for n, p in PLUGINS.items() if p[5] == "runs"]
-        for n in set(os.listdir(folder(tree)) if os.path.isdir(folder(tree)) else []) - set(names):
-            if n in PLUGINS and "--keep" not in sys.argv:   # (the set that runs: one no longer listed as running goes)
-                os.remove(os.path.join(folder(tree), n))
+        named = [a for a in sys.argv[2:] if not a.startswith("--") and a != tree and a in PLUGINS]
+        names = named or [n for n, p in PLUGINS.items() if p[5] == "runs"]
         for n in names:
             fetch(tree, n)
+        for n in set(os.listdir(folder(tree)) if os.path.isdir(folder(tree)) else []) - set(names):
+            if n in PLUGINS and not named and "--keep" not in sys.argv:   # (the set that runs: one no longer listed as running goes)
+                os.remove(os.path.join(folder(tree), n))
     else:
         raise SystemExit(__doc__)
 

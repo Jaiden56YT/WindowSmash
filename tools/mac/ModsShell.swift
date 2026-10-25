@@ -46,14 +46,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         window.title = "WindowSmash Mods"
         window.titlebarAppearsTransparent = true
         window.appearance = NSAppearance(named: .darkAqua)
-        window.backgroundColor = NSColor(red: 0.05, green: 0.06, blue: 0.13, alpha: 1)
+        window.backgroundColor = NSColor(red: 0.043, green: 0.039, blue: 0.141, alpha: 1)
         window.minSize = NSSize(width: 720, height: 520)
         window.contentView = web
         window.center()
         window.setFrameAutosaveName("WindowSmashMods")
         window.makeKeyAndOrderFront(nil)
         menus()
-        web.loadHTMLString("<body style='background:#0d1020;color:#9aa3c7;font:15px system-ui;display:grid;place-items:center;height:90vh'>Starting…</body>", baseURL: nil)
+        web.loadHTMLString("<body style='background:#0b0a24;color:#a69fd2;font:15px system-ui;display:grid;place-items:center;height:90vh'>Starting…</body>", baseURL: nil)
         startServer()
     }
 
@@ -102,7 +102,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
         let dark = (message.body as? String) != "light"
         window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
-        window.backgroundColor = dark ? NSColor(red: 0.05, green: 0.06, blue: 0.13, alpha: 1) : NSColor(red: 0.93, green: 0.94, blue: 0.97, alpha: 1)
+        window.backgroundColor = dark ? NSColor(red: 0.043, green: 0.039, blue: 0.141, alpha: 1) : NSColor(red: 0.945, green: 0.933, blue: 0.984, alpha: 1)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }

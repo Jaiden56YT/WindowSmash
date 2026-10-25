@@ -22,6 +22,7 @@ directly as well needs it built in: the runtime lists every hook target it is as
 dump/skyline/hooks.txt, and the targets the generated C calls directly are made hookable
 (tools/recomp.py HOOKABLE) by the next build, which regenerates the C of the modules they are in
 (that takes long for main: tens of minutes)."""
+import filecmp
 import hashlib
 import json
 import os
@@ -31,6 +32,7 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+RECOMPILER = ("recomp.py", "lift.py", "lift_simd.py", "regcache.py", "plugin_eh.py", "eh.py")   # (what makes a plugin's C)
 sys.path.insert(0, HERE)
 ROOT = os.path.dirname(HERE)
 
@@ -110,7 +112,10 @@ def module_of(p, source, record):
     import recomp as rc
     from nso import Module
     m = Module(source)
-    if m.build_id in record and os.path.exists(os.path.join(p.nro, record[m.build_id]["module"] + ".nro")):
+    placed = os.path.join(p.nro, record[m.build_id]["module"] + ".nro") if m.build_id in record else None
+    if placed and os.path.exists(placed):
+        if not filecmp.cmp(source, placed, shallow=False):   # (same build, other bytes: a ported plugin, tools/port_plugin.py)
+            shutil.copyfile(source, placed)
         return m.build_id, record[m.build_id]["module"]
     rc.NRO_DIR = p.nro
     shutil.copyfile(source, os.path.join(p.nro, m.build_id[:16] + ".nro"))
@@ -129,7 +134,9 @@ def generate(p, name, log, own_exports=False):
     img = os.path.join(p.modules, name + ".reloc.bin")
     out = os.path.join(p.build, name)
     table = os.path.join(out, "g_module.c")
-    fresh_c = not os.path.exists(table) or os.path.getmtime(table) < os.path.getmtime(nro)
+    # (again when the recompiler is newer than the C: a fix in it reaches plugins generated before)
+    made_by = max(os.path.getmtime(os.path.join(HERE, n)) for n in RECOMPILER if os.path.exists(os.path.join(HERE, n)))
+    fresh_c = not os.path.exists(table) or os.path.getmtime(table) < max(os.path.getmtime(nro), made_by)
     # (the image goes with the C: its size, and the unwind tables recomp.py adds to a plugin's)
     if fresh_c or not os.path.exists(img) or os.path.getmtime(img) < os.path.getmtime(nro):
         recomp(p, "image", nro, "--out", img)
@@ -200,9 +207,9 @@ def sync(tree, log=print):
                 folder = os.path.join(t.mods, n)
                 roots = []
                 for dp, dirs, _f in os.walk(folder):
-                    if any(d.lower() in mods.TOP for d in dirs):
+                    if any(d.lower() in mods.ROOTS for d in dirs):
                         roots.append(dp)
-                    dirs[:] = [d for d in dirs if d.lower() not in mods.TOP]   # (not into a root's own data)
+                    dirs[:] = [d for d in dirs if d.lower() not in mods.ROOTS]   # (not into a root's own data)
                 roots = roots or [folder]
                 for r in roots:   # (once each: a pack and its parts can name the same folder)
                     rel = os.path.relpath(r, t.mods).replace(os.sep, "/")
@@ -378,9 +385,10 @@ def probe_and_apply(tree, log=print):
         mods.apply(mods.Tree(tree), log)
 
 
-def build(tree, jobs, log=print):
+def build(tree, jobs, log=print, again=True):
     """sync, the C of the modules with new hook targets, the compile and link, then the probe and
-    (if the plugins' characters changed) the mods applied again."""
+    (if the plugins' characters changed) the mods applied again; then once more if that start listed
+    new hook points or code patches (a new plugin's: the first build can't know them)."""
     sync(tree, log)
     exefs = os.path.join(tree, "dump", "exefs")
     for mod in stale_hooks(tree):
@@ -398,6 +406,9 @@ def build(tree, jobs, log=print):
     if rc:
         return rc
     probe_and_apply(tree, log)
+    if again and stale_hooks(tree):
+        log("the plugins asked for more hook points: building once more")
+        return build(tree, jobs, log, again=False)
     return 0
 
 

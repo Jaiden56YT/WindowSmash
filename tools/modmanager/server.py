@@ -44,6 +44,8 @@ sys.path.insert(0, HERE)
 import mods  # noqa: E402
 import skyline  # noqa: E402
 import packs  # noqa: E402
+import describe  # noqa: E402
+import std_plugins  # noqa: E402
 
 UI = os.path.join(HERE, "ui")
 GAME = 6498           # GameBanana's Super Smash Bros. Ultimate
@@ -276,6 +278,17 @@ def game_running():
     return False
 
 
+def fetch_standard(root, log, every=False):
+    """The community plugins that run here (tools/std_plugins.py: their official releases, checked;
+    the CSK Collection ported to 13.0.5), the missing ones - or, `every`, all of them again."""
+    for name, p in std_plugins.PLUGINS.items():
+        if p[5] == "runs" and (every or not os.path.exists(os.path.join(std_plugins.folder(root), name))):
+            try:
+                std_plugins.fetch(root, name, log)
+            except SystemExit as e:   # (std_plugins.py is a command too: its errors end it)
+                raise mods.Error(str(e))
+
+
 # ---- the server ------------------------------------------------------------------------------
 
 def has_new_slots(folder):
@@ -319,6 +332,15 @@ class App:
             m["online"] = packs.online_safety(folder)
             m["plugins"] = mods.plugins(folder)
             m["plugin_state"] = skyline.plugin_state(self.tree.root, m["name"], m["plugins"]) if m["plugins"] else []
+            m["about"] = describe.describe(folder)
+        # parts of one download (a moveset and its Assist Trophy, a pack's characters): shown together
+        out["groups"] = {}
+        for name, key in describe.groups(out["mods"]).items():
+            m = next(x for x in out["mods"] if x["name"] == name)
+            m["group"], m["part"] = key, describe.part_label(name, m.get("title"))
+            g = out["groups"].setdefault(key, {"title": (m.get("title") if key.startswith("gb:") else None)
+                                               or name.split(" - ", 1)[0], "image": None})
+            g["image"] = g["image"] or m.get("image") or m.get("local_image")
         out["unsafe_on"] = [m.get("title") or m["name"] for m in out["mods"] if m["enabled"] and m["online"]["level"] == "unsafe"]
         out["same_on"] = [m.get("title") or m["name"] for m in out["mods"] if m["enabled"] and m["online"]["level"] == "same"]
         out["unbuilt"] = [m.get("title") or m["name"] for m in out["mods"] if m["enabled"] and any(not p["built"] for p in m["plugin_state"])]
@@ -361,6 +383,10 @@ class App:
                 p["unsafe"] = [m.get("title") or m["name"] for m in p["mods"] if (n := packs.local_name(t, m))
                                and packs.online_safety(os.path.join(t.mods, n))["level"] == "unsafe"]
             return {"packs": out}
+        if path == "/api/plugins/standard":   # (the community plugins: version, fetched, whether they run here)
+            return {"plugins": [{"name": n, "version": v, "have": os.path.exists(os.path.join(std_plugins.folder(t.root), n)),
+                                 "status": st, "source": src, "ported": n in std_plugins.PORTS}
+                                for n, (v, _u, _m, _s, src, st) in std_plugins.PLUGINS.items()]}
         if method != "POST":
             raise mods.Error(f"unknown {path}")
         # changes
@@ -406,10 +432,13 @@ class App:
                 raise mods.Error("the game is open: close it first (its program is rebuilt)")
 
             def build(log, progress):
+                fetch_standard(t.root, log)   # (the community plugins movesets need, if one is missing)
                 mods.apply(t, log)   # (lists the plugins to build, and their select-screen entries)
                 if skyline.build(t.root, 3, log):
                     raise mods.Error("the game's build failed: see the log")
             return self.jobs.start("Building the plugins into the game", build)
+        if path == "/api/plugins/fetch":
+            return self.jobs.start("Getting the community plugins", lambda log, progress: fetch_standard(t.root, log, every=True))
         if path == "/api/vanilla":
             if game_running():
                 raise mods.Error("the game is open: close it first")

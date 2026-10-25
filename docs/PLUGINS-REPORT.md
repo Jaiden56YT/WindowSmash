@@ -1,4 +1,73 @@
-# Real Skyline plugins and the character bench: report (2026-10-24)
+# Real Skyline plugins and the character bench: report (2026-10-24, updated 2026-10-25)
+
+## Update, 2026-10-25: Sans, the Super HYPE Bros. pack, the real CSK Collection, more than 4 new characters
+
+**Sans** crashed in the weapons' set-up of his costumes (main+0x497350 reading a model that never loaded): his
+`config.json` lists Palutena's wing and portal model files for c120 (`model/godwing/c120`, `model/gate/c120`, 34
+files) as new files and doesn't ship them (the GameBanana download itself, same MD5). `mods.py apply` now shares
+every such file from the game's own costume 0 (`mods/.characters/config.json`; the mod's own config untouched). It
+also covered 2 of Shadow Mewtwo's animations.
+
+**Super HYPE Bros.** (Z Broly Lite, Jiren, Sasuke, Vegito, All Might; the zip in Downloads) installed in the clone,
+Z Broly's plugin no longer left out (`dump/skyline/skip.txt`): all five pass. Its stop at boot (a 512 GB allocation:
+a formatted path's length) was the Rust digit-loop bug lift.py fixed on 10-24: while a plugin is left out its C isn't
+made again, and the real ARCropolis loads it from the mod's folder anyway, so the 10-23 C ran. `skyline.py` now makes a
+plugin's C again whenever the recompiler is newer than it.
+
+**The CSK Collection 5.0.6 runs for real**, ported to 13.0.5 (it only exists for 13.0.4). Main's code moved by
+different amounts in different places (0, -0x40, -0xe0, -0x1a0, +0x1bc, +0x450, +0x490, +0x5b0) and its data and
+read-only data by +0x1000. `tools/port_plugin.py` rewrites the 81 main addresses CSK's code builds, from
+`tools/ports/the_csk_collection-5.0.6.txt`: region shifts from address pairs of plugins released for both versions
+(Smashline's 13.0.5 commit, One Slot Effects' 13.0.4 and 13.0.5 builds, HewDraw Remix's 13.0.5 offsets), each address
+checked against 13.0.5's code (a function hook on a function start; an inline hook where its callback's registers fit,
+e.g. the "SLI" file in x20 right after it loads; a patch on the instruction it replaces). Its set-up runs to the end,
+every hook on its place; its hooks and 50 code patches are built in. `std_plugins.py fetch` ports it after the hash
+check. The runtime's own CSK steps aside by itself (plugins call the real one's API).
+
+**More than 4 new characters**: not CSK's job. The select screen's arrangement
+(`ui/param/menu/chara_icon_arrangement.prc`) has 91 places (13 x 7); the game's fighters fill 87. A 5th new character
+breaks it (one column of tiles, or `abort` from main+0x19f1550, a lookup in that arrangement). On the console too: the
+community fix is a mod, **CSS 91+ Layout Fix** (GameBanana 468582: a bigger arrangement and a smaller-tile layout).
+With it, all 12 new characters show and play. `mods.py apply` now says so when more than 4 are on without it.
+
+Also: a 13.0.4 plugin's function hook that misses a function start moves by its region's shift when that lands on one
+(Shadow Mewtwo's 3 hooks); a standard plugin keeps its own exports when its C is made again for hooks into it
+(ARCropolis' `arcrop_*` API went to the runtime's imitation); ported plugins (same build id, other bytes) are rebuilt;
+`SSBU_DEBUG_AT=<module>+<offset>` logs registers at inline points; `tools/dev/install_into.py` installs into the
+playable tree (dry run by default).
+
+### Bench, 2026-10-25 07:00-08:24: real ARCropolis, Smashline 2, One Slot Effects, nro_hook and the ported CSK; all
+12 new characters on, with the CSS 91+ Layout Fix; 2 runs each: **27 of 27 pass**
+
+| Mod | Character | Result (2 runs) |
+|---|---|---|
+| Knuckles over Incineroar | `gaogaen:1` | pass |
+| Fury Bowser + Giga Bowser (Model Port) | `koopa:0` | pass |
+| Dr. Eggman over Ganondorf | `ganon:6` | pass |
+| Wolverine - X-Men Mod | `wolf:7` | pass |
+| Galacta Knight | `metaknight:6` | pass |
+| The Warden | `pickel:6` | pass |
+| Uncensored Pyra_Mythra | `eflame:0` | pass |
+| Uncensored Pyra_Mythra | `elight:0` | pass |
+| Mr. L | `luigi:0` | pass |
+| Swimsuit Pyra and Mythra | `eflame:7` | pass |
+| Swimsuit Pyra and Mythra | `elight:7` | pass |
+| Kagamine Rin FT | `daisy:8` | pass |
+| The Roaring Knight over Sepiroth | `edge:0` | pass |
+| Jirachi | `ness:0` | pass |
+| Mr. Krabs | `wario:1` | pass |
+| Shadow The Hedgehog (Moveset) - Moveset_ Shadow | `wolf:120` | pass |
+| Paper Mario Moveset | `pikmin:64` | pass |
+| Sans Moveset | `palutena:120` | pass |
+| Shadow Mewtwo (Moveset) | `mewtwo:24` | pass |
+| Blaziken (Moveset) | `captain:120` | pass |
+| Dark Meta Knight Moveset | `metaknight:72` | pass |
+| Springtrap | `ganon:16` | pass |
+| Super HYPE Bros. - (Moveset) Z Broly Lite | `ganon:40` | pass |
+| Super HYPE Bros. - (Moveset) Jiren | `ganon:80` | pass |
+| Super HYPE Bros. - (Moveset) Sasuke Uchiha | `marth:64` | pass |
+| Super HYPE Bros. - (Moveset) Vegito | `captain:80` | pass |
+| Super HYPE Bros. - (Moveset) All Might | `dolly:88` | pass |
 
 ## Update, 2026-10-24 afternoon: the real ARCropolis and the real Smashline 2 run
 

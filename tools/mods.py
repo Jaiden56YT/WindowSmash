@@ -112,6 +112,10 @@ MODDED_MAP = "romfs_mods.layers"
 TOP = {"fighter", "ui", "sound", "stream;", "prebuilt;", "effect", "stage", "camera", "item", "param", "assist",
        "boss", "enemy", "finding", "pokemon", "spirits", "standard", "common", "menu", "render", "shader", "snapshot",
        "fighter_pass", "miihat", "replay", "sp_enemy"}
+# ...and these, which aren't data.arc's: a mod made only of them is a mod too (plugins read them from
+# mods:/ - the CSK Collection's options, mods:/flags/<option>.flag and reslot.toml)
+PLUGIN_DATA = {"flags"}
+ROOTS = TOP | PLUGIN_DATA
 # ARCropolis' patch files: merged into the game's file of the same name (or a mod's whole one) when
 # mods are applied - .xmsbt into an .msbt (text), .prcx and .prcxml into a .prc (params)
 PATCHES = {".xmsbt": ".msbt", ".prcx": ".prc", ".prcxml": ".prc"}
@@ -195,7 +199,7 @@ def mod_files(folder):
                 continue
             full = os.path.join(dp, n)
             path = arc_path(os.path.relpath(full, folder))
-            if is_plugin(path):
+            if is_plugin(path) or path.split("/", 1)[0].lower() in PLUGIN_DATA:
                 continue
             out.append((path, full))
     return out
@@ -225,9 +229,9 @@ def find_roots(top):
     are mods of their own (install copies each without the others: nested_roots)."""
     roots = []
     for dp, dirs, _files in os.walk(top):
-        if any(d.lower() in TOP for d in dirs):
+        if any(d.lower() in ROOTS for d in dirs):
             roots.append(dp)
-        dirs[:] = [d for d in dirs if d.lower() not in TOP]   # (a mod's own data folders are not other mods)
+        dirs[:] = [d for d in dirs if d.lower() not in ROOTS]   # (a mod's own data folders are not other mods)
     return roots
 
 
@@ -1482,7 +1486,9 @@ def apply(tree, log=print):
     if os.path.exists(os.path.join(tree.root, "skyline", "plugins", "libarcropolis.nro")):
         # the real ARCropolis is among the standard plugins: it reads the turned-on mods from
         # sd:/ultimate/mods (runtime/hle_fs.c) as the game loads, so the game keeps its own data
+        select_screen_room(tree, on, log)
         characters_mod(tree, log)
+        missing_shares(tree, on, log)
         sync_plugins(tree, log)
         shutil.copyfile(tree.vanilla_cfg, tree.cfg)
         os.makedirs(tree.work, exist_ok=True)
@@ -1601,6 +1607,100 @@ def characters_mod(tree, log):
         f.writelines(h + "\n" for h in hidden)
     if hidden:
         log("the new characters' select-screen files include these mods' own copies: " + ", ".join(hidden))
+
+
+ARRANGEMENT = ("ui", "param", "menu", "chara_icon_arrangement.prc")
+LAYOUT_FIX_ID, LAYOUT_FIX_FILE = 468582, 1055469   # (the GameBanana mod and its file without Squad Strike)
+LAYOUT_FIX = f"gamebanana.com/mods/{LAYOUT_FIX_ID} (CSS 91+ Layout Fix)"
+
+
+def new_characters(tree, names):
+    """([mods among `names` whose plugin adds a select-screen entry (the CSK Collection's API)],
+    whether one of them gives the select screen a bigger arrangement)."""
+    new, arranged = [], False
+    for name in names:
+        for root in find_roots(os.path.join(tree.mods, name)) or [os.path.join(tree.mods, name)]:
+            arranged |= os.path.isfile(os.path.join(root, *ARRANGEMENT))
+            nro = os.path.join(root, "plugin.nro")
+            if os.path.isfile(nro) and name not in new:
+                with open(nro, "rb") as f:
+                    if b"add_chara_db_entry_info" in f.read():
+                        new.append(name)
+    return new, arranged
+
+
+def select_screen_room(tree, on, log):
+    """The select screen holds 91 tiles (13 x 7: the game's ui/param/menu/chara_icon_arrangement.prc):
+    the game's own fill all but 4. More new characters (plugins adding a select-screen entry, the CSK
+    Collection's API) need a mod with a bigger arrangement and layout, or the screen breaks (one
+    column of tiles, or the game stops in the menus). When there's none, the CSS 91+ Layout Fix is
+    turned on (installed from GameBanana first if it isn't); `on` gains it. Without the internet,
+    says what to do."""
+    new, arranged = new_characters(tree, on)
+    if len(new) <= 4 or arranged:
+        return
+    state = tree.load()
+    have = [n for n, m in state["mods"].items() if str(m.get("gamebanana")) == str(LAYOUT_FIX_ID)]
+    try:
+        if not have:
+            log(f"{len(new)} new characters are on, and the select screen has room for 4: installing {LAYOUT_FIX}")
+            have = gamebanana_install(tree, LAYOUT_FIX_ID, LAYOUT_FIX_FILE)
+            state = tree.load()
+    except Exception as e:   # (offline, GameBanana down...: the rest of the mods still apply)
+        log(f"{len(new)} new characters are on, and the select screen has room for 4; {LAYOUT_FIX} couldn't be "
+            f"installed ({e}): install it from My mods, or turn some off (" + ", ".join(new) + ")")
+        return
+    for n in have:
+        if not state["mods"][n].get("enabled"):
+            log(f"{n}: turned on (the select screen needs it for {len(new)} new characters)")
+        state["mods"][n]["enabled"] = True
+        if n not in on:
+            on.append(n)
+    tree.save(state)
+
+
+SLOT = re.compile(r"/c(\d{2,3})/")
+
+
+def missing_shares(tree, on, log):
+    """With the real ARCropolis: files a mod's config.json lists as a new costume's (new-dir-files) that
+    the mod doesn't ship and nothing shares to it (Sans' c120 lists Palutena's wings and portal and
+    ships neither: their weapons' set-up then reads a model that never loaded, a crash). Each is shared
+    from the game's own file of the base costume (c00), in mods/.characters/config.json."""
+    shares, found = {}, 0
+    image = RomfsImage(tree.vanilla_cfg)
+    try:
+        arc_at = next(o for p, o, s in romfs_entries(image) if p == "data.arc")
+        game = Arc(lambda off, n: image.read(arc_at + off, n))
+        for name in on:
+            for root in find_roots(os.path.join(tree.mods, name)) or [os.path.join(tree.mods, name)]:
+                try:
+                    with open(os.path.join(root, "config.json"), encoding="utf-8-sig") as f:
+                        cfg = json.load(f)
+                except (OSError, ValueError):
+                    continue
+                if not isinstance(cfg, dict) or not isinstance(cfg.get("new-dir-files"), dict):
+                    continue
+                shared = {t for key in ("share-to-vanilla", "share-to-added")
+                          for v in (cfg.get(key) or {}).values() for t in (v if isinstance(v, list) else [v])}
+                for files in cfg["new-dir-files"].values():
+                    for path in files if isinstance(files, list) else []:
+                        if path in shared or os.path.isfile(os.path.join(root, *path.split("/"))):
+                            continue
+                        m = SLOT.search(path)
+                        source = path[:m.start()] + "/c00/" + path[m.end():] if m and int(m.group(1)) >= 8 else None
+                        if source and game.locate(source) is not None and path not in shares.setdefault(source, []):
+                            shares[source].append(path)
+                            found += 1
+    finally:
+        close_image(image)
+    if not found:
+        return
+    folder = os.path.join(tree.mods, CHARACTERS)
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, "config.json"), "w", encoding="utf-8") as f:
+        json.dump({"share-to-vanilla": {s: t for s, t in shares.items() if t}}, f, indent=1)
+    log(f"{found} file(s) mods list for new costumes without shipping them: the game's own (c00) used")
 
 
 def sync_plugins(tree, log):

@@ -36,6 +36,7 @@ name has a native implementation - `HLE(name)` in runtime/*.c - is emitted as a 
 it, so the replacement is reached by every caller, including direct calls inside the module.
 """
 import bisect
+import json
 import mmap
 import os
 import re
@@ -549,7 +550,11 @@ def image_file(mod):
     build_dir = os.path.join(ROOT, "build")
     os.makedirs(build_dir, exist_ok=True)
     path = os.path.join(build_dir, f"image-{mod.build_id[:16]}.img")
-    if not os.path.exists(path) or os.path.getsize(path) != len(mod.image):
+    same = os.path.exists(path) and os.path.getsize(path) == len(mod.image)
+    if same:   # (same size, other bytes: a plugin ported in place, tools/port_plugin.py)
+        with open(path, "rb") as f:
+            same = f.read() == mod.image
+    if not same:
         with open(path, "wb") as f:
             f.write(mod.image)
     return path
@@ -725,13 +730,24 @@ def build(path, outdir, jobs, per_file):
                 os.environ["SSBU_REGCACHE"] = regcache_was
 
 
+def standard_plugins():
+    """The module names of the standard plugins (tools/skyline.py's record, dump/skyline/plugins.json)."""
+    try:
+        with open(os.path.join(ROOT, "dump", "skyline", "plugins.json"), encoding="utf-8") as f:
+            record = json.load(f)
+    except (OSError, ValueError):
+        return set()
+    return {r["module"] for r in record.values() if str(r.get("mod", "")).startswith("(standard) ")}
+
+
 def _build(mod, found, funcs, path, outdir, jobs, per_file):
     name, base = module_key(path), base_of(path)
     os.makedirs(outdir, exist_ok=True)
     modcache.clear_stamp(outdir)   # (until generated and compiled again)
     hle = hle_names()
-    # (a standard plugin - the real Smashline, CSK Collection... - keeps its own exports: SSBU_OWN_EXPORTS, tools/skyline.py)
-    forward = {} if os.environ.get("SSBU_OWN_EXPORTS") == "1" else \
+    # (a standard plugin - the real Smashline, CSK Collection... - keeps its own exports: SSBU_OWN_EXPORTS, tools/skyline.py,
+    # or, when its C is made again for hooks into it, its "(standard)" entry in dump/skyline/plugins.json)
+    forward = {} if os.environ.get("SSBU_OWN_EXPORTS") == "1" or name in standard_plugins() else \
         {v: f"hle_{n}" for n, v, _s, info, _x in mod.exports if n in hle and info & 0xF == 2}
     forward.update(unwind_jumpto(mod, found))
     forward.update(resolve_wraps(mod, base, dict(funcs), name))

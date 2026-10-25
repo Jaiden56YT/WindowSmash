@@ -80,40 +80,33 @@ static void note_inline_point(u64 at) {
     if ((f = fopen(path, "a"))) { fputs(line, f); fclose(f); }
 }
 
-/* Plugins built for game 13.0.4 (the CSK Collection 5.0.6): in 13.0.5 the code of main around
- * 0x32xxxxx-0x37xxxxx moved 0x5B0 along (Smashline's own offsets say "+ 0x5B0" there; at 0x17e0xxx
- * "- 0x40", and CSK's hooks at 0x18xxxxx and 0x1exxxxx are where they were). A function hook moves
- * when that lands on a function and its own address doesn't; an inline hook or a patch (which can't
- * be checked) moves from 0x3200000 on. By the calling plugin's module name. */
-static const char *const FOR_13_0_4[] = {"the_csk_collection"};
+/* Plugins built for game 13.0.4 (a moveset's lib_paramconfig or Smashline code, say): main's code
+ * moved by these amounts in 13.0.5 (address pairs of plugins released for both: Smashline's 13.0.5
+ * commit, One Slot Effects' two builds, HewDraw Remix's 13.0.5 offsets; tools/ports/ has the CSK
+ * Collection's, ported whole). A function hook that misses a function start moves by its region's
+ * amount when that lands on one; nothing else is moved (an inline hook or a patch can't be checked). */
+static const struct { u64 from, to; i64 by; } MOVED_IN_13_0_5[] = {
+    {0x16b0000, 0x1792000, -0x1a0}, {0x1792000, 0x17d0000, -0xe0}, {0x17d0000, 0x17f1000, -0x40},
+    {0x2310000, 0x2335000, 0x1bc}, {0x2335000, 0x2630000, 0x450}, {0x297d000, 0x2990000, 0x490},
+    {0x3097000, 0x39c9000, 0x5b0},
+};
 int rt_is_function(u64 addr);   /* (host.c) */
-static u64 version_shift_function(Cpu *c, u64 at);
-static u64 version_shift(Cpu *c, u64 at) {
-    char who[96];
-    rt_describe(c->x[30], who, sizeof who);
-    char *plus = strchr(who, '+');
-    if (plus) *plus = 0;
-    for (u32 i = 0; i < sizeof FOR_13_0_4 / sizeof *FOR_13_0_4; i++)
-        if (!strcmp(who, FOR_13_0_4[i]) && at >= MAIN_BASE + 0x3200000 && at < MAIN_BASE + 0x39c9000) return at + 0x5B0;
-    return at;
-}
-static u64 version_shift_function(Cpu *c, u64 at) {
-    char who[96];
-    rt_describe(c->x[30], who, sizeof who);
-    char *plus = strchr(who, '+');
-    if (plus) *plus = 0;
-    for (u32 i = 0; i < sizeof FOR_13_0_4 / sizeof *FOR_13_0_4; i++)
-        if (!strcmp(who, FOR_13_0_4[i]) && !rt_is_function(at) && rt_is_function(at + 0x5B0)) return at + 0x5B0;
+static u64 moved_in_13_0_5(u64 at) {
+    for (u32 i = 0; i < sizeof MOVED_IN_13_0_5 / sizeof *MOVED_IN_13_0_5; i++)
+        if (at >= MAIN_BASE + MOVED_IN_13_0_5[i].from && at < MAIN_BASE + MOVED_IN_13_0_5[i].to &&
+            !rt_is_function(at) && rt_is_function(at + MOVED_IN_13_0_5[i].by))
+            return at + MOVED_IN_13_0_5[i].by;
     return at;
 }
 
 /* A64HookFunction(symbol, replace, result): calls to `symbol` go to `replace`; *result reaches
  * the function as it was. */
 HLE(A64HookFunction) {
-    u64 target = version_shift_function(c, c->x[0]), replace = c->x[1], result = c->x[2];
-    char a[96], b[96];
+    u64 asked = c->x[0], target = moved_in_13_0_5(asked), replace = c->x[1], result = c->x[2];
+    char a[96], b[96], m[96];
     note_hook_target(target);
     u64 original = rt_hook_function(target, replace);
+    if (target != asked) LOG("A64HookFunction at %s: a 13.0.4 address, moved", rt_describe(asked, m, sizeof m));
     LOG("A64HookFunction %s -> %s%s", rt_describe(target, a, sizeof a), rt_describe(replace, b, sizeof b),
         original ? "" : ": NOT a function entry, left alone");
     if (result) *P(u64, result) = original ? original : target;
@@ -140,14 +133,43 @@ static void add_inline_hook(u64 at, u64 callback, InlineNative *native, u64 arg)
 
 HLE(A64InlineHook) {
     char a[96], b[96], s[96];
-    u64 at = version_shift(c, c->x[0]), site = cave_site(at);
+    u64 at = c->x[0], site = cave_site(at);
     LOG("A64InlineHook at %s -> %s%s%s", rt_describe(at, a, sizeof a), rt_describe(c->x[1], b, sizeof b),
         site ? ": a code cave, so at the call that branches to it, " : "", site ? rt_describe(site, s, sizeof s) : "");
     add_inline_hook(site ? site : at, c->x[1], NULL, 0);
 }
 
+/* (debugging) SSBU_DEBUG_AT=<module>+0x<offset>,...: the registers and 0x40 bytes of the stack at
+ * those points, each also an inline point in hooks.txt ("<module> <offset> inline") so the build
+ * stops there. */
+static void debug_at(Cpu *c, u64 at) {
+    static char points[16][96];
+    static int count = -1;
+    if (count < 0) {
+        const char *e = getenv("SSBU_DEBUG_AT");
+        count = 0;
+        while (e && *e && count < 16) {
+            size_t len = strcspn(e, ",");
+            snprintf(points[count++], sizeof points[0], "%.*s", (int)len, e);
+            e += len + (e[len] == ',');
+        }
+    }
+    if (!count) return;
+    char where[96];
+    rt_describe(at, where, sizeof where);
+    for (int i = 0; i < count; i++) {
+        if (strcmp(where, points[i])) continue;
+        fprintf(stderr, "[debug] %s:", where);
+        for (int r = 0; r < 31; r++) fprintf(stderr, " x%d=%llx", r, (unsigned long long)c->x[r]);
+        fprintf(stderr, " sp=%llx [sp]:", (unsigned long long)c->sp);
+        for (int k = 0; k < 8; k++) fprintf(stderr, " %llx", (unsigned long long)*P(u64, c->sp + 8ull * k));
+        fputc('\n', stderr);
+    }
+}
+
 /* (generated code, at an inline point) skyline-rs' InlineCtx: x0-x30, sp, then q0-q31. */
 void rt_inline_hook(Cpu *c, u64 at) {
+    debug_at(c, at);
     u32 n = __atomic_load_n(&inline_n, __ATOMIC_ACQUIRE);
     for (u32 i = 0; i < n; i++) {
         if (inline_hooks[i].at != at) continue;
@@ -209,7 +231,7 @@ static void note_code_patch(u64 dest, u64 src, u64 n) {
 }
 HLE(sky_memcpy) {
     char a[96];
-    u64 to = version_shift(c, c->x[0]);
+    u64 to = c->x[0];
     LOG("sky_memcpy %#llx bytes to %s", (unsigned long long)c->x[2], rt_describe(to, a, sizeof a));
     note_code_patch(to, c->x[1], c->x[2]);
     memcpy(G2H(to), G2H(c->x[1]), c->x[2]);
