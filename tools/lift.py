@@ -708,7 +708,8 @@ class Lifter(SimdMixin):
         # The other form (LLVM's for small tables, as in Rust code): entries of 1 or 2 bytes,
         # each a count of instructions past an anchor the code takes with adr:
         #     adr xT, table ; adr xA, anchor ; ldrb/ldrh wE, [xT, xI] ; add xA, xA, xE, lsl #2 ; br xA
-        # The table's length is not checked here; entries leading out of the function end it.
+        # The table's length is not checked here; entries leading out of the function, or between two
+        # of its instructions, end it.
         for i in pending:
             j = self.find_def((ws[i] >> 5) & 31, i)
             if j is None or ws[j] & 0xFFE00000 != 0x8B000000:      # add xD, xN, xM, lsl #s
@@ -732,7 +733,7 @@ class Lifter(SimdMixin):
                 if at + size > len(self.img):
                     break
                 t = anchor + (int.from_bytes(self.img[at:at + size], "little", signed=signed) << shift)
-                if not self.fstart <= t < self.fend:
+                if not self.fstart <= t < self.fend or t & 3:   # (past the table's end: no instruction there)
                     break
                 targets.add(t)
             if targets:

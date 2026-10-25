@@ -730,6 +730,15 @@ def build(path, outdir, jobs, per_file):
                 os.environ["SSBU_REGCACHE"] = regcache_was
 
 
+def plugin_modules():
+    """The module names of every Skyline plugin placed (tools/skyline.py's record, dump/skyline/plugins.json)."""
+    try:
+        with open(os.path.join(ROOT, "dump", "skyline", "plugins.json"), encoding="utf-8") as f:
+            return {r["module"] for r in json.load(f).values()}
+    except (OSError, ValueError):
+        return set()
+
+
 def standard_plugins():
     """The module names of the standard plugins (tools/skyline.py's record, dump/skyline/plugins.json)."""
     try:
@@ -949,12 +958,19 @@ def build_all(exefs, out, jobs, compile_c=True):
         if not compile_c:
             print(f"the C of {len(paths)} modules is in {out} (--generate-only: not compiled here)")
             return True
+        plugins, left_out = plugin_modules(), []
         for name in paths:
             if not compile_dir(targets[name], min(jobs, 16), shown):
-                return False
+                if name not in plugins:
+                    return False
+                # (a mod's plugin that doesn't compile: the game is built without it, not stopped)
+                print(f"{name}: this plugin did not compile (above): the game is built without it, so its mod's "
+                      "moves or character won't work - send the message above to WindowSmash")
+                left_out.append(name)
+                continue
             modcache.write_stamp(targets[name], build_ids[name], MODULES[name], name, fps[name])
         shown.begin("link")
-        ok = link(list(targets.values()), exe)
+        ok = link([t for n, t in targets.items() if n not in left_out], exe)
         shown.end("link")
         return ok
 
