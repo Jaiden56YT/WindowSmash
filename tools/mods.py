@@ -171,11 +171,20 @@ class Tree:
         return applied if self.is_modded() else None
 
     def is_modded(self):
+        """Whether the game runs with mods: romfs.cfg reads them, or (the real ARCropolis, which loads
+        them as the game runs from the list in dump/skyline/mods.txt) the last apply turned some on."""
         try:
             with open(self.cfg, encoding="utf-8") as f:
-                return MODDED_MAP in f.read()
+                if MODDED_MAP in f.read():
+                    return True
         except OSError:
             return False
+        try:
+            with open(os.path.join(self.work, "applied.json"), encoding="utf-8") as f:
+                applied = json.load(f)
+        except (OSError, ValueError):
+            return False
+        return bool(applied.get("arcropolis") and applied.get("mods"))
 
 
 # ---- a mod's files ---------------------------------------------------------------------------
@@ -414,6 +423,23 @@ def close_image(image):
                 f.close()
             except OSError:
                 pass
+
+
+def play_vanilla(tree, log=print):
+    """The game without mods, the list of mods staying as it is (Apply brings them back): romfs.cfg the
+    game's own, and for the real ARCropolis no mod in sd:/ultimate/mods (dump/skyline/mods.txt), so it
+    loads none and runs none of their plugins. The community plugins still load; with no mods they
+    change nothing."""
+    vanilla_cfg(tree)
+    shutil.copyfile(tree.vanilla_cfg, tree.cfg)
+    listed = os.path.join(tree.root, "dump", "skyline", "mods.txt")
+    if os.path.exists(listed):
+        open(listed, "w").close()
+    arcropolis = os.path.exists(os.path.join(tree.root, "skyline", "plugins", "libarcropolis.nro"))
+    os.makedirs(tree.work, exist_ok=True)
+    with open(os.path.join(tree.work, "applied.json"), "w", encoding="utf-8") as f:
+        json.dump({"mods": [], "files": 0, "skipped": {}, "arcropolis": arcropolis}, f)
+    log("the game as it is (the mods stay on the list: Apply to game turns them back on)")
 
 
 def vanilla_cfg(tree):

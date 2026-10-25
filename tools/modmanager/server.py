@@ -443,11 +443,7 @@ class App:
             if game_running():
                 raise mods.Error("the game is open: close it first")
 
-            def vanilla(log, progress):
-                mods.vanilla_cfg(t)
-                shutil.copyfile(t.vanilla_cfg, t.cfg)
-                log("the game as it is (the mods stay on the list)")
-            return self.jobs.start("Turning mods off in the game", vanilla)
+            return self.jobs.start("Turning mods off in the game", lambda log, progress: mods.play_vanilla(t, log))
         if path == "/api/install/gamebanana":
             mid, fid = int(body["id"]), body.get("file")
             return self.jobs.start(body.get("title") or f"GameBanana mod {mid}",
