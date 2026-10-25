@@ -116,7 +116,7 @@ class CheckTests(unittest.TestCase):
                 self.assertFalse(im.step_update(arguments(no_update=True, dry_run=True)))
         finally:
             im.il.step_update = real
-        self.assertEqual(seen, [im.BRANCH])   # (this branch's updates, while it is not merged)
+        self.assertEqual(seen, [im.BRANCH])   # (this installer's branch)
         self.assertEqual((im.il.BRANCH, im.il.step), (linux_branch, im.step))   # (and install_linux as it was)
         self.assertIn(f'[1/{im.STEPS}] Get the newest WindowSmash', out.getvalue())
         self.assertIn('not checking (--no-update)', out.getvalue())
@@ -263,6 +263,7 @@ class UnlockTests(unittest.TestCase):
                       + ('launchers/Unlock All Fighters.command' if DARWIN else 'Unlock All Fighters') + ' again.', r.stderr)
 
 
+@unittest.skipUnless(DARWIN, "needs macOS's security tool and its root certificates")
 class CertificateTests(unittest.TestCase):
     def test_python_without_certificates(self):
         import ssl
@@ -615,6 +616,25 @@ class TerminalTests(unittest.TestCase):
         self.assertIn('Name it with --game', str(stop.exception))
 
 
+    def test_online_name_in_config_folder(self):
+        """online_name.txt where the game reads it (runtime/config.h): config/ once the game has made it
+        (config/version.ini), else the port's folder."""
+        def files(**kw):
+            with mock.patch.object(im, 'ROOT', self.top), mock.patch.object(im, 'Checks', StubChecks), \
+                    mock.patch.object(im, 'detected_folders', lambda: {'game': None, 'keys': None, 'firmware': None}), \
+                    mock.patch('builtins.input', side_effect=AssertionError('asked')), contextlib.redirect_stdout(io.StringIO()):
+                return im.step_files(arguments(**kw), 'off')
+        Path(self.top, 'online_name.txt').write_text('Old Name\n')
+        self.assertEqual(files(dry_run=True)['name'], 'Old Name')
+        Path(self.top, 'config').mkdir()
+        Path(self.top, 'config', 'version.ini').write_text('version = 1\n')
+        Path(self.top, 'config', 'online_name.txt').write_text('Made-up Name\n')
+        self.assertEqual(files(dry_run=True)['name'], 'Made-up Name')
+        got = files(yes=True, online_name='New Name', game=self.dirs['My Game'], keys=self.dirs['My Keys'], firmware=self.dirs['My Firmware'])
+        self.assertEqual(got['name'], 'New Name')
+        self.assertEqual(Path(self.top, 'config', 'online_name.txt').read_text(), 'New Name\n')
+        self.assertEqual(Path(self.top, 'online_name.txt').read_text(), 'Old Name\n')   # (the old file as it was)
+
 @unittest.skipUnless(DARWIN and shutil.which('codesign'), 'needs macOS')
 class FirewallTests(unittest.TestCase):
     """Step 9, with the firewall's tool and the password dialog stood in for."""
@@ -943,6 +963,22 @@ class LaunchScriptTests(unittest.TestCase):
         line = self.online('a.example:1\n', None, None, '\n')[0]
         self.assertRegex(line, r'^R=a\.example:1\|C=\|N=Player\d{4}\|D=$')
         self.assertRegex((self.top / 'online_name.txt').read_text(), r'^Player\d{4}\n$')
+
+    def test_online_files_in_config_folder(self):
+        """Once the game has made config/ (runtime/config.h: its version.ini), the name and the direct
+        setting are read and written there; online_server.txt stays the port's own until there is one there."""
+        (self.top / 'online_server.txt').write_text('a.example:1\n')
+        (self.top / 'online_name.txt').write_text('Old Name\n')
+        (self.top / 'online_direct.txt').write_text('off\n')
+        (self.top / 'config').mkdir()
+        (self.top / 'config' / 'online_direct.txt').write_text('on\n')
+        self.assertEqual(self.sh(self.ONLINE).stdout.splitlines()[0], 'R=a.example:1|C=|N=Old Name|D=0')   # (not the game's folder yet)
+        (self.top / 'config' / 'version.ini').write_text('version = 1\n')
+        self.assertEqual(self.sh(self.ONLINE, 'New Name\n').stdout.splitlines()[0], 'R=a.example:1|C=|N=New Name|D=')
+        self.assertEqual((self.top / 'config' / 'online_name.txt').read_text(), 'New Name\n')
+        self.assertEqual((self.top / 'online_name.txt').read_text(), 'Old Name\n')
+        (self.top / 'config' / 'online_server.txt').write_text('off\n')
+        self.assertEqual(self.sh(self.ONLINE).stdout.splitlines()[0], 'R=|C=|N=|D=')
 
     def test_name_dialog(self):
         fake = FakeOsascript(self, ['=Zelda'])

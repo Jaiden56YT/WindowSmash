@@ -974,7 +974,7 @@ def step_files(a, firewall):
         if getattr(a, key):
             found[key] = os.path.abspath(os.path.expanduser(getattr(a, key)))
         info(f"{key}: {found[key] or 'not found on this Mac (to be chosen)'}")
-    name_file = os.path.join(ROOT, "online_name.txt")
+    name_file = il.config_file("online_name.txt", ROOT)
     name = clean_name(a.online_name or read_text(name_file).strip()) or f"Player{int.from_bytes(os.urandom(2), 'big') % 9000 + 1000}"
     # (--yes: no question that needs an answer, the administrator's password included)
     options = {"launcher": True, "firewall": firewall == "on" and not a.yes}

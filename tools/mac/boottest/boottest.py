@@ -170,12 +170,13 @@ def start(how, tree, app, exe):
                 status = subprocess.run([exe, modules, "--status", "30"], cwd=tree, env=env, stdout=f, stderr=subprocess.STDOUT,
                                         stdin=subprocess.DEVNULL, timeout=60).returncode
         elif how == "open":
-            ini = os.path.join(tree, "display.ini")
-            if os.path.exists(ini):
-                os.remove(ini)
+            inis = [os.path.join(tree, "config", "display.ini"), os.path.join(tree, "display.ini")]   # (config/: runtime/config.h)
+            for ini in inis:
+                if os.path.exists(ini):
+                    os.remove(ini)
             status = subprocess.run(["open", "-n", "-W", "--env", f"SSBU_LOG={log}", "-a", app], env=env, stdin=subprocess.DEVNULL,
                                     capture_output=True, text=True, timeout=60).returncode
-            if not os.path.exists(ini):   # (written where the game works when it is missing: the root found from the app)
+            if not any(os.path.exists(ini) for ini in inis):   # (written where the game works when it is missing: the root found from the app)
                 problem = f"no display.ini written in {tree}: the game did not work in the root it should have found"
         else:
             env.update(SSBU_TREE=tree, SSBU_DISPLAY=os.path.join(tree, "display.ini"))   # (not written into the repository)

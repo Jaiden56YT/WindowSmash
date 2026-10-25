@@ -19,6 +19,7 @@
 # The online lobby's game server: players' accounts and ratings (tools/ssbu_online_lobby.py --state)
 /tools/nex/state/
 # This PC's settings, written on the first start (docs/PLAYING.md)
+/config/
 /controllers.ini
 /display.ini
 /launcher.ini

@@ -15,7 +15,12 @@
 #include "host.h"
 #include "clock.h"
 #include "display.h"
+#include "hookable.h"
+#include "input_seq.h"
 #include "settings.h"
+/* rt_cpu_needs: what this file was compiled for, which cpu_check.c checks the processor for first */
+#define RT_CPU_DEFINE_NEEDS
+#include "cpu_check.h"
 #ifdef _WIN32
 #include <dbghelp.h>
 #else
@@ -48,6 +53,8 @@ extern u64 gpu_stat_batches, gpu_stat_lists, gpu_stat_draws, gpu_stat_dispatches
     gfx_stat_shaders, gfx_stat_shader_failures, gfx_stat_textures, gfx_stat_unpacked, gfx_stat_watch_us, gfx_skip_shader, gfx_skip_topology,
     gfx_skip_target, gfx_stat_unmap_dropped;
 u64 present_frames(void);
+void movie_test_start(void);   /* (hle_movie_skip.c) SSBU_SKIP_MOVIES, SSBU_SEQ's mark movie */
+void test_fight_start(void);   /* (hle_fight_test.c) SSBU_FIGHT_HASH, SSBU_DETERMINISTIC, SSBU_DEBUG_MATCH... */
 void gfx_report_compiles(void (*line)(const char *text));
 void gfx_status_lines(void);
 #ifdef _WIN32
@@ -94,6 +101,12 @@ static u64 guest_of(u64 pc) {
     }
     return lo && pc - by_host[lo - 1].host <= (4u << 20) ? by_host[lo - 1].guest : 0;
 }
+
+/* A backtrace frame's guest function. A frame is a return address, looked up as its call (ra - 1),
+ * unless it is a faulting or stopped context's own pc (is_pc). Looked up as it is, a return address
+ * is the next function's first instruction when the call was the caller's last (to abort, rt_trap,
+ * rt_fatal, a C++ terminate: noreturn), and names that function instead. */
+static u64 guest_of_frame(u64 frame, int is_pc) { return guest_of(is_pc ? frame : frame - 1); }
 
 /* A host code address in recompiled code, as the guest function's place ("main+0x1234"); NULL
  * for any other code (debug_profile.c's thread dumps). */
@@ -247,11 +260,12 @@ int rt_write_dump(const char *path, DWORD tid, EXCEPTION_POINTERS *e, DWORD wait
 }
 #endif
 
-static void print_frames(void **frames, int n) {
+/* (from_pc: frames[0] is the faulting context's pc; every other frame is a return address) */
+static void print_frames(void **frames, int n, int from_pc) {
     char name[96];
     out("guest backtrace (innermost first):\n");
     for (int i = 0, shown = 0; i < n && shown < 28; i++) {
-        u64 guest = guest_of((u64)frames[i]);
+        u64 guest = guest_of_frame((u64)frames[i], i == 0 && from_pc);
         if (!guest) {   /* runtime code: its offset in the executable (see the linker map) */
             static u64 image;
             if (!image) image = (u64)GetModuleHandleW(NULL);
@@ -265,7 +279,7 @@ static void print_frames(void **frames, int n) {
 
 void rt_backtrace(void) {
     void *frames[62];
-    print_frames(frames, CaptureStackBackTrace(1, 62, frames, NULL));
+    print_frames(frames, CaptureStackBackTrace(1, 62, frames, NULL), 0);
 }
 
 #ifdef _WIN32
@@ -301,7 +315,7 @@ void rt_backtrace_thread(HANDLE thread, int max_frames) {
     if (host_frames < 0) host_frames = getenv("SSBU_HOST_FRAMES") != NULL;
     u64 image = (u64)GetModuleHandleW(NULL);
     for (int i = 0, shown = 0; i < n && shown < max_frames; i++) {
-        u64 guest = guest_of((u64)frames[i]);
+        u64 guest = guest_of_frame((u64)frames[i], i == 0);   /* (frames[0]: its context's pc) */
         if (!guest) {
             if (host_frames && (u64)frames[i] - image < 0x40000000ull) fprintf(stderr, "      [host +%#llx]\n", (u64)frames[i] - image);
             else if (host_frames) {
@@ -368,7 +382,7 @@ static _Noreturn void crash_report(EXCEPTION_POINTERS *e, DWORD tid) {
     }
     gfx_report_compiles(out_line);   /* (a fault in the driver's shader compiler names the program) */
     void *frames[62];
-    print_frames(frames, unwind(*e->ContextRecord, frames, 62));   /* from the faulting frame */
+    print_frames(frames, unwind(*e->ContextRecord, frames, 62), 1);   /* from the faulting frame */
     char dump[MAX_PATH];
     snprintf(dump, sizeof dump, "%.*s.dmp", (int)strlen(report) - 4, report);
     int dumped = report_file != INVALID_HANDLE_VALUE && rt_write_dump(dump, tid, e, 100000);
@@ -435,10 +449,12 @@ static void host_frame(const char *indent, void *pc) {   /* "[module +offset]" *
 #ifdef __APPLE__
 /* A frame walk's second frame is the link register when the innermost function had not saved it:
  * not a frame of its own when it points back into that same (recompiled) function. (Allocates
- * and locks nothing: also for a stopped thread.) */
+ * and locks nothing: also for a stopped thread. lr is a return address, looked up as its call: as
+ * it is, a caller that ended in its call to the innermost function, placed right after it, would
+ * be taken for that function and dropped.) */
 static int walk_frames(u64 pc, u64 lr, u64 fp, void **frames, int max) {
     int n = rt_frame_walk(pc, lr, fp, frames, max);
-    if (n > 1 && (u64)frames[1] == lr && guest_of(pc) && guest_of(lr) == guest_of(pc)) {
+    if (n > 1 && (u64)frames[1] == lr && guest_of(pc) && guest_of_frame(lr, 0) == guest_of(pc)) {
         memmove(frames + 1, frames + 2, sizeof *frames * (size_t)(n - 2));
         n--;
     }
@@ -451,10 +467,10 @@ void rt_backtrace_thread(HANDLE thread, int max_frames) {
     RtTid tid = rt_thread_tid(thread);
     if (!tid) return;
     void *frames[96];
-    int n;
+    int n, self = tid == pthread_mach_thread_np(pthread_self());   /* (another thread's walk starts at its pc; this one's are all return addresses) */
     u64 pc = 0, lr = 0;
-    if (tid == pthread_mach_thread_np(pthread_self())) n = CaptureStackBackTrace(0, 96, frames, NULL);
-    else if ((n = rt_thread_frames(tid, frames, 96, &pc, &lr)) > 1 && (u64)frames[1] == lr && guest_of(pc) && guest_of(lr) == guest_of(pc)) {
+    if (self) n = CaptureStackBackTrace(0, 96, frames, NULL);
+    else if ((n = rt_thread_frames(tid, frames, 96, &pc, &lr)) > 1 && (u64)frames[1] == lr && guest_of(pc) && guest_of_frame(lr, 0) == guest_of(pc)) {
         memmove(frames + 1, frames + 2, sizeof *frames * (size_t)(n - 2));   /* (as walk_frames) */
         n--;
     }
@@ -462,7 +478,7 @@ void rt_backtrace_thread(HANDLE thread, int max_frames) {
     if (host_frames < 0) host_frames = getenv("SSBU_HOST_FRAMES") != NULL;
     char name[96];
     for (int i = 0, shown = 0; i < n && shown < max_frames; i++) {
-        u64 guest = guest_of((u64)frames[i]);
+        u64 guest = guest_of_frame((u64)frames[i], i == 0 && !self);
         if (!guest) { if (host_frames) host_frame("      ", frames[i]); continue; }
         fprintf(stderr, "      %s\n", rt_describe(guest, name, sizeof name));
         shown++;
@@ -499,7 +515,7 @@ void rt_backtrace_thread(HANDLE thread, int max_frames) {
         if (host_frames < 0) host_frames = getenv("SSBU_HOST_FRAMES") != NULL;
         char name[96];
         for (int i = 2, shown = 0; i < bt_count && shown < max_frames; i++) {   /* (past the handler and the signal frame) */
-            u64 guest = guest_of((u64)bt_frames[i]);
+            u64 guest = guest_of_frame((u64)bt_frames[i], i == 2);   /* (bt_frames[2]: where the signal stopped it) */
             if (!guest) { if (host_frames) host_frame("      ", bt_frames[i]); continue; }
             fprintf(stderr, "      %s\n", rt_describe(guest, name, sizeof name));
             shown++;
@@ -561,14 +577,14 @@ static void on_fault(int sig, siginfo_t *si, void *ucv) {
     host_frame("  ", (void *)pc);
     void *frames[64];
 #ifdef __APPLE__   /* (from the faulting context: a leaf function's caller is in the link register) */
-    int n = walk_frames(pc, uc->uc_mcontext->__ss.__lr, uc->uc_mcontext->__ss.__fp, frames, 64), from = 0;
+    int n = walk_frames(pc, uc->uc_mcontext->__ss.__lr, uc->uc_mcontext->__ss.__fp, frames, 64), from = 0, from_pc = 1;
 #else
-    int n = backtrace(frames, 64), from = 0;
-    for (int i = 0; i < n; i++) if ((u64)frames[i] == pc) { from = i; break; }   /* (the faulting frame onwards) */
+    int n = backtrace(frames, 64), from = 0, from_pc = 0;
+    for (int i = 0; i < n; i++) if ((u64)frames[i] == pc) { from = i; from_pc = 1; break; }   /* (the faulting frame onwards) */
 #endif
     for (int i = from + 1; i < n && i < from + 24; i++) host_frame("  host frame ", frames[i]);
     gfx_report_compiles(out_line);   /* (a fault in the shader compiler names the program) */
-    print_frames(frames + from, n - from);
+    print_frames(frames + from, n - from, from_pc);
     report_close(report);
     fflush(stderr);
     _exit(5);
@@ -759,6 +775,14 @@ static struct Sym *sym_slot(const char *name) {
 
 u64 rt_symbol(const char *name) { return sym_slot(name)->addr; }
 
+const char *rt_symbol_at(u64 addr, const char *prefix) {   /* (every export looked at: for start-up checks) */
+    size_t n = strlen(prefix);
+    for (u32 m = 0; m < module_count; m++)
+        for (u32 i = 0; i < modules[m]->export_count; i++)
+            if (modules[m]->exports[i].addr == addr && !strncmp(modules[m]->exports[i].name, prefix, n)) return modules[m]->exports[i].name;
+    return NULL;
+}
+
 /* Functions the loader wraps so that progress through start-up is visible. */
 static u64 real_startup, real_main;
 static void wrap_startup(Cpu *c) { phase = "nninitStartup"; printf("[boot] nninitStartup\n"); fflush(stdout); rt_call(c, real_startup); phase = "start-up after nninitStartup"; }
@@ -884,18 +908,22 @@ static u32 bind_module(u32 m) {
 }
 
 static void load(const char *dir) {
-    u32 funcs = 0, exports = 0, relocs = 0;
+    u32 funcs = 0, exports = 0, relocs = 0, hooked = 0;
     for (u32 m = 0; m < module_count; m++) { funcs += modules[m]->func_count; exports += modules[m]->export_count; }
     for (u32 m = 0; m < rt_nro_count; m++) exports += rt_nro_modules[m]->export_count;
+    for (RtHook *h = rt_hook_list(); h; h = h->next) hooked++;
     for (symtab_size = 1024; symtab_size < exports * 3 + 65536; symtab_size *= 2) {}
     symtab = calloc(symtab_size, sizeof *symtab);
-    by_host_cap = funcs + 16;
+    by_host_cap = funcs + hooked + 16;
     by_host = malloc(sizeof *by_host * by_host_cap);
 
     for (u32 m = 0; m < module_count; m++) {
         map_module(m, dir);
         publish_exports(m);
     }
+    /* a hookable function's own code (hookable.h): the module's table holds only what calls it
+     * through its slot */
+    for (RtHook *h = rt_hook_list(); h; h = h->next) by_host[by_host_count++] = (struct HostFn){(u64)h->body, h->addr};
     /* The NROs the game loads later each have a fixed address: keep their ranges free now,
      * before the graphics driver and the heap start taking address space (they did, and a
      * fighter's module then could not be mapped). */
@@ -967,6 +995,11 @@ static u64 load_nro(Cpu *c, const char *id, const char *name) {
            mod->name, mod->base, mod->func_count, mod->export_count, relocs);
     fflush(stdout);
     rtld_module_loaded(mod->base, mod->image_size);
+    if (input_seq_on()) {   /* (SSBU_SEQ's @module:<name>) */
+        char mark[SEQ_TEXT];
+        snprintf(mark, sizeof mark, "module:%s", mod->name);
+        input_seq_mark(mark);
+    }
     if (mod->init != mod->base) rt_call(c, mod->init);
     skyline_module_loaded(mod->name, mod->base);
     return mod->base;
@@ -1073,6 +1106,7 @@ static void print_status(void) {
     fiber_counts(&fiber_slots, &fibers_finalized, &fibers_made);
     fprintf(stderr, "[status] fibers: %llu started, %u host fibers (%u finalized, kept for the next ones)\n",
             (unsigned long long)fibers_made, fiber_slots, fibers_finalized);
+    kernel_map_status();
     kernel_dump_threads();
     fflush(stderr);
 }
@@ -1252,6 +1286,8 @@ int main(int argc, char **argv) {
     rt_data_dir = dir;
     kernel_init();
     load(dir);
+    movie_test_start();
+    test_fight_start();
 #ifndef _WIN32
     rt_window_init();   /* (SDL wants its window and events on the main thread, which then runs them) */
 #endif

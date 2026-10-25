@@ -8,7 +8,8 @@ Usage: bash install-windowsmash.sh [--game <dir>] [--keys <dir>] [--firmware <di
   1. update     the newest WindowSmash from GitHub: a git checkout of main is pulled; a ZIP
                 download gets the files of the newer commit (tools/source_version.txt says which
                 commit it is), then this installer starts again as the new version
-  2. this PC    x86-64 with AVX2, the memory, the free space
+  2. this PC    x86-64 with SSE4.2 (x86-64-v2; with AVX2 the game is built for AVX2, without it for
+                older processors, expected to be slower: tools/isa.py), the memory, the free space
   3. packages   from the distribution, through sudo (apt, dnf, pacman or zypper): clang, lld and
                 llvm, bison and flex, SDL2, libopus and libvpx, Vulkan, zenity, Python's venv; and
                 the headers the build needs, put back where a package is installed without them
@@ -44,6 +45,8 @@ import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
+sys.path.insert(0, os.path.join(ROOT, "tools"))   # (isa.py: what the game is compiled for)
+import isa  # noqa: E402
 REPO_OWNER, REPO_NAME, BRANCH = "Jaiden56YT", "WindowSmash", "main"
 REPO_API = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}"
 SOURCE_VERSION = os.path.join("tools", "source_version.txt")   # "<commit> <date>": GitHub's ZIP fills it in
@@ -221,16 +224,15 @@ def libstdcxx_package(gcc_versions, has_headers):
 
 
 def cpu_info(text):
-    """(processor name, has AVX2 or None) from /proc/cpuinfo."""
-    name, flags = None, None
-    for line in text.splitlines():
-        key, _, value = line.partition(":")
-        key = key.strip()
-        if key == "model name" and name is None:
-            name = " ".join(value.split())
-        elif key == "flags" and flags is None:
-            flags = value.split()
-    return name or "unknown processor", (None if flags is None else "avx2" in flags)
+    """(processor name, the build it runs: avx2, x86-64-v2, None below that, "" unknown, what it lacks
+    of the next one up) from /proc/cpuinfo (tools/isa.py)."""
+    name = next((" ".join(v.split()) for k, _, v in (l.partition(":") for l in text.splitlines()) if k.strip() == "model name"),
+                None) or "unknown processor"
+    features = isa.cpuinfo_features(text)
+    if features is None:
+        return name, "", []
+    best = isa.best(features)
+    return name, best, [] if best == "avx2" else isa.missing("avx2" if best else "x86-64-v2", features)
 
 
 def mem_total_gb(text):
@@ -550,6 +552,17 @@ def read_text(path):
         return ""
 
 
+def config_file(name, root=None):
+    """Where the game reads a settings file (runtime/config.h): config/ once the game has made it
+    (config/version.ini), else the folder itself; online_server.txt is config/'s only once there is
+    one there."""
+    root = root or ROOT
+    inside = os.path.join(root, "config", name)
+    if os.path.isfile(os.path.join(root, "config", "version.ini")) and (name != "online_server.txt" or os.path.isfile(inside)):
+        return inside
+    return os.path.join(root, name)
+
+
 def folder_gb(path):
     total = 0
     for root, _dirs, files in os.walk(path):
@@ -570,11 +583,19 @@ def step_check_pc():
     info(f"{fields.get('PRETTY_NAME', 'Linux')}, kernel {platform.release()}, {platform.machine()}")
     if platform.machine() not in ("x86_64", "AMD64"):
         raise Stop(f"WindowSmash needs an x86-64 (64-bit Intel or AMD) PC; this one is {platform.machine()}.")
-    name, avx2 = cpu_info(read_text("/proc/cpuinfo"))
-    if avx2 is False:
-        raise Stop(f"The processor ({name}) has no AVX2, which the game needs: WindowSmash cannot run on it. (In a "
-                   "virtual machine, the host's processor must have it and pass it through.)")
-    info(f"{name} - has AVX2" if avx2 else f"{name} - whether it has AVX2 is unknown; the game only starts if it does")
+    name, best, lacks = cpu_info(read_text("/proc/cpuinfo"))
+    if best is None:
+        raise Stop(f"The processor ({name}) lacks {', '.join(lacks)}, which the game needs at the least (x86-64-v2: Intel "
+                   "processors since 2008, AMD since 2011): WindowSmash cannot run on it. (In a virtual machine, the host's "
+                   "processor must have them and pass them through.)")
+    if best == "avx2":
+        info(f"{name} - has AVX2")
+    elif best:
+        info(f"{name} - lacks {', '.join(lacks)}: the game is built for older processors (x86-64-v2), expected to be slower. "
+             "(In a virtual machine, the host's processor may have AVX2 and not pass it through.)")
+    else:
+        info(f"{name} - its extensions are unknown: the game is built for older processors (x86-64-v2), expected to be "
+             "slower (with AVX2: docs/LINUX.md, SSBU_ISA)")
     ram = mem_total_gb(read_text("/proc/meminfo"))
     if ram is not None and ram < MIN_RAM_GB:
         raise Stop(f"This PC has {ram:.1f} GB of RAM; WindowSmash needs at least 8 GB (16 GB is comfortable).")
@@ -936,7 +957,7 @@ def step_files(a):
     if not (a.game or a.keys or a.firmware) and not a.dry_run and os.path.isfile(venv_python()) and files_ready():
         info("already read from your game files (dump/): not asking for them again. To build from other game files, "
              "run: bash install-windowsmash.sh --game <folder>")
-        name_file = os.path.join(ROOT, "online_name.txt")
+        name_file = config_file("online_name.txt")
         name = a.online_name or read_text(name_file).strip()
         if name and name != read_text(name_file).strip():
             with open(name_file, "w", encoding="utf-8", newline="\n") as f:
@@ -951,7 +972,7 @@ def step_files(a):
     interactive = sys.stdin.isatty() and not a.yes
     if interactive:
         info("Press Enter to keep the folder in [brackets], or type another.")
-    name_file = os.path.join(ROOT, "online_name.txt")
+    name_file = config_file("online_name.txt")
     default_name = a.online_name or read_text(name_file).strip() or f"Player{int.from_bytes(os.urandom(2), 'big') % 9000 + 1000}"
     if a.dry_run:
         for key in ("game", "keys", "firmware"):

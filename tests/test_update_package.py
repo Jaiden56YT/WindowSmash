@@ -56,7 +56,7 @@ class BuildPassesTheChoiceTests(unittest.TestCase):
         self.calls = []
         build = runpy.run_path(str(ROOT / 'tools/build_game.py'), run_name='build_game_package')['write_romfs_cfg']
         self.g = build.__globals__   # (the module's own globals: run_path returns a copy)
-        self.g.update(MODULES=str(self.modules), log=lambda msg='': None,
+        self.g.update(ROOT=str(top / 'port'), MODULES=str(self.modules), log=lambda msg='': None,   # (as test_build_game.py)
                       run=lambda args, failure: self.calls.append([str(a) for a in args]))
         self.write_romfs_cfg = build
 

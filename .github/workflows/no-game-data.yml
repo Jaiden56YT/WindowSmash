@@ -1,0 +1,25 @@
+# CONTRIBUTING.md, rule 1: nothing derived from the game goes into the repository. Fails on Switch game files
+# (.nca .nsp .nsz .xci .nso .nro .arc), key files and any file over 10 MB, anywhere in the history being merged
+# (.github/scripts/check_no_game_data.py says exactly what it looks for).
+name: No game data
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # (every commit, not only the last tree)
+
+      - name: No game files, key files or files over 10 MB
+        run: python3 .github/scripts/check_no_game_data.py

@@ -286,7 +286,10 @@ the game's C (`tools/recomp.py all --generate-only`) and compiles and links it w
   `<tree>/build-mac/WindowSmash.app` (the program is `Contents/MacOS/ssbu`). It compiles again a
   file whose source changed, a game object whose C is not the file it was compiled from
   (`obj/game_sources.tsv`), and everything
-  when the compile flags change; `--replace` starts the game's objects over. Beside the app are
+  when the compile flags change; `--replace` starts the game's objects over. A file the compiler
+  crashes on, or that runs past its time limit, is compiled again another way, kept that way until
+  its C changes, and listed in `build-mac/ladder_report.txt`
+  ([the compile ladder](TECHNICAL.md#the-compile-ladder)). Beside the app are
   `obj/` (the objects), `gen/` (the files the build makes), `codecs/` (libopus and libvpx;
   `tools/codec_libs.py --out <dir>` builds them alone) and `ssbu.syms`, which names the program's
   functions for the profiler (<kbd>F6</kbd>) and the hitch log. `tools/build_game.py --check` checks

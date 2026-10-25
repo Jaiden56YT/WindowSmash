@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include "host.h"
+#include "config.h"
 #include "display.h"
 #include "gpu_menu.h"
 #include "gpu_overlay.h"
@@ -117,16 +118,16 @@ static const char *const NET_MODES[4] = {"public lobby", "private lobby (a code)
 
 static void net_load(void) {
     char line[256] = "", host[128] = "", code[40] = "";
-    settings_line_read("online_server.txt", line, sizeof line);
+    settings_line_read(config_path(CONFIG_ONLINE_SERVER), line, sizeof line);
     sscanf(line, "%127s %39s", host, code);
     memset(&net, 0, sizeof net);
     snprintf(net.code, sizeof net.code, "%s", code);
     if (!host[0] || !_stricmp(host, "off")) net.mode = NET_OFFLINE;
     else if (!_stricmp(host, PUBLIC_LOBBY)) net.mode = code[0] ? NET_PRIVATE : NET_PUBLIC;
     else { net.mode = NET_CUSTOM; snprintf(net.custom, sizeof net.custom, "%s", host); }
-    settings_line_read("online_name.txt", net.name, sizeof net.name);
+    settings_line_read(config_path(CONFIG_ONLINE_NAME), net.name, sizeof net.name);
     char direct[16] = "";
-    net.direct = !(settings_line_read("online_direct.txt", direct, sizeof direct) && !_strnicmp(direct, "off", 3));
+    net.direct = !(settings_line_read(config_path(CONFIG_ONLINE_DIRECT), direct, sizeof direct) && !_strnicmp(direct, "off", 3));
 }
 
 static void net_save_server(void) {
@@ -138,7 +139,7 @@ static void net_save_server(void) {
         snprintf(line, sizeof line, "%s %s", PUBLIC_LOBBY, net.code);
     }
     else snprintf(line, sizeof line, "%s%s%s", net.custom[0] ? net.custom : "127.0.0.1:39420", net.code[0] ? " " : "", net.code);
-    settings_line_write("online_server.txt", line);
+    settings_line_write(config_path(CONFIG_ONLINE_SERVER), line);
 }
 
 static void load_version(void) {
@@ -386,7 +387,7 @@ static void finish_edit(void) {
     size_t n = strlen(s);
     while (n && s[n - 1] == ' ') s[--n] = 0;
     if (editing == R_NET_NAME) {
-        if (*s) { snprintf(net.name, sizeof net.name, "%.32s", s); settings_line_write("online_name.txt", net.name); changed(W_RESTART); }
+        if (*s) { snprintf(net.name, sizeof net.name, "%.32s", s); settings_line_write(config_path(CONFIG_ONLINE_NAME), net.name); changed(W_RESTART); }
     } else if (!strchr(s, ' ')) {
         if (editing == R_NET_CODE) snprintf(net.code, sizeof net.code, "%s", s);
         else if (editing == R_NET_SERVER && *s) snprintf(net.custom, sizeof net.custom, "%s", s);
@@ -514,7 +515,7 @@ static void change(const Row *row, int dir) {
         break;
     case R_NET_DIRECT:
         net.direct = !net.direct;
-        settings_line_write("online_direct.txt", net.direct ? "on" : "off");
+        settings_line_write(config_path(CONFIG_ONLINE_DIRECT), net.direct ? "on" : "off");
         break;
     default:
         return;

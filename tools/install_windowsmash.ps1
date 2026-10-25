@@ -12,8 +12,13 @@ Steps, each skipped when it is already done, so running it again carries on wher
                removed, and online_server.txt keeps a lobby code or address you set. A git checkout
                of main with no changes of its own is fast-forwarded with git pull. Anything else
                (another branch, a commit GitHub does not have, no internet) is left as it is.
-  2. check     64-bit Windows 10 or 11, a processor with AVX2, the installed RAM, the free space
-               on this drive (about 60 GB for the build). A failed check stops with a plain message.
+  2. check     64-bit Windows 10 or 11, a processor with SSE4.2 (x86-64-v2; with AVX2 the game
+               is built for AVX2, without it for older processors, expected to be slower: tools\
+               isa.py; when Windows cannot be asked, the processor's name: SSBU_ISA=avx2 is set for
+               the build when it says AVX2, unless SSBU_ISA chose for the last build, which build\
+               isa.txt keeps, and a family without SSE4.2 stops it), the installed RAM, the free
+               space on this drive (about 60 GB for the build). A failed check stops with a plain
+               message.
   3. python    a Python 3.10 or newer with the packages (deps\python, then python on the PATH, then
                the py launcher); otherwise python.org's embeddable Python 3.14 into deps\python, with
                pip and requirements.txt. Every later Python call uses the one found.
@@ -200,6 +205,19 @@ function Merge-OnlineServer {
     return $Local
 }
 
+function Get-ConfigPath {
+    <# Where the game reads a settings file (runtime/config.h): config\ once the game has made it
+       (config\version.ini), else the port's folder; online_server.txt is config\'s only once there
+       is one there. (tools\launcher.ps1 has the same.) #>
+    param([string]$Root, [string]$Name)
+    $inFolder = Join-Path (Join-Path $Root 'config') $Name
+    if (-not (Test-Path -LiteralPath (Join-Path (Join-Path $Root 'config') 'version.ini') -PathType Leaf) -or
+        ($Name -eq 'online_server.txt' -and -not (Test-Path -LiteralPath $inFolder -PathType Leaf))) {
+        return Join-Path $Root $Name
+    }
+    return $inFolder
+}
+
 function Join-CommandLine {
     <# One Windows command line of these arguments (Start-Process takes a string: Windows PowerShell
        does not quote the elements of an array), quoted by CommandLineToArgvW's rules. #>
@@ -346,6 +364,52 @@ function Test-Avx2ByName {
     $m = [regex]::Match($Name, '\bi[3579]-(\d{4,5})')
     if ($m.Success) { return ([int]$m.Groups[1].Value -ge 4000) }
     if ($Name -match 'Core\(TM\)2|Core\(TM\)\s+i[3579]\s+\d{3}\b|Phenom|Athlon\s+(64|II|X[24])\b|Atom|A[468]-\d{4}|A10-\d{4}') { return $false }
+    return $null
+}
+
+function Test-Sse42ByName {
+    <# Whether a processor has SSE4.2 (x86-64-v2, what the game needs at the least), from its name, when
+       Windows cannot be asked (before 20H1): $false for the families known to lack it, else $null. Each
+       pattern is a family no later processor shares a name with (a wrong $false stops the installer):
+         Intel  Core 2, and the Pentium Dual-Core, Pentium Dual, Pentium 4 and D of its time; its Celerons
+                (E1xxx, E3xxx, T1xxx, T3xxx, and 2xx to 6xx and 9xx: not 8xx, Sandy Bridge's, nor 7xx,
+                where Penryn's and Sandy Bridge's meet) and Xeons (3000 to 3300, 5100 to 5400: not 5500
+                and up, Nehalem's); the Atoms before Silvermont (N, D and Z with three digits or 2 and
+                three, 230, 330)
+         AMD    Phenom; Athlon 64 and II, and the other K8 and K10 Athlons (X2 Dual Core, Dual Core,
+                LE-1xxx, 7x50 Dual-Core); Turion; the K8 and K10 Semprons (NNNN+, LE-1xxx, 1xx, X2 1xx:
+                not Jaguar's, four digits and APU); Bobcat (C-xx, E-xxx, E1-1xxx, E2-1xxx); Llano
+                (A4, A6 and A8-3xxx, E2-3200: not Jaguar's E2-3000 and E1-2xxx)
+       (-match: not case-sensitive.) #>
+    param([string]$Name)
+    $families = @(
+        'Core\(TM\)2', 'Pentium\(R\)\s+(Dual(-Core)?|4|D)\s+CPU\b',
+        'Celeron\(R\)\s+(Dual-Core\s+|M\s+)?CPU\s+([ET][13]\d{3}|[2-69]\d{2})\b', 'Xeon\(R\)\s+CPU\s+[EXL]?(3[0-3]|5[1-4])\d{2}\b',
+        'Atom\(TM\)\s+CPU\s+([NDZ]2?\d{3}|[23]30)\b',
+        'Phenom', 'Athlon(\(tm\))?\s+(64|II)\b',
+        'Athlon\(tm\)\s+((X2\s+)?Dual[-\s]Core\s+(Processor|QL-)|Processor\s+LE-1\d{3}\b|7[4-8]50\s+Dual-Core)',
+        'Turion', 'Sempron\(tm\)\s+(Processor\s+(LE-1\d{3}\b|\d{4}\+)|X2\s+1\d{2}\b|1\d{2}\s+Processor)',
+        '\bAMD\s+[CE]-\d{2,3}\b', '\bE[12]-1\d{3}\b', '\bA[468]-3\d{3}', '\bE2-3200\b')
+    foreach ($family in $families) {
+        if ($Name -match $family) { return $false }
+    }
+    return $null
+}
+
+function Get-BuildIsa {
+    <# What a build folder (build\) says it was built for (tools\isa.py): @{ Target; Told }, Told when
+       SSBU_ISA chose it, which the build keeps (isa.txt: the target, then 'told' or 'chosen'). Without an
+       isa.txt, a folder an older version linked ssbu.exe in is avx2's, chosen (every older version built
+       for avx2; isa.py keeps it when the processor cannot be asked); else $null. #>
+    param([string]$Folder)
+    $file = Join-Path $Folder 'isa.txt'
+    if (Test-Path -LiteralPath $file -PathType Leaf) {
+        $lines = @(Get-Content -LiteralPath $file -ErrorAction SilentlyContinue)
+        if ($lines.Count -ge 1 -and @('avx2', 'x86-64-v2') -ccontains ([string]$lines[0]).Trim()) {
+            return @{ Target = ([string]$lines[0]).Trim(); Told = ($lines.Count -ge 2 -and [string]$lines[1] -ceq 'told') }
+        }
+    }
+    if (Test-Path -LiteralPath (Join-Path $Folder 'ssbu.exe') -PathType Leaf) { return @{ Target = 'avx2'; Told = $false } }
     return $null
 }
 
@@ -667,12 +731,38 @@ function Step-CheckPc {
 
     $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
     $name = ($cpu.Name -replace '\s+', ' ').Trim()
+    $sse42 = $null
     $avx2 = $null
-    if ($build -ge 19041) { $avx2 = Test-CpuFeature 40 }   # Windows 10 version 2004 and later can be asked about AVX2 (feature 40)
-    if ($null -eq $avx2) { $avx2 = Test-Avx2ByName $name }
-    if ($avx2 -eq $true) { Write-Info "$name - has AVX2" }
-    elseif ($avx2 -eq $false) { throw "The processor ($name) has no AVX2, which the game needs: WindowSmash cannot run on it." }
-    else { Write-Warn "$name - whether it has AVX2 is unknown; the game will only start if it does (the setup guide's step 1 says which do)" }
+    if ($build -ge 19041) {   # Windows 10 version 2004 and later can be asked about SSE4.2 and AVX2 (features 38 and 40)
+        $sse42 = Test-CpuFeature 38
+        $avx2 = Test-CpuFeature 40
+    }
+    if ($null -eq $sse42) { $sse42 = Test-Sse42ByName $name }
+    if ($sse42 -eq $false) {
+        throw "The processor ($name) has no SSE4.2, which the game needs at the least (x86-64-v2: Intel processors since 2008, AMD since 2011): WindowSmash cannot run on it."
+    }
+    $byName = $null -eq $avx2
+    if ($byName) { $avx2 = Test-Avx2ByName $name }
+    # What the build chooses (tools\isa.py) when SSBU_ISA is not set: what SSBU_ISA chose for the last build (build\isa.txt
+    # says 'told') on a processor with AVX2 or one it cannot ask; else by Windows' answer. Where Windows cannot be asked
+    # (before build 19041), nor can the build: avx2 when the name says AVX2 (the build is told so, and build\isa.txt keeps
+    # it), else what the last build was for (an older version's: avx2), else x86-64-v2.
+    $last = $null
+    if (-not $env:SSBU_ISA) { $last = Get-BuildIsa (Join-Path $Root 'build') }
+    $has = if ($avx2 -eq $true) { 'has AVX2' } elseif ($avx2 -eq $false) { 'has no AVX2' } else { 'whether it has AVX2 is unknown' }
+    if ($last -and $last.Told -and ($byName -or $avx2 -eq $true)) {
+        Write-Info "$name - $($has): the game stays built for $($last.Target), as SSBU_ISA chose for the last build (build\isa.txt; SSBU_ISA=auto chooses by the processor)"
+    } elseif ($avx2 -eq $true) {
+        Write-Info "$name - has AVX2"
+        if ($byName -and -not $env:SSBU_ISA) {
+            $env:SSBU_ISA = 'avx2'
+            Write-Info 'the game is built for AVX2 (SSBU_ISA=avx2): Windows cannot be asked, the name says'
+        }
+    } elseif ($byName -and $last) {
+        $other = if ($last.Target -eq 'avx2') { 'if the game then says the processor lacks AVX2, build it with SSBU_ISA=x86-64-v2' } else { 'SSBU_ISA=avx2 builds for AVX2' }
+        Write-Info "$name - $($has): the game stays built for $($last.Target), as it was (Windows cannot be asked; $($other): docs\BUILDING.md)"
+    } elseif ($avx2 -eq $false) { Write-Info "$name - has no AVX2: the game is built for older processors (x86-64-v2), expected to be slower" }
+    else { Write-Warn "$name - whether it has AVX2 is unknown: the game is built for older processors (x86-64-v2), expected to be slower (with AVX2: docs\BUILDING.md, SSBU_ISA)" }
 
     $ramGb = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
     if ($ramGb -lt $MinRamGb) { throw "This PC has $ramGb GB of RAM; WindowSmash needs at least $MinRamGb GB (16 GB is comfortable)." }
@@ -1235,7 +1325,7 @@ function Step-GameFiles {
     foreach ($k in @('Game', 'Keys', 'Firmware')) {
         if ($detected[$k]) { Write-Info "$($k.ToLower()): $($detected[$k])" } else { Write-Info "$($k.ToLower()): not found on this PC (to be chosen)" }
     }
-    $nameFile = Join-Path $Root 'online_name.txt'
+    $nameFile = Get-ConfigPath $Root 'online_name.txt'
     $default = $OnlineName
     if (-not $default -and (Test-Path -LiteralPath $nameFile)) { $default = ([IO.File]::ReadAllText($nameFile)).Trim() }
     if (-not $default) { $default = 'Player' + (Get-Random -Minimum 1000 -Maximum 9999) }

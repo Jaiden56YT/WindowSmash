@@ -42,8 +42,9 @@ the game files made is cleared first (reset_game_files); the save and the settin
   8. fighters  the fighter modules in data.arc into dump/nro (tools/arc.py nro, which skips the
                ones there already)
   9. build     build/ssbu.exe (tools/recomp.py all), unless it is newer than everything it is
-               made from; --jobs defaults to what the installed RAM allows: 4 under 16 GB, 8 with
-               16 GB, 16 with 32 GB or more
+               made from and compiled for today's instruction set (tools/isa.py: avx2, or
+               x86-64-v2 on a processor without AVX2; step 1 says which); --jobs defaults to what
+               the installed RAM allows: 4 under 16 GB, 8 with 16 GB, 16 with 32 GB or more
 
 On Linux (what install-windowsmash.sh runs), step 1 checks clang, lld, bison and flex, the parts
 tools/linux/toolchain.py names, and a test link with SDL2, libopus and libvpx; step 9 builds
@@ -244,6 +245,8 @@ def check_tools(fetch=True):
         raise Failed(f"this is Python {sys.version.split()[0]}: WindowSmash needs Python 3.10 or newer "
                      + ("(Install WindowSmash.command makes deps/venv with one: docs/MACOS.md)." if MACOS else "(setup guide step 3)."))
     log(f"  Python {sys.version.split()[0]}: {sys.executable}")
+    if not MACOS:
+        log("  instruction set: {}: {}".format(*instruction_set()))
     if LINUX:
         check_linux_tools()
         return None
@@ -258,6 +261,21 @@ def check_tools(fetch=True):
         raise Failed(problem)
     log(f"  {problem.splitlines()[0]}")
     return CompilerDownload.ask(broken=bool(cc.WINSYSROOT))
+
+
+def instruction_set():
+    """(target, why): what the game is compiled for on Windows and Linux (tools/isa.py), or Failed for
+    an SSBU_ISA that names none, or for a processor below x86-64-v2 unless SSBU_ISA chose."""
+    import isa
+    try:
+        target, told, why = isa.target(os.path.dirname(EXE))
+    except SystemExit as e:
+        raise Failed(str(e))
+    features = isa.cpu_features()
+    if not told and features is not None and isa.best(features) is None:
+        raise Failed(f"this PC's processor lacks {', '.join(isa.missing('x86-64-v2', features))}, which WindowSmash needs "
+                     "(at the least SSE4.2 and POPCNT: x86-64-v2, Intel processors since 2008 and AMD since 2011).")
+    return target, why
 
 
 def windows_compiler_problem(cc):
@@ -894,9 +912,14 @@ def build_is_current():
     """build/ssbu.exe is newer than the runtime, the tools and the modules it is built from, and
     has SDL3.dll beside it if SDL3 is there to build with (on Linux: build-linux/ssbu, also newer
     than the Linux runtime and tools; on macOS: build-mac/WindowSmash.app's program, also newer
-    than the platform layers it is made with and the macOS tools, with SDL3.framework in the app)."""
+    than the platform layers it is made with and the macOS tools, with SDL3.framework in the app). Not
+    on Windows and Linux when it was compiled for another instruction set than today's (tools/isa.py)."""
     if not os.path.isfile(EXE):
         return False
+    if not MACOS:
+        import isa
+        if isa.built_for(os.path.dirname(EXE)) != isa.target(os.path.dirname(EXE))[0]:
+            return False
     if MACOS and not os.path.isfile(os.path.join(os.path.dirname(os.path.dirname(EXE)), "Frameworks", "SDL3.framework", "SDL3")):
         return False
     if not LINUX and not MACOS:
@@ -1089,6 +1112,8 @@ def build(a):
     else:
         if in_use(EXE):
             raise Failed(f"The game is running from {exe}: close it, then run this again.")
+        if not MACOS:
+            log("  for {}: {}".format(*instruction_set()))
         jobs = a.jobs
         if not jobs:
             gb = installed_ram_gb()
@@ -1102,7 +1127,8 @@ def build(a):
             import cc
             if not cc.SDL3_DLL:
                 log("  (no SDL3 in deps\\SDL3: Xbox controllers and the keyboard only - setup guide's SDL3 step)")
-            log("  the first build takes from 30 minutes to a few hours, later ones minutes; if it stops, run this again to carry on")
+            log("  the first build takes from 30 minutes to a few hours, later ones minutes unless the compiler, its flags or "
+                "runtime/recomp.h changed; if it stops, run this again to carry on")
             run([sys.executable, os.path.join("tools", "recomp.py"), "all", os.path.join("dump", "exefs"),
                  "--out", "build", "--jobs", str(jobs)],
                 "The build failed (see above). If the PC ran out of memory, build with fewer jobs at a time: open "
@@ -1119,14 +1145,19 @@ def build_linux_program(jobs):
     """build-linux/ssbu: the game's C generated into build/, then compiled and linked for Linux."""
     retry = (f"If the PC ran out of memory, build with fewer jobs at a time: bash install-windowsmash.sh --jobs "
              f"{max(1, jobs // 2)}")
-    log("  the first build takes one to a few hours, later ones minutes; if it stops, run this again to carry on")
+    log("  the first build takes one to a few hours, later ones minutes unless the compiler, its flags or "
+        "runtime/recomp.h changed; if it stops, run this again to carry on")
     log("  the game's code, as C:")
     run([sys.executable, os.path.join("tools", "recomp.py"), "all", os.path.join("dump", "exefs"), "--out", "build",
          "--jobs", str(jobs), "--generate-only"],
         "The game's code could not be turned into C (see above). " + retry)
     tc = linux_toolchain()
-    if not os.path.isfile(os.path.join(tc.VKD3D_BUILD, "linux", "libvkd3d-shader.a")):
-        log("  the shader compiler (vkd3d-shader), once:")
+    import isa
+    vkd3d = os.path.join(tc.VKD3D_BUILD, "linux")
+    # (built again for another instruction set; and without a record, as an older version built it: with its
+    # flags, isa.LEGACY_CLANG, which are no target's today)
+    if not os.path.isfile(os.path.join(vkd3d, "libvkd3d-shader.a")) or (isa.recorded(vkd3d) or (None,))[0] != tc.ISA:
+        log(f"  the shader compiler (vkd3d-shader), once (for {tc.ISA}):")
         run([sys.executable, os.path.join("tools", "linux", "build_vkd3d.py"), "linux"],
             "vkd3d-shader could not be built (see above).")
     log("  compiling it for Linux:")
@@ -1148,7 +1179,8 @@ def build_mac_program(jobs):
         subprocess.Popen(["caffeinate", "-i", "-w", str(os.getpid())], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError:
         pass
-    log("  the first build takes one to a few hours, later ones minutes; if it stops, run this again to carry on")
+    log("  the first build takes one to a few hours, later ones minutes unless the compiler, its flags or "
+        "runtime/recomp.h changed; if it stops, run this again to carry on")
     log("  the game's code, as C:")
     run([sys.executable, os.path.join("tools", "recomp.py"), "all", os.path.join("dump", "exefs"), "--out", "build",
          "--jobs", str(jobs), "--generate-only"],
