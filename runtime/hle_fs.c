@@ -591,21 +591,41 @@ HLE(_ZN2nn2fs13OpenDirectoryEPNS0_15DirectoryHandleEPKci) {   /* (handle*, path,
             listing_add(&h, flat, strlen(flat), DIR_ENTRY, 0);
         }
     } else {
-        char path[1024];
-        host_path(path, sizeof path, m, rest);
-        strcat(path, "\\*");
-        WIN32_FIND_DATAA fd;
-        HANDLE fh = FindFirstFileA(path, &fd);
-        if (fh == INVALID_HANDLE_VALUE) { c->x[0] = R_PATH_NOT_FOUND; return; }
-        do {
-            int dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-            if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
-            if (!dir && !strcmp(m->name, "sd") && hidden_from_arcropolis(rest, fd.cFileName)) continue;
-            if (mode & (dir ? LIST_DIRS : LIST_FILES))
-                listing_add(&h, fd.cFileName, strlen(fd.cFileName), dir ? DIR_ENTRY : FILE_ENTRY,
-                            (u64)fd.nFileSizeHigh << 32 | fd.nFileSizeLow);
-        } while (FindNextFileA(fh, &fd));
-        FindClose(fh);
+        /* (mods: is every turned-on mod's files as one tree, as ARCropolis makes it: a folder lists
+         * what all of them have there - the CSK Collection scans mods:/sound/bank/narration and
+         * mods:/database for each mod's announcer calls and characters - a later mod's entry over
+         * an earlier one's) */
+        int is_mods = !strcmp(m->name, "mods"), found = 0;
+        if (is_mods) load_mods_list();
+        for (int i = 0; i < (is_mods ? mods_count : 1); i++) {
+            char path[4400];
+            if (is_mods) snprintf(path, sizeof path, "%s/../../mods/%s/%s", rt_data_dir, mods_list[i], rest + strspn(rest, "/"));
+            else host_path(path, sizeof path, m, rest);
+            for (char *q = path; *q; q++) if (*q == '/') *q = '\\';
+            strcat(path, "\\*");
+            WIN32_FIND_DATAA fd;
+            HANDLE fh = FindFirstFileA(path, &fd);
+            if (fh == INVALID_HANDLE_VALUE) continue;
+            found = 1;
+            do {
+                int dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+                if (!dir && !strcmp(m->name, "sd") && hidden_from_arcropolis(rest, fd.cFileName)) continue;
+                if (!(mode & (dir ? LIST_DIRS : LIST_FILES))) continue;
+                u64 size = (u64)fd.nFileSizeHigh << 32 | fd.nFileSizeLow;
+                i64 k = 0;
+                while (is_mods && k < h.count && _stricmp(h.names[k], fd.cFileName)) k++;
+                if (is_mods && k < h.count) { h.types[k] = dir ? DIR_ENTRY : FILE_ENTRY; h.sizes[k] = size; }
+                else listing_add(&h, fd.cFileName, strlen(fd.cFileName), dir ? DIR_ENTRY : FILE_ENTRY, size);
+            } while (FindNextFileA(fh, &fd));
+            FindClose(fh);
+        }
+        if (!found) {
+            for (i64 k = 0; k < h.count; k++) free(h.names[k]);
+            free(h.names); free(h.types); free(h.sizes);
+            c->x[0] = R_PATH_NOT_FOUND;
+            return;
+        }
     }
     u64 v = new_handle(h);
     if (!v) { c->x[0] = R_TOO_MANY_HANDLES; return; }
@@ -673,6 +693,8 @@ static void file_time_stamp(Cpu *c) {   /* (FileTimeStamp *, path): {created, ac
 }
 static void fsa_register(Cpu *c) {   /* (name, unique_ptr<IFileSystem>&&): a plugin's own file system - not served here */
     fprintf(stderr, "[fs] a plugin registered a file system \"%s\": not served (the runtime's own mounts stay)\n", P(char, c->x[0]));
+    void skyline_mods_mounted(void);   /* (hle_skyline.c: ARCropolis' mods: is up, its callbacks next) */
+    if (!strcmp(P(char, c->x[0]), "mods")) skyline_mods_mounted();
     c->x[0] = 0;
 }
 void fs_plugin_shims(void) {

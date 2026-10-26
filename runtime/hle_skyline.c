@@ -167,6 +167,47 @@ static void debug_at(Cpu *c, u64 at) {
     }
 }
 
+/* ---- the game waits for ARCropolis' "mods mounted" callbacks ---------------------------- */
+/* ARCropolis queues ModFilesystemMounted as it mounts mods: (its initial_loading hook) and a
+ * thread of its own runs the plugins' callbacks for it up to 20 ms later (api/event.rs,
+ * event_loop: a round, then a 20 ms sleep), the game not waiting. Plugins add their characters to
+ * the CSK Collection there; on the console the game reaches its character list long after, but a
+ * fast boot here could get there first, and the late ones' characters were left off the select
+ * screen - which ones depending on the PC. So from the mount on (hle_fs.c), the game's next module
+ * load or CSK Collection hook waits until that thread has started two sleeps (one round picking
+ * the event up and running the callbacks between them), 10 s at most. */
+static volatile int mods_gate;   /* 1: mounted, callbacks pending; 2: done */
+static volatile long arc_sleeps;
+void skyline_mods_mounted(void) {
+    if (mods_gate) return;
+    arc_sleeps = 0;
+    __atomic_store_n(&mods_gate, 1, __ATOMIC_RELEASE);
+}
+/* (for testing: SSBU_ARC_EVENT_DELAY=<ms> makes ARCropolis' thread that much slower to go round
+ * after the mount - the late callbacks of a slow PC - and SSBU_MODS_GATE=0 leaves the wait out) */
+static int env_int(const char *name, int otherwise) { const char *v = getenv(name); return v && *v ? atoi(v) : otherwise; }
+void skyline_note_sleep(void) {   /* (kernel.c: SleepThread) */
+    if (__atomic_load_n(&mods_gate, __ATOMIC_ACQUIRE) == 1 && rt_stack_in("arcropolis")) {
+        static int delay = -1;
+        if (delay < 0) delay = env_int("SSBU_ARC_EVENT_DELAY", 0);
+        if (delay && __atomic_load_n(&arc_sleeps, __ATOMIC_ACQUIRE) < 2) Sleep((DWORD)delay);
+        __atomic_add_fetch(&arc_sleeps, 1, __ATOMIC_ACQ_REL);
+    }
+}
+void skyline_mods_gate(const char *what) {
+    static int on = -1;
+    if (on < 0) on = env_int("SSBU_MODS_GATE", 1);
+    if (!on || __atomic_load_n(&mods_gate, __ATOMIC_ACQUIRE) != 1 || rt_stack_in("arcropolis")) return;
+    int ms = 0;
+    while (__atomic_load_n(&mods_gate, __ATOMIC_ACQUIRE) == 1 && __atomic_load_n(&arc_sleeps, __ATOMIC_ACQUIRE) < 2 && ms < 10000) {
+        Sleep(2);
+        ms += 2;
+    }
+    if (__atomic_exchange_n(&mods_gate, 2, __ATOMIC_ACQ_REL) == 1)
+        LOG("%s waited %d ms for ARCropolis' mods-mounted callbacks%s", what, ms,
+            arc_sleeps < 2 ? " (gave up: they may still be running)" : "");
+}
+
 /* (generated code, at an inline point) skyline-rs' InlineCtx: x0-x30, sp, then q0-q31. */
 void rt_inline_hook(Cpu *c, u64 at) {
     debug_at(c, at);
@@ -174,6 +215,11 @@ void rt_inline_hook(Cpu *c, u64 at) {
     for (u32 i = 0; i < n; i++) {
         if (inline_hooks[i].at != at) continue;
         if (inline_hooks[i].native) { inline_hooks[i].native(c, inline_hooks[i].arg); continue; }
+        if (__atomic_load_n(&mods_gate, __ATOMIC_ACQUIRE) == 1) {
+            char who[96];
+            if (!strncmp(rt_describe(inline_hooks[i].callback, who, sizeof who), "the_csk_collection+", 19))
+                skyline_mods_gate("a CSK Collection hook");
+        }
         Cpu saved = *c;
         u64 ctx = (c->sp - 0x400) & ~15ull;
         for (int r = 0; r < 31; r++) *P(u64, ctx + 8ull * r) = c->x[r];
