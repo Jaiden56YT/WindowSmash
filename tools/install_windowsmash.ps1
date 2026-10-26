@@ -124,7 +124,7 @@ $ZstdCheck = 'import sys, importlib.util as u; sys.exit(0 if u.find_spec(''zstan
 # where updates come from: this repository's branch
 $RepoOwner = 'Jaiden56YT'
 $RepoName = 'WindowSmash'
-$UpdateBranch = 'opensmash'
+$UpdateBranch = 'main'
 $RepoApi = "https://api.github.com/repos/$RepoOwner/$RepoName"
 $SourceVersionFile = 'tools\source_version.txt'   # "<commit> <date>": GitHub's ZIP download fills it in
 

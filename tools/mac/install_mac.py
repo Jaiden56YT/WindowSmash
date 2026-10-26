@@ -54,7 +54,7 @@ import install_linux as il  # noqa: E402  (the update, download and folder helpe
 
 # Updates come from this branch (of tools/linux/install_linux.py's repository).
 # SSBU_UPDATE_BRANCH names another, for testing one.
-BRANCH = os.environ.get("SSBU_UPDATE_BRANCH") or "opensmash"
+BRANCH = os.environ.get("SSBU_UPDATE_BRANCH") or "main"
 DEPS = il.DEPS
 VENV = il.VENV
 DOWNLOADS = os.path.join(DEPS, "downloads")
