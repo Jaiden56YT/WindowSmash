@@ -1824,7 +1824,9 @@ def missing_shares(tree, on, log):
     """With the real ARCropolis: files a mod's config.json lists as a new costume's (new-dir-files) that
     the mod doesn't ship and nothing shares to it (Sans' c120 lists Palutena's wings and portal and
     ships neither: their weapons' set-up then reads a model that never loaded, a crash). Each is shared
-    from the game's own file of the base costume (c00), in mods/.characters/config.json."""
+    from the game's own file of the base costume (c00), in mods/.characters/config.json. Not textures:
+    one a mod leaves out is drawn with the game's default texture, as on the console - c00's in its place
+    turned Sans' skull (his face material: Palutena's alp_palutena_002_col, her green hair) green."""
     shares, found = {}, 0
     image = RomfsImage(tree.vanilla_cfg)
     try:
@@ -1843,7 +1845,7 @@ def missing_shares(tree, on, log):
                           for v in (cfg.get(key) or {}).values() for t in (v if isinstance(v, list) else [v])}
                 for files in cfg["new-dir-files"].values():
                     for path in files if isinstance(files, list) else []:
-                        if path in shared or os.path.isfile(os.path.join(root, *path.split("/"))):
+                        if path in shared or path.lower().endswith(".nutexb") or os.path.isfile(os.path.join(root, *path.split("/"))):
                             continue
                         m = SLOT.search(path)
                         source = path[:m.start()] + "/c00/" + path[m.end():] if m and int(m.group(1)) >= 8 else None
