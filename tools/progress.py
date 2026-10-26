@@ -7,6 +7,14 @@ import sys
 import threading
 import time
 
+# Started without a console - by the Mods app's pythonw.exe on Windows - a program has no
+# sys.stdout or sys.stderr (None), and the first progress line stopped the game's build: what it
+# prints goes nowhere instead.
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
 
 def time_left(seconds):
     """A time left, as a person says it."""
