@@ -949,7 +949,11 @@ static LONG compile_msl(struct Compiler *me, const char *msl, int stage, const c
                         id<MTLFunction> *fn_out, id<MTLComputePipelineState> *cs_out) {
     me->step = STEP_COMPILE;
     NSError *err = nil;
+    static int log_ms = -1;   /* debug: SSBU_LOG_COMPILE_MS, each library's compile time (Metal's own cache: ~1 ms) */
+    if (log_ms < 0) log_ms = getenv("SSBU_LOG_COMPILE_MS") != NULL;
+    u64 t0 = log_ms ? GetTickCount64() : 0;
     id<MTLLibrary> lib = [dev newLibraryWithSource:@(msl) options:msl_options() error:&err];
+    if (log_ms) fprintf(stderr, "[gfx] compile %s: %llu ms\n", name, GetTickCount64() - t0);
     if (!lib) {
         fprintf(stderr, "[gfx] shader %s failed to compile:\n%.2000s\n", name, first_error(err));
         return 2;
@@ -1272,7 +1276,14 @@ static DWORD WINAPI prewarm_main(void *unused) {
     prewarm_table = table;
     Job *head = NULL, *tail = NULL;
     u32 queued = 0;
-    for (u32 i = 0; i < n && table; i++) {
+    /* Only the newest ones (SSBU_SHADER_PREWARM_MAX, 4000): Metal's own cache holds about 1.2 GB of
+     * libraries, about as much as every program the game has ever used (13,000 after the bench had
+     * played each character). Compiling all of them at each start pushed out of it the ones a match
+     * was about to ask for, and each of those then took ~1 s to compile again: the stage and the
+     * fighters were skipped for a minute or more (the "GO!" with nothing behind it). */
+    const char *max_env = getenv("SSBU_SHADER_PREWARM_MAX");
+    u32 limit = max_env ? (u32)strtoul(max_env, NULL, 10) : 4000;
+    for (u32 i = 0; i < n && table && queued < limit; i++) {
         unsigned version, vs_outputs;
         char stage_name[4];
         unsigned long long hash, tables;
@@ -3427,6 +3438,10 @@ again:;
     int compiling = !vs_e || state_of(&vs_e->state) == 0 || (ps_g && (!ps_e || state_of(&ps_e->state) == 0)) || (pa_e && state_of(&pa_e->state) == 0);
     if ((!vs || (ps_g && !ps)) && topo && compiling && shader_wait_until(regs, &wait_until)) { Sleep(1); goto again; }
     if (!vs || (ps_g && !ps) || !topo) {
+        if (draw_logging)   /* (F4: what a skipped draw waits for) */
+            fprintf(stderr, "[draw] SKIP shader: vs %s (state %ld) ps %s (state %ld)%s topo %u\n", vs_e ? vs_e->name : "-",
+                    vs_e ? (long)state_of(&vs_e->state) : -1L, ps_e ? ps_e->name : "-", ps_e ? (long)state_of(&ps_e->state) : -1L,
+                    pa_e ? " (alpha-tested variant)" : "", topo);
         gfx_stat_skipped++;
         if (!topo) gfx_skip_topology++; else gfx_skip_shader++;
         leave();
@@ -3600,6 +3615,7 @@ again:;
     Pipeline *pipe = get_pipeline(&pk);
     while (!pipe && shader_wait_until(regs, &wait_until)) { Sleep(1); pipe = get_pipeline(&pk); }
     if (!pipe) {   /* (made by the compiler threads: skipped until then) */
+        if (draw_logging) fprintf(stderr, "[draw] SKIP pipeline: %s + %s\n", vs->name, ps ? ps->name : "-");
         gfx_stat_skipped++;
         gfx_skip_shader++;
         leave();
@@ -4659,6 +4675,19 @@ void gfx_present(u64 guest, u32 width, u32 height) {
         snprintf(screen, sizeof screen, "%s/screen.bmp", f4_dir);
         save_bmp(final_tex, NULL, screen);
         fprintf(stderr, "[draw] -- frame start (F4)\n");
+        {   /* (what the shader compilers are at: the draws skipped for shaders wait on them) */
+            u32 len[3] = {0};
+            AcquireSRWLockExclusive(&jobs_lock);
+            for (int q = 0; q < 3; q++) for (Job *j = job_queue[q].head; j; j = j->next_job) len[q]++;
+            ReleaseSRWLockExclusive(&jobs_lock);
+            fprintf(stderr, "[draw] compilers: %ld pending; queued %u loads, %u compiles, %u prewarm; prewarm %ld/%ld done\n", (long)compiles_pending,
+                    len[0], len[1], len[2], (long)prewarm_done, (long)prewarm_total);
+            for (u32 i = 0; i < ncompilers; i++) {
+                Job *j = compilers[i].job;
+                fprintf(stderr, "[draw]   compiler %u: step %ld, %s for %llu ms\n", i, (long)compilers[i].step,
+                        !j ? "-" : j->kind == JOB_PIPELINE ? "a pipeline" : ((Shader *)j)->name, GetTickCount64() - compilers[i].since_ms);
+            }
+        }
     }
     if (keys & 16) {   /* F5: depth buffers sampled as textures, or not */
         if (depth_sampling < 0) depth_sampling = !getenv("SSBU_NO_DEPTH_SAMPLING");
