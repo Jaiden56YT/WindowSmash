@@ -54,7 +54,6 @@ u64 rt_symbol(const char *name);                       /* guest address of an ex
 const char *rt_symbol_at(u64 addr, const char *prefix);   /* a name exported at that address starting so, or NULL */
 const char *rt_describe(u64 guest_addr, char *buf, size_t n);   /* "module+0x1234" */
 void rt_backtrace(void);
-int rt_stack_in(const char *module);   /* the calling thread is in that module's code */
 void rt_backtrace_thread(HANDLE thread, int max_frames);   /* another thread's guest frames */
 void kernel_dump_threads(void);
 _Noreturn void rt_fatal(const char *fmt, ...);         /* message + guest backtrace, then exit */
