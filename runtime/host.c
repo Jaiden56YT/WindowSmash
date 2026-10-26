@@ -277,6 +277,20 @@ static void print_frames(void **frames, int n, int from_pc) {
     }
 }
 
+/* Whether the calling thread is inside a module's code: one of its guest frames is `module`'s
+ * (hle_skyline.c's mods gate: ARCropolis' own thread, by "arcropolis"). */
+int rt_stack_in(const char *module) {
+    void *frames[48];
+    char name[96];
+    size_t len = strlen(module);
+    int n = CaptureStackBackTrace(1, 48, frames, NULL);
+    for (int i = 0; i < n; i++) {
+        u64 guest = guest_of((u64)frames[i]);
+        if (guest && !strncmp(rt_describe(guest, name, sizeof name), module, len) && name[len] == '+') return 1;
+    }
+    return 0;
+}
+
 void rt_backtrace(void) {
     void *frames[62];
     print_frames(frames, CaptureStackBackTrace(1, 62, frames, NULL), 0);

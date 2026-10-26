@@ -54,7 +54,9 @@ HLE(_ZN2nn2ro10LoadModuleEPNS0_6ModuleEPKvPvmi) {
     if (!rtld_load_module(c)) ro_load_module_native(c);
 }
 
+void skyline_mods_gate(const char *what);   /* (hle_skyline.c) */
 void ro_load_module_native(Cpu *c) {
+    skyline_mods_gate("a module load");
     u64 module = c->x[0], image = c->x[1], buffer = c->x[2];
     if (*P(u32, image + 0x10) != 0x304F524E) { c->x[0] = RESULT(22, 4); return; }   /* not "NRO0" */
     u64 base = rt_load_nro(c, image);
