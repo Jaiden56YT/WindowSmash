@@ -332,7 +332,9 @@ def stale_hooks(tree):
         if patches.get(mod, "") != (open(rec, encoding="utf-8").read() if os.path.exists(rec) else ""):
             out.append(mod)
             continue
-        if any(f"f_{base + o:x}_orig" not in text for o in offs):
+        rec = os.path.join(os.path.dirname(table), "hooks_skipped.txt")   # (recomp.py: targets no build makes hookable)
+        skipped = {int(o, 16) for o in open(rec, encoding="utf-8").read().split()} if os.path.exists(rec) else set()
+        if any(f"f_{base + o:x}_orig" not in text for o in offs if o not in skipped):
             out.append(mod)
             continue
         if inline.get(mod):   # (the C files: is each point's rt_inline_hook in one?)

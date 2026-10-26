@@ -763,6 +763,8 @@ def _build(mod, found, funcs, path, outdir, jobs, per_file):
     sizes = dict(funcs)
     hooks = [off for off in hookable(name) if off in sizes and off not in forward]
     forward.update({off: ("hook", None) for off in hooks})
+    write_if_changed(os.path.join(outdir, "hooks_skipped.txt"),   # (no function there, or one replaced natively: no
+                     "".join(f"{off:x}\n" for off in hookable(name) if off not in hooks))   # build makes it hookable; stale_hooks)
     from eh import landing_pads
     pads = landing_pads(mod)
     if os.environ.get("SSBU_FLAGS_XFER") == "1":   # (a plugin: see adr_landing_pads)
