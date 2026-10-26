@@ -95,16 +95,18 @@ ANY_SP = 1 << 62   # (a landing pad's flag: it takes any sp - recomp.adr_landing
 FLAGS_IN = "{ u32 f_ = c->fpsr; nf = f_ >> 31; zf = f_ >> 30 & 1; cf = f_ >> 29 & 1; vf = f_ >> 28 & 1; }"
 FLAGS_OUT = "c->fpsr = (c->fpsr & 0x0FFFFFFFu) | nf << 31 | zf << 30 | cf << 29 | vf << 28;"
 
-_RE_CALL = re.compile(r"(X\(30\) = 0x[0-9A-F]+ull; )(f_[0-9a-f]+\(c\);)")
+# (a call or tail call to a hookable function loads its slot: Lifter.callee)
+_RE_CALL = re.compile(r"(X\(30\) = 0x[0-9A-F]+ull; )((?:f_[0-9a-f]+|RT_HOOK\(rt_hook_[0-9a-f]+\))\(c\);)")
 _RE_SVC = re.compile(r"(rt_svc\(c, 0x[0-9a-f]+\);)")
 _RE_PAD = re.compile(r"if \(lp_\) (goto L_[0-9a-f]+;)")
-_RE_TAIL = re.compile(r"TAIL\((f_[0-9a-f]+)\)")
+_RE_TAIL = re.compile(r"TAIL\((f_[0-9a-f]+|RT_HOOK\(rt_hook_[0-9a-f]+\))\)")
 _RE_TRAP = re.compile(r"(rt_trap\(c, [^;]*;)")
 
 
-def mark_syncs(s):
-    """The places regcache.apply brings the context up to date, marked in a statement."""
-    s = _RE_CALL.sub(r"\1@S@ \2 @R@", s)
+def mark_syncs(s, exact=False):
+    """The places regcache.apply brings the context up to date, marked in a statement. exact: the
+    statement's direct call is to an exact-callee (tools/hooks.txt)."""
+    s = _RE_CALL.sub(r"\1@E@@S@ \2 @R@" if exact else r"\1@S@ \2 @R@", s)
     s = s.replace("rt_lookup(t_)(c);", "@S@ rt_lookup(t_)(c); @R@")
     s = _RE_SVC.sub(r"@S@ \1 @R@", s)
     s = s.replace("if (!RT_SETJMP(*rt_setjmp(c))) X(0) = 0;", "@F@ if (!RT_SETJMP(*rt_setjmp(c))) X(0) = 0; else { @A@ }")
@@ -117,6 +119,45 @@ def mark_syncs(s):
     return s
 
 
+def jump_target(w, pc):
+    """Where the b, b.cond, cbz/cbnz or tbz/tbnz at pc goes (the branches Lifter.goto lifts), or None."""
+    if w >> 26 == 5:
+        return pc + (sx(w & 0x3FFFFFF, 26) << 2)
+    if (w >> 25) & 0x3F == 0x1A or (w >> 24 == 0x54 and not (w >> 4) & 1):
+        return pc + (sx((w >> 5) & 0x7FFFF, 19) << 2)
+    if (w >> 25) & 0x3F == 0x1B:
+        return pc + (sx((w >> 5) & 0x3FFF, 14) << 2)
+    return None
+
+
+def tail_calls(image, funcs, entries):
+    """{function: the functions it jumps to without a call}, as the Lifter lifts them (TAIL): a
+    b, b.cond, cbz/cbnz or tbz/tbnz to another function's entry (goto), and a last instruction
+    that runs on into the next function (lift_function). funcs: [(offset, size)]; entries: the
+    Lifter's. Not a br through a register: where that goes is known only when it runs."""
+    out = {}
+    for a, size in funcs:
+        end = a + size
+        code = bytes(image[a:end])
+        for m in re.finditer(rb"[\x14-\x17\x34-\x37\x54\xb4-\xb7]", code[3::4]):   # those branches' top bytes
+            t = jump_target(struct.unpack_from("<I", code, m.start() * 4)[0], a + m.start() * 4)
+            if t is not None and not a <= t < end and t in entries:
+                out.setdefault(a, set()).add(t)
+        if size < 4 or end not in entries:
+            continue
+        last = (size & ~3) - 4
+        w = struct.unpack_from("<I", code, last)[0]
+        if w >> 26 == 5 or (w >> 24 == 0x54 and not (w >> 4) & 1 and w & 15 >= 14):   # b, b.al
+            t = jump_target(w, a + last)
+            ends = a <= t < end or t in entries   # (into another function's body: a trap, which runs on)
+        else:   # ret, br, an exception-generating instruction, udf
+            ends = (w & 0xFFFFFC1F in (0xD65F0000, 0xD61F0000) or (w >> 24 == 0xD4 and w & 0xFFE0001F != 0xD4000001)
+                    or w >> 16 == 0 or w == 0xE7FFDEFE)
+        if not ends:
+            out.setdefault(a, set()).add(end)
+    return out
+
+
 def fp_imm8(imm8):
     b6 = (imm8 >> 6) & 1
     exp = ((b6 ^ 1) << 10) | ((0xFF if b6 else 0) << 2) | ((imm8 >> 4) & 3)
@@ -125,7 +166,8 @@ def fp_imm8(imm8):
 
 
 class Lifter(SimdMixin):
-    def __init__(self, image, entries, base=BASE, forward=None, setjmp=None, pads=None, patches=None, inline=None):
+    def __init__(self, image, entries, base=BASE, forward=None, setjmp=None, pads=None, patches=None, inline=None,
+                 exact_callees=None, exact_callers=None, hookable=None):
         self.img = image
         self.inline = inline or set()   # offsets of Skyline inline hooks: rt_inline_hook before the instruction (recomp.hookable)
         self.base = base         # guest address the module is loaded at
@@ -133,6 +175,13 @@ class Lifter(SimdMixin):
         self.setjmp = setjmp or set()  # offsets of setjmp (or its import stub): calls become host setjmp
         self.pads = pads or {}   # function offset -> [(call range start, end, landing pad)] (eh.py)
         self.patches = patches or {}   # offset -> [words] lifted in place of the instruction (recomp.CODE_PATCHES)
+        # tools/hooks.txt (recomp.resolve_hooks): offsets of functions whose direct callers bring
+        # every register to the context before the call and read every one back after it, and
+        # of functions that do so at each of their calls
+        self.exact_callees = exact_callees or set()
+        self.exact_callers = exact_callers or set()
+        # and of the hookable functions: each is reached only through its slot (runtime/hookable.h)
+        self.hookable = hookable or set()
         self.entries = entries   # set of known function entry offsets
         self.tables = 0          # jump tables resolved
         self.indirect_tail = 0   # br sites treated as indirect tail calls
@@ -145,10 +194,10 @@ class Lifter(SimdMixin):
     # ------------------------------------------------------------------ function
     def lift_function(self, start, size):
         self.fstart, self.fend = start, start + size
-        self.leaders, self.callees = set(), set()
+        self.leaders, self.callees, self.exact_sites = set(), set(), set()
         native = self.forward.get(start)
         if isinstance(native, str):   # replaced by a native implementation: every caller reaches it
-            return (f"GuestFn {native};\nvoid f_{self.base + start:x}(Cpu *c) {{ {native}(c); }}",
+            return (f"GuestFn {native};\n{self.entry(start)} {{ {native}(c); }}",
                     Counter(), set())
         name, wrapper = f"f_{self.base + start:x}", ""
         if isinstance(native, tuple) and native[0] == "hook":
@@ -156,8 +205,16 @@ class Lifter(SimdMixin):
             # dispatch table, as indirect ones do, which has this function's body - or the hook
             wrapper = f"void {name}(Cpu *c) {{ rt_lookup(0x{self.base + start:X}ull)(c); }}\n"
             name += "_orig"
+        elif isinstance(native, tuple) and native[2:3] == ("export",):   # wrapped by name: handed this original
+            chain, inner = (native[1], *native[3:]), f"{name}_orig"   # (several names: each handed the next)
+            wrapper = "".join(f"void {w}(Cpu *c, GuestFn *orig);\n" for w in chain) + f"GuestFn {inner};\n"
+            for i in range(len(chain) - 1, 0, -1):
+                wrapper += f"static void {name}_w{i}(Cpu *c) {{ {chain[i]}(c, {inner}); }}\n"
+                inner = f"{name}_w{i}"
+            wrapper += f"{self.entry(start)} {{ {chain[0]}(c, {inner}); }}\n"
+            name += "_orig"
         elif isinstance(native, tuple):   # wrapped natively: callers reach the wrapper, which may call this one
-            wrapper = f"GuestFn {native[1]};\nvoid {name}(Cpu *c) {{ {native[1]}(c); }}\n"
+            wrapper = f"GuestFn {native[1]};\n{self.entry(start)} {{ {native[1]}(c); }}\n"
             name += "_orig"
         self.words = struct.unpack_from(f"<{size // 4}I", self.img, start)
         here = {off: ws for off, ws in self.patches.items() if start <= off < self.fend}
@@ -183,16 +240,21 @@ class Lifter(SimdMixin):
             body.append((pc, stmt, falls))
         if falls and self.fend in self.entries:   # assembly routines may run on into the next one
             self.callees.add(self.fend)
-            body.append((None, (f"{{ {FLAGS_OUT} TAIL(f_{self.base + self.fend:x}) }}" if self.xfer else f"TAIL(f_{self.base + self.fend:x})"), False))
+            tail = f"TAIL({self.callee(self.fend)})"
+            body.append((None, f"{{ {FLAGS_OUT} {tail} }}" if self.xfer else tail, False))
         elif falls:
             body.append((None, f'rt_trap(c, {const(self.base + self.fend)}, "fell off the end of a function");', False))
         decl = []
         if REGCACHE and len(self.words) <= REGCACHE_MAX and not any(start <= o < self.fend for o in self.inline):
-            decl, cached = regcache.apply([(pc, mark_syncs(s), f) for pc, s, f in body], self.leaders,
-                                          bool(self.sites) or any("rt_setjmp" in s for _pc, s, _f in body))
+            decl, cached = regcache.apply([(pc, mark_syncs(s, pc in self.exact_sites), f) for pc, s, f in body], self.leaders,
+                                          bool(self.sites) or any("rt_setjmp" in s for _pc, s, _f in body),
+                                          start in self.exact_callers)
             body = [(pc, s, f) for (pc, s), (_pc, _s, f) in zip(cached, body)]
-        out = [f"void {name}(Cpu *c) {{",
-               "    u32 nf = 0, zf = 0, cf = 0, vf = 0; u64 ex_a = 0, ex_v = 0;"] + ["    " + d for d in decl]
+        head = f"void {name}(Cpu *c)" if wrapper else self.entry(start)
+        pair = any("ex_w" in s for _pc, s, _f in body)   # (ldxp / stxp of X registers: the second doubleword)
+        out = [f"{head} {{",
+               f"    u32 nf = 0, zf = 0, cf = 0, vf = 0; u64 ex_a = 0, ex_v = 0{', ex_w = 0' if pair else ''};"]
+        out += ["    " + d for d in decl]
         if self.xfer:
             out.append("    " + FLAGS_IN)
         for pc, stmt, _falls in body:
@@ -202,6 +264,22 @@ class Lifter(SimdMixin):
         out.append("}")
         return wrapper + "\n".join(out), reasons, self.callees
 
+    def entry(self, start):
+        """The head of the definition that guest code reaching start runs: f_<address>, or for a
+        hookable function its slot, f_<address> calling through it, and the function itself,
+        f_<address>_body, out of line (runtime/hookable.h)."""
+        if start not in self.hookable:
+            return f"void f_{self.base + start:x}(Cpu *c)"
+        a = f"{self.base + start:x}"
+        return (f"GuestFn f_{a}_body;\nRtHook rt_hook_{a} = {{{const(self.base + start)}, f_{a}_body, f_{a}_body}};\n"
+                f"RT_HOOK_ADD(rt_hook_{a})\nvoid f_{a}(Cpu *c) {{ TAIL(RT_HOOK(rt_hook_{a})) }}\n"
+                f"RT_HOOKABLE void f_{a}_body(Cpu *c)")
+
+    def callee(self, target):
+        """What a call or tail call to the function at target calls: f_<address>, or what a
+        hookable function's slot holds."""
+        return f"RT_HOOK(rt_hook_{self.base + target:x})" if target in self.hookable else f"f_{self.base + target:x}"
+
     def goto(self, target):
         if self.fstart <= target < self.fend:
             self.leaders.add(target)
@@ -210,7 +288,8 @@ class Lifter(SimdMixin):
             return f"{{ GuestFn *t_ = rt_lookup({const(self.base + target)}); __attribute__((musttail)) return t_(c); }}"
         if target in self.entries:
             self.callees.add(target)
-            return (f"{{ {FLAGS_OUT} TAIL(f_{self.base + target:x}) }}" if self.xfer else f"TAIL(f_{self.base + target:x})")
+            tail = f"TAIL({self.callee(target)})"
+            return f"{{ {FLAGS_OUT} {tail} }}" if self.xfer else tail
         raise Unsupported("branch into another function's body")
 
     def call(self, target, ret):
@@ -223,9 +302,14 @@ class Lifter(SimdMixin):
         if not 0 <= target < len(self.img):   # (a plugin's patch: a call into its own code)
             return self.landing(ret, f"X(30) = {const(self.base + ret)}; rt_lookup({const(self.base + target)})(c);")
         self.callees.add(target)
+        if target in self.exact_callees:
+            # (recomp.resolve_hooks adds the functions that reach one by a tail call and the
+            # import stubs other modules call it through. A call through rt_lookup cannot be
+            # known to reach one: its caller is listed as an exact-caller instead.)
+            self.exact_sites.add(ret - 4)
         if self.xfer:
-            return self.landing(ret, f"{FLAGS_OUT} X(30) = {const(self.base +ret)}; f_{self.base + target:x}(c); {FLAGS_IN}")
-        return self.landing(ret, f"X(30) = {const(self.base +ret)}; f_{self.base + target:x}(c);")
+            return self.landing(ret, f"{FLAGS_OUT} X(30) = {const(self.base +ret)}; {self.callee(target)}(c); {FLAGS_IN}")
+        return self.landing(ret, f"X(30) = {const(self.base +ret)}; {self.callee(target)}(c);")
 
     def call_indirect(self, rn, ret):
         if self.xfer:
@@ -413,13 +497,12 @@ class Lifter(SimdMixin):
                 return wr(rd, sf, f"({t})(({s}){a} >> ({b} & {size - 1}))")
             if opcode == 11:
                 return wr(rd, sf, f"ror{n}({a}, (u32){b})")
-            if 0x10 <= opcode <= 0x17 and (opcode & 3 == 3) == bool(sf):   # crc32{b,h,w,x}, crc32c{b,h,w,x}
-                bits = 8 << (opcode & 3)
-                poly = "0x82F63B78u" if opcode & 4 else "0xEDB88320u"   # (reflected; no inversions)
-                data = f"(u64){b}" if bits == 64 else f"(u64)(u{bits}){b}"
-                return wr(rd, 0, f"({{ u32 crc_ = (u32){reg(rn, 0)}; u64 d_ = {data}; "
-                                 f"for (int i_ = 0; i_ < {bits}; i_++) crc_ = (crc_ >> 1) ^ ({poly} & (0u - ((crc_ ^ (u32)(d_ >> i_)) & 1u))); crc_; }})")
-            raise Unsupported("dp2: crc32 / other")
+            if opcode >> 3 == 2:   # crc32 / crc32c: Wd = crc of Wn and Wm, or of Wn and Xm (sf only with x)
+                sz = opcode & 3
+                if sf != (sz == 3):
+                    raise Unsupported("reserved crc32")
+                return wr(rd, 0, f"rt_crc32{'c' if opcode & 4 else ''}{'bhwx'[sz]}({reg(rn, 0)}, {reg(rm, sf)})")
+            raise Unsupported("dp2: other")
         raise Unsupported("reserved dp-reg")
 
     # ------------------------------------------------------------------ branches / system
@@ -845,7 +928,9 @@ class Lifter(SimdMixin):
         o2, load, o1, rs = (w >> 23) & 1, (w >> 22) & 1, (w >> 21) & 1, (w >> 16) & 31
         bits = 8 << size
         if o1:
-            raise Unsupported("exclusive pair / compare-and-swap")
+            if o2 or size < 2:   # cas, casp: LSE (ARMv8.1), not on the console's CPU
+                raise Unsupported("compare-and-swap (LSE)")
+            return self.exclusive_pair(w, size, base, rt, rs)
         if o2:   # ldar / stlr (and ldlar / stllr): accesses with ordering guarantees (recomp.h lda, sta)
             if load:
                 return wr(rt, 1, f"lda{bits}({base})")
@@ -854,6 +939,29 @@ class Lifter(SimdMixin):
             ld = "lda" if (w >> 15) & 1 else "ld"
             return f"{{ ex_a = {base}; ex_v = {ld}{bits}(ex_a); {wr(rt, 1, 'ex_v')} }}"
         ok = f"({base} == ex_a && cas{bits}(ex_a, ex_v, {reg(rt)}))"
+        return f"{{ u32 ok_ = {ok}; ex_a = 0; {wr(rs, 0, '!ok_')} }}"
+
+    @staticmethod
+    def exclusive_pair(w, size, base, rt, rs):
+        """ldxp / ldaxp / stxp / stlxp, as ldxr / stxr above. Two W registers are one 8-byte
+        exclusive, Rt the low half. Two X registers are one 16-byte location (recomp.h's ld128,
+        lda128, cas128), its second doubleword kept in ex_w. Arm leaves some forms CONSTRAINED
+        UNPREDICTABLE; these get one of the outcomes it allows. A status register that is also
+        Rt, Rt2 or Rn: every operand is read before the status is written, so the original values
+        go to the original address (as stxr here). An ldxp with Rt == Rt2: the register gets the
+        high half, an UNKNOWN value (as ldp here). A misaligned address faults on the console;
+        here it is not checked (the 16-byte atomics fault on it too, the 8-byte ones may not)."""
+        load, rt2, ordered = (w >> 22) & 1, (w >> 10) & 31, (w >> 15) & 1
+        ld = "lda" if ordered else "ld"
+        if size == 2:
+            if load:
+                return f"{{ ex_a = {base}; ex_v = {ld}64(ex_a); {wr(rt, 0, 'ex_v')} {wr(rt2, 0, 'ex_v >> 32')} }}"
+            ok = f"({base} == ex_a && cas64(ex_a, ex_v, (u64){reg(rt2, 0)} << 32 | {reg(rt, 0)}))"
+        else:
+            if load:
+                return (f"{{ ex_a = {base}; u128 p_ = {ld}128(ex_a); ex_v = (u64)p_; ex_w = (u64)(p_ >> 64); "
+                        f"{wr(rt, 1, 'ex_v')} {wr(rt2, 1, 'ex_w')} }}")
+            ok = f"({base} == ex_a && cas128(ex_a, ex_v, ex_w, {reg(rt)}, {reg(rt2)}))"
         return f"{{ u32 ok_ = {ok}; ex_a = 0; {wr(rs, 0, '!ok_')} }}"
 
     # ------------------------------------------------------------------ scalar floating point
@@ -870,7 +978,8 @@ class Lifter(SimdMixin):
                 n = f"-{n}"
             if o1:
                 a = f"-{a}"
-            return f"w{p}(c, {rd}, {'fmaf' if ftype == 0 else 'fma'}({n}, {m}, {a}));"
+            # (a NaN result: Arm's, from the addend and multiplicands as negated: recomp.h's fnan3)
+            return f"w{p}(c, {rd}, fnan3{p}({'fmaf' if ftype == 0 else 'fma'}({n}, {m}, {a}), {a}, {n}, {m}));"
         if w & 0x7F200000 != 0x1E200000:
             if w & 0x7F200000 == 0x1E000000:
                 return self.fp_fixed(w)
@@ -890,7 +999,7 @@ class Lifter(SimdMixin):
             opcode = (w >> 15) & 0x3F
             if opcode == 0:
                 return f"w{p}(c, {rd}, {a});"
-            simple = {1: f"fabs{sfx}({a})", 2: f"-{a}", 3: f"sqrt{sfx}({a})", 8: f"__builtin_roundeven{sfx}({a})",
+            simple = {1: f"fabs{sfx}({a})", 2: f"-{a}", 3: f"fnan1{p}(sqrt{sfx}({a}), {a})", 8: f"__builtin_roundeven{sfx}({a})",
                       9: f"ceil{sfx}({a})", 10: f"floor{sfx}({a})", 11: f"trunc{sfx}({a})",
                       12: f"round{sfx}({a})", 14: f"rint{sfx}({a})", 15: f"nearbyint{sfx}({a})"}
             if opcode in simple:
@@ -921,8 +1030,10 @@ class Lifter(SimdMixin):
         if low & 3 != 2:
             raise Unsupported("reserved fp encoding")
         opcode = (w >> 12) & 15
-        ops = {0: f"{a} * {b}", 1: f"{a} / {b}", 2: f"{a} + {b}", 3: f"{a} - {b}", 4: f"fmax{p}({a}, {b})",
-               5: f"fmin{p}({a}, {b})", 6: f"fmaxnm{p}({a}, {b})", 7: f"fminnm{p}({a}, {b})", 8: f"-({a} * {b})"}
+        nan = f"fnan2{p}({{}}, {a}, {b})"   # (a NaN result: Arm's, from a and b)
+        ops = {0: nan.format(f"{a} * {b}"), 1: nan.format(f"{a} / {b}"), 2: nan.format(f"{a} + {b}"),
+               3: nan.format(f"{a} - {b}"), 4: f"fmax{p}({a}, {b})", 5: f"fmin{p}({a}, {b})", 6: f"fmaxnm{p}({a}, {b})",
+               7: f"fminnm{p}({a}, {b})", 8: "-" + nan.format(f"{a} * {b}")}
         if opcode not in ops:
             raise Unsupported("reserved fp two-source")
         return f"w{p}(c, {rd}, {ops[opcode]});"

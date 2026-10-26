@@ -64,7 +64,7 @@ def validate(pack):
     if not isinstance(pack, dict) or pack.get("format") != FORMAT:
         raise PackError("that isn't a WindowSmash modpack")
     if pack.get("version", 1) > 1:
-        raise PackError("this modpack was made by a newer WindowSmash Mods: update it first")
+        raise PackError("this modpack was made by a newer OpenSmash Ultimate Mods: update it first")
     if not isinstance(pack.get("mods"), list) or not pack["mods"]:
         raise PackError("the modpack has no mods")
     for m in pack["mods"]:

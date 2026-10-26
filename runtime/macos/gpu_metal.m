@@ -24,6 +24,7 @@
  * thread that calls (but the command stream's pending writes, below: kept_flush). */
 #define _CRT_SECURE_NO_WARNINGS
 #include "gpu_metal.h"
+#include "kernel_watch.h"   /* (kernel_write_watch) */
 #include <dirent.h>
 #include <math.h>
 #include <mach/mach.h>
@@ -435,6 +436,9 @@ struct Surface {
     float clear_color[4], clear_depth;
     u32 clear_stencil;
     u64 used;
+    u64 written;                           /* depth surfaces: draws and clears that changed it so far (snap_written: as copied) */
+    id<MTLTexture> snap, snap_srv[2][2];   /* a copy of a depth surface, for the draws that read it while testing against it */
+    u64 snap_written;
 };
 
 static Surface surfaces[2048];
@@ -1736,7 +1740,9 @@ static WatchChunk *watch_chunks[ALIAS_SIZE / (WATCH_CHUNK * 0x1000ull)];
 static u64 watch_clock;   /* stamps given so far */
 
 /* Take the write watch's news for guest pages [lo, hi) (4 KiB aligned, watched): resetting the
- * bits as they are read (under the shim's lock: a write is either reported now or news next time). */
+ * bits as they are read (under the shim's lock: a write is either reported now or news next time).
+ * (Through the kernel, which shares the system's bits with the rollback ring when that is on:
+ * kernel_watch.h.) */
 static void watch_take(u64 lo, u64 hi) {
     static void *pages[65536];   /* (256 MB: the largest range asked about, in one call) */
     void *first;
@@ -1744,10 +1750,10 @@ static void watch_take(u64 lo, u64 hi) {
     ULONG granularity;
     /* (asking is cheap, resetting is not - it protects the host pages again, even where nothing
      * was written: so ask first) */
-    if (GetWriteWatch(0, G2H(lo), hi - lo, &first, &count, &granularity) != 0 || !count) return;
+    if (kernel_write_watch(WATCH_RENDERER, 0, G2H(lo), hi - lo, &first, &count, &granularity) != 0 || !count) return;
     for (u64 at = H2G(first); at < hi;) {
         count = 65536;
-        if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, G2H(at), hi - at, pages, &count, &granularity) != 0 || !count) return;
+        if (kernel_write_watch(WATCH_RENDERER, WRITE_WATCH_FLAG_RESET, G2H(at), hi - at, pages, &count, &granularity) != 0 || !count) return;
         u64 stamp = ++watch_clock;
         for (ULONG_PTR k = 0; k < count; k++) {
             u64 p = (H2G(pages[k]) - ALIAS_BASE) >> 12;
@@ -3002,6 +3008,61 @@ typedef struct StageBinds {
 } StageBinds;
 
 /* Bind a stage's constant buffers and textures. */
+/* A draw that reads the depth buffer it is tested against (soft particles: depth test on, writes
+ * off; the console reads it fine). Metal leaves reading a pass's own attachment undefined (Apple
+ * GPUs keep it in tile memory), so set_resources binds a stand-in of zeros for an attached surface
+ * - the scene "in front" of everything, which faded out the fire of Sephiroth's victory screens
+ * entirely. The draw reads a copy instead, made again only when the surface was written since
+ * (draws writing its depth or stencil, clears). */
+static id<MTLTexture> depth_snapshot(Surface *s, id<MTLTexture> bound) {
+    int o = -1, a = 0;
+    for (int i = 0; i < 2 && o < 0; i++)
+        for (int j = 0; j < 2; j++) if (bound == s->srv[i][j]) { o = i; a = j; break; }
+    if (o < 0 && bound == s->tex) o = 1;   /* (the compared reading of one layer is the texture itself) */
+    if (o < 0 || !s->tex) return bound;
+    if (!s->snap) {
+        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:s->tex.pixelFormat width:s->tex.width
+                                                                                     height:s->tex.height mipmapped:NO];
+        td.storageMode = MTLStorageModePrivate;
+        td.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
+        if (!(s->snap = [dev newTextureWithDescriptor:td])) return bound;
+        s->snap_written = ~0ull;
+    }
+    if (s->snap_written != s->written) {
+        settle(s);   /* (its clears first) */
+        [blits() copyFromTexture:s->tex toTexture:s->snap];
+        s->snap_written = s->written;
+    }
+    if (!s->snap_srv[o][a]) {
+        MTLTextureType type = a ? MTLTextureType2DArray : MTLTextureType2D;
+        if (!o) {
+            MTLTextureSwizzleChannels red = {MTLTextureSwizzleRed, MTLTextureSwizzleZero, MTLTextureSwizzleZero, MTLTextureSwizzleOne};
+            s->snap_srv[o][a] = [s->snap newTextureViewWithPixelFormat:bound.pixelFormat textureType:type levels:NSMakeRange(0, 1)
+                                                                slices:NSMakeRange(0, 1) swizzle:red];
+        } else s->snap_srv[o][a] = a ? [s->snap newTextureViewWithPixelFormat:bound.pixelFormat textureType:type levels:NSMakeRange(0, 1)
+                                                                        slices:NSMakeRange(0, 1)] : s->snap;
+    }
+    return s->snap_srv[o][a] ? s->snap_srv[o][a] : bound;
+}
+
+/* A texture header's swizzle, as it applies to the texture bound. A depth buffer read as a texture is
+ * its depth in red (surface_srv), but the hardware's S8Z24 (format 0x29: red the stencil, an unsigned
+ * integer; green the depth) has its depth in green, which the game's swizzle selects (0xedb: green,
+ * green, green, one): green reads red here, and red (the stencil, which the view does not hold) 0.
+ * The soft-particle fade of Sephiroth's victory flames reads it so (ps_88ca9e0946b2b55c). */
+static u32 depth_swizzle(const u32 *tic, const Surface *rt) {
+    u32 swz = (tic[0] >> 19) & 0xFFF;
+    u32 r_type = (tic[0] >> 7) & 7, g_type = (tic[0] >> 10) & 7;
+    if (!rt || !rt->depth || r_type != 4 || g_type == 4 || g_type == 3) return swz;   /* (4 uint, 3 sint) */
+    u32 out = 0;
+    for (u32 c = 0; c < 4; c++) {
+        u32 sel = (swz >> (3 * c)) & 7;
+        sel = sel == 3 ? 2 : sel == 2 ? 0 : sel;   /* green: the depth, in red; red: the stencil, 0 */
+        out |= sel << (3 * c);
+    }
+    return out;
+}
+
 static void bind_resources(const u32 *regs, const CbBinding cb[STAGES][18], int stage, const Shader *s, DrawParams *params, StageBinds *out) {
     int mstage = stage == SHADER_VERTEX ? STAGE_VERTEX : STAGE_FRAGMENT;
     static u8 data[0x10000];
@@ -3114,7 +3175,7 @@ static void bind_resources(const u32 *regs, const CbBinding cb[STAGES][18], int 
         int shadow = s->info.tex[k].shadow != 0;
         out->tex[k] = get_texture(tic, shader_msl_texture(&s->info.tex[k]), shadow);
         if (k < nsmp) out->smp[k] = get_sampler(tsc, shadow, out->tex[k].integer);
-        params->swz[stage][k] = (tic[0] >> 19) & 0xFFF;
+        params->swz[stage][k] = depth_swizzle(tic, out->tex[k].surface);
         /* Before macOS 26 a sampler has no LOD bias: the TSC's (13 bits, signed, 1/256ths) goes to
          * the shader above the swizzle's 12 bits, for the translator to apply (its swizzle reads
          * only those 12) */
@@ -3591,6 +3652,18 @@ void gfx_draw(const u32 *regs, const CbBinding cb[STAGES][18], int indexed) {
 
     bind_resources(regs, cb, SHADER_VERTEX, vs, &params, vbind);
     if (ps) bind_resources(regs, cb, SHADER_PIXEL, ps, &params, pbind);
+    if (tg.depth) {   /* (depth_snapshot: its depth read while tested against) */
+        if (dk.depth_write || (dk.stencil_on && (dk.write[0] || dk.write[1]))) tg.depth->written++;
+        for (int st = 0; st < 2; st++) {
+            const Shader *sh = st ? ps : vs;
+            StageBinds *sb = st ? pbind : vbind;
+            for (u32 k = 0; sh && k < sh->info.ntex; k++)
+                if (sb->tex[k].surface == tg.depth) {
+                    id<MTLTexture> copy = depth_snapshot(tg.depth, sb->tex[k].tex);
+                    if (copy != sb->tex[k].tex) { sb->tex[k].tex = copy; sb->tex[k].surface = NULL; }   /* (not attached: set_resources binds it, not the stand-in) */
+                }
+        }
+    }
     GBuf *ibuf = NULL;
     u32 ioff = 0;
     MTLIndexType itype = MTLIndexTypeUInt16;
@@ -3789,6 +3862,7 @@ void gfx_clear(const u32 *regs, u32 arg) {
         Surface *s = surface(gpu_va_to_guest(va), regs[0x48A], regs[0x48B], regs[0x3FA], 1);
         if (s) {
             if (attached(s)) end_encoding();
+            s->written++;
             float z = f32_of(regs[0x364]);
             if (arg & 1) { s->clear |= 2; s->clear_depth = z > 0 ? (z < 1 ? z : 1) : 0; }   /* (as Direct3D's: within [0, 1]) */
             if ((arg & 2) && s->stencil) { s->clear |= 4; s->clear_stencil = regs[0x368] & 0xFF; }

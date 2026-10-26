@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Makes the WindowSmash Mods installer: one .zip for Windows and macOS that adds the mod manager
+"""Makes the OpenSmash Ultimate Mods installer: one .zip for Windows and macOS that adds the mod manager
 to a WindowSmash folder - and, with a modpack, that pack's mods too (downloaded from GameBanana as
 it installs, or carried in the zip).
 
 Usage:
   make_installer.py [--tree <port folder>] [--pack <pack name or .wsmodpack>] [--bundle-all] [--out <dir>]
 
-The zip: "Install WindowSmash Mods.command" (macOS) and ".bat" (Windows), which find the
+The zip: "Install OpenSmash Ultimate Mods.command" (macOS) and ".bat" (Windows), which find the
 WindowSmash folder and its Python and run installer/install_mods.py; payload/ (the mod manager's
 files, at their places in a WindowSmash folder); modpack/ (the pack, and the files of its mods
 that can't be downloaded - or, with --bundle-all, of every mod in it); READ ME.txt.
@@ -26,15 +26,17 @@ import mods  # noqa: E402
 import packs  # noqa: E402
 
 # the mod manager's files, from the port's folder
-PAYLOAD = ["tools/mods.py", "tools/prc.py", "tools/msbt.py",
+PAYLOAD = ["tools/mods.py", "tools/prc.py", "tools/msbt.py", "tools/csk.py",
+           "tools/skyline.py", "tools/std_plugins.py", "tools/port_plugin.py", "tools/plugin_eh.py",
+           "tools/ports/the_csk_collection-5.0.6.txt", "tools/modmanager/describe.py",
            "tools/modmanager/server.py", "tools/modmanager/packs.py", "tools/modmanager/arc_mods.py",
            "tools/modmanager/install_mods.py", "tools/modmanager/make_installer.py", "tools/modmanager/code_fixes.py",
            "tools/mac/ModsShell.swift", "tools/mac/build_mods_app.sh",
-           "launchers/WindowSmash Mods.bat", "launchers/WindowSmash Mods.command",
-           "launchers/Uninstall WindowSmash Mods.bat", "launchers/Uninstall WindowSmash Mods.command"]
+           "launchers/OpenSmash Ultimate Mods.bat", "launchers/OpenSmash Ultimate Mods.command",
+           "launchers/Uninstall OpenSmash Ultimate Mods.bat", "launchers/Uninstall OpenSmash Ultimate Mods.command"]
 
 MAC = r'''#!/bin/bash
-# Installs WindowSmash Mods (the mod manager) into your WindowSmash folder, and the modpack this
+# Installs OpenSmash Ultimate Mods (the mod manager) into your WindowSmash folder, and the modpack this
 # installer carries, if it has one. Double-click it (the first time macOS may ask: right-click > Open).
 cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
 here="$PWD"
@@ -56,13 +58,13 @@ if [ -z "$py" ]; then
 fi
 "$py" "$here/installer/install_mods.py" --target "$target"
 status=$?
-[ $status -eq 0 ] && [ -d "$HOME/Applications/WindowSmash Mods.app" ] && open "$HOME/Applications/WindowSmash Mods.app"
+[ $status -eq 0 ] && [ -d "$HOME/Applications/OpenSmash Ultimate Mods.app" ] && open "$HOME/Applications/OpenSmash Ultimate Mods.app"
 read -r -p "Press Return to close." _
 exit $status
 '''
 
 WIN = r'''@echo off
-rem Installs WindowSmash Mods (the mod manager) into your WindowSmash folder, and the modpack this
+rem Installs OpenSmash Ultimate Mods (the mod manager) into your WindowSmash folder, and the modpack this
 rem installer carries, if it has one. Double-click it.
 setlocal
 cd /d "%~dp0"
@@ -82,27 +84,27 @@ pushd "%TARGET%"
 %PY% "%HERE%installer\install_mods.py" --target "%TARGET%"
 set "RESULT=%ERRORLEVEL%"
 popd
-if "%RESULT%"=="0" start "" "%TARGET%\launchers\WindowSmash Mods.bat"
+if "%RESULT%"=="0" start "" "%TARGET%\launchers\OpenSmash Ultimate Mods.bat"
 echo.
 pause
 exit /b %RESULT%
 '''
 
 # the same, the other way: WindowSmash as it was (install_mods.py --uninstall)
-MAC_UNINSTALL = (MAC.replace("# Installs WindowSmash Mods (the mod manager) into your WindowSmash folder, and the modpack this\n"
-                             "# installer carries, if it has one.", "# Removes WindowSmash Mods from your WindowSmash folder and puts the game back as it was.")
+MAC_UNINSTALL = (MAC.replace("# Installs OpenSmash Ultimate Mods (the mod manager) into your WindowSmash folder, and the modpack this\n"
+                             "# installer carries, if it has one.", "# Removes OpenSmash Ultimate Mods from your WindowSmash folder and puts the game back as it was.")
                  .replace('--target "$target"\n', '--target "$target" --uninstall\n')
-                 .replace('[ $status -eq 0 ] && [ -d "$HOME/Applications/WindowSmash Mods.app" ] && open "$HOME/Applications/WindowSmash Mods.app"\n', ""))
-WIN_UNINSTALL = (WIN.replace("rem Installs WindowSmash Mods (the mod manager) into your WindowSmash folder, and the modpack this\n"
-                             "rem installer carries, if it has one.", "rem Removes WindowSmash Mods from your WindowSmash folder and puts the game back as it was.")
+                 .replace('[ $status -eq 0 ] && [ -d "$HOME/Applications/OpenSmash Ultimate Mods.app" ] && open "$HOME/Applications/OpenSmash Ultimate Mods.app"\n', ""))
+WIN_UNINSTALL = (WIN.replace("rem Installs OpenSmash Ultimate Mods (the mod manager) into your WindowSmash folder, and the modpack this\n"
+                             "rem installer carries, if it has one.", "rem Removes OpenSmash Ultimate Mods from your WindowSmash folder and puts the game back as it was.")
                  .replace('--target "%TARGET%"\n', '--target "%TARGET%" --uninstall\n')
-                 .replace('if "%RESULT%"=="0" start "" "%TARGET%\\launchers\\WindowSmash Mods.bat"\n', ""))
+                 .replace('if "%RESULT%"=="0" start "" "%TARGET%\\launchers\\OpenSmash Ultimate Mods.bat"\n', ""))
 assert MAC_UNINSTALL.count("--uninstall") == 1 and WIN_UNINSTALL.count("--uninstall") == 1 and "start" not in WIN_UNINSTALL.split("--uninstall")[1]
 
-README = """WindowSmash Mods {what}
+README = """OpenSmash Ultimate Mods {what}
 ==================
 
-WindowSmash Mods finds Smash Ultimate mods on GameBanana, installs them, turns them on and off,
+OpenSmash Ultimate Mods finds Smash Ultimate mods on GameBanana, installs them, turns them on and off,
 checks that they go together, and shares them as modpacks.{pack}
 
 It also adds the game-code fixes mods with new costume slots (c08 and up) need in Classic Mode,
@@ -110,14 +112,14 @@ Tourney Mode and for Inkling, Terry and Pyra/Mythra, and builds the game again w
 minutes the first time; mods work meanwhile).
 
 To install (WindowSmash must already be installed and set up):
-  Windows: unzip this, then double-click "Install WindowSmash Mods.bat".
-  macOS:   unzip this, then double-click "Install WindowSmash Mods.command"
+  Windows: unzip this, then double-click "Install OpenSmash Ultimate Mods.bat".
+  macOS:   unzip this, then double-click "Install OpenSmash Ultimate Mods.command"
            (if macOS says it can't be opened: right-click it, choose Open, then Open).
 
 It finds your WindowSmash folder (or asks where it is), adds the mod manager to it and opens it.
 Nothing of the game or your save is changed; files it replaces are kept as *.before-modmanager.
 
-To go back to the game as it was: "Uninstall WindowSmash Mods" (here, in WindowSmash's launchers
+To go back to the game as it was: "Uninstall OpenSmash Ultimate Mods" (here, in WindowSmash's launchers
 folder, or the button in the app). It turns the mods off in the game, deletes the modded data and
 removes the mod manager; it asks whether to delete your downloaded mods too.
 """
@@ -145,7 +147,7 @@ def build(tree, pack_ref=None, bundle_all=False, out_dir=None, log=print):
             if not found:
                 raise packs.PackError(f"no saved modpack called {pack_ref}")
             pack = {k: v for k, v in found[0].items() if k not in ("id", "code")}
-    name = "WindowSmash Mods Installer" + (f" - {mods.safe_name(pack['name'])}" if pack else "") + ".zip"
+    name = "OpenSmash Ultimate Mods Installer" + (f" - {mods.safe_name(pack['name'])}" if pack else "") + ".zip"
     out = os.path.join(out_dir or tree.root, name)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     tmp = out + ".partial"
@@ -163,10 +165,10 @@ def build(tree, pack_ref=None, bundle_all=False, out_dir=None, log=print):
                 info.external_attr = 0o100755 << 16
             with open(src, "rb") as f:
                 z.writestr(info, f.read())
-        text("Install WindowSmash Mods.command", MAC, exe=True)
-        text("Install WindowSmash Mods.bat", WIN)
-        text("Uninstall WindowSmash Mods.command", MAC_UNINSTALL, exe=True)
-        text("Uninstall WindowSmash Mods.bat", WIN_UNINSTALL)
+        text("Install OpenSmash Ultimate Mods.command", MAC, exe=True)
+        text("Install OpenSmash Ultimate Mods.bat", WIN)
+        text("Uninstall OpenSmash Ultimate Mods.command", MAC_UNINSTALL, exe=True)
+        text("Uninstall OpenSmash Ultimate Mods.bat", WIN_UNINSTALL)
         what = f"- modpack \"{pack['name']}\"" if pack else ""
         about = ""
         if pack:
@@ -180,6 +182,8 @@ def build(tree, pack_ref=None, bundle_all=False, out_dir=None, log=print):
             file(os.path.join(root, rel), "payload/" + rel)
         ui = os.path.join(HERE, "ui")
         for f in sorted(os.listdir(ui)):
+            if ".before-" in f:   # (an older install's kept copies)
+                continue
             file(os.path.join(ui, f), "payload/tools/modmanager/ui/" + f)
         if pack:
             carried = []

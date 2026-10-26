@@ -136,7 +136,8 @@ def read_xmsbt(data):
     else:
         text = data.decode("utf-8-sig")
     text = re.sub(r"""^\s*<\?xml[^>]*\?>""", "", text)   # (decoded already, whatever it says)
-    root = ET.fromstring(text)
+    # (one root, held: some mods' files have several <xmsbt> one after another - ARCropolis reads them all)
+    root = ET.fromstring("<all>" + text + "</all>")
     out = []
     for e in root.iter("entry"):
         label = e.get("label")

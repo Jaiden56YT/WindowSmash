@@ -48,6 +48,10 @@ def stub_toolchain(runtime=ROOT / 'runtime', sdl3_dir=ROOT / 'deps' / 'SDL3'):
     tc.SDL3_DIR, tc.SDL3_FRAMEWORK = str(sdl3_dir), str(Path(sdl3_dir) / 'SDL3.framework')
     tc.compile_each = lambda jobs, n=16, extra=(): []
     tc.run = lambda cmd: (0, '')
+    tc.wrapped = lambda cmd: (['nice', '-n', '10', *cmd], {})
+    tc.compile_command = lambda src, obj, opt, flags=(), extra=(), header=None: [
+        tc.CLANG, '-c', opt, *tc.CFLAGS, *(tc.CXXFLAGS if src.endswith('.cpp') else []), *extra, *flags,
+        *(['-include', header] if header else []), src, '-o', obj]
     return tc
 
 
@@ -249,6 +253,53 @@ class BuildMacTests(unittest.TestCase):
         self.compile(self.ns['game_jobs']())
         self.assertEqual(self.ns['game_jobs'](), [])
 
+    def test_hook_slots_follow_hookable_h(self):
+        """A file with hook slots includes hookable.h (tools/recomp.py): an object of one older than
+        hookable.h is compiled again; the others, and objects newer than it, are kept."""
+        runtime = self.top / 'runtime'
+        for n in ('recomp.h', 'module.h', 'hookable.h'):
+            write(runtime / n, '#pragma once\n')
+        self.ns['RUNTIME'] = str(runtime)
+        main = self.tree / 'build' / 'main'
+        write(main / 'g0000.c', '#include "recomp.h"\n#include "hookable.h"\nvoid f(void) {}\n')
+        self.compile(self.ns['game_jobs']())   # (objects an hour from now)
+        self.assertEqual(self.ns['game_jobs'](), [])
+        later = time.time() + 7200
+        os.utime(runtime / 'hookable.h', (later, later))
+        again = [os.path.relpath(j[1], self.ns['OBJ']) for j in self.ns['game_jobs']()]
+        self.assertEqual(again, [os.path.join('main', 'g0000.o')])
+
+    def test_hook_slots_looked_for_in_the_head_of_the_c(self):
+        """Once hookable.h has changed, the objects of files without slots stay older than it, so they are
+        asked about at every build: only the head of the C is read for that, not the whole file."""
+        runtime = self.top / 'runtime'
+        for n in ('recomp.h', 'module.h', 'hookable.h'):
+            write(runtime / n, '#pragma once\n')
+        self.ns['RUNTIME'] = str(runtime)
+        write(self.tree / 'build' / 'main' / 'g0000.c', '#include "recomp.h"\n\nvoid f(void) {\n' + '    x = x + 1;\n' * 4000 + '}\n')
+        self.compile(self.ns['game_jobs']())   # (objects an hour from now)
+        later = time.time() + 7200
+        os.utime(runtime / 'hookable.h', (later, later))
+        read, real = [], open
+
+        class Spy(io.BytesIO):
+            def close(self):
+                read.append(self.tell())
+                super().close()
+
+        def spy(path, mode='r', *args, **kwargs):   # (the C opened as bytes: how much of it is read)
+            if 'b' in mode and str(path).endswith('.c'):
+                with real(path, mode) as f:
+                    return Spy(f.read())
+            return real(path, mode, *args, **kwargs)
+        self.ns['open'] = spy
+        try:
+            self.assertEqual(self.ns['game_jobs'](), [])
+        finally:
+            del self.ns['open']
+        self.assertTrue(read)
+        self.assertLessEqual(max(read), 256)
+
     def test_stopped_half_way(self):
         """What a build stopped part of the way through compiled is kept: each object is recorded
         as it is compiled."""
@@ -412,6 +463,23 @@ class BuildMacTests(unittest.TestCase):
         text = (Path(ns['GEN']) / 'overlay_font.h').read_text()
         self.assertEqual(text, 'static const unsigned char overlay_font[27648] = {0};\n')
 
+    def test_link_errors_name_the_missing_symbol(self):
+        """What ld prints for a symbol nothing defines (made-up names): the symbol and what refers to it kept,
+        though their lines say neither "error" nor "undefined"; the rest of the output left out."""
+        out = ('ld: warning: a made-up warning\n'
+               'Undefined symbols for architecture arm64:\n'
+               '  "_rt_made_up", referenced from:\n'
+               '      _rt_caller in hle_made_up.o\n'
+               '  "_rt_made_up_too", referenced from:\n'
+               '      _rt_other in hle_other.o\n'
+               'ld: symbol(s) not found for architecture arm64\n'
+               'clang: error: linker command failed with exit code 1 (use -v to see invocation)\n')
+        self.assertEqual(self.ns['link_errors'](out), [
+            'Undefined symbols for architecture arm64:', '  "_rt_made_up", referenced from:', '      _rt_caller in hle_made_up.o',
+            '  "_rt_made_up_too", referenced from:', '      _rt_other in hle_other.o',
+            'clang: error: linker command failed with exit code 1 (use -v to see invocation)'])
+        self.assertEqual(self.ns['link_errors']('something else\n  went wrong\n'), ['something else', '  went wrong'])
+
 
 @unittest.skipUnless(DARWIN, 'needs Core Text, sips, iconutil and codesign')
 class BuildMacOnMacTests(unittest.TestCase):
@@ -429,7 +497,7 @@ class BuildMacOnMacTests(unittest.TestCase):
         self.ns = load_build_mac(['--port', str(self.tree)], self.tc)
 
     def test_overlay_font(self):
-        """make_overlay_font.m's header: gpu_overlay.c's atlas, in make_overlay_font.py's layout."""
+        """make_overlay_font.m's header: gpu_metal_overlay.m's atlas, in make_overlay_font.py's layout."""
         with contextlib.redirect_stdout(io.StringIO()):
             self.ns['overlay_font']()
         lines = (Path(self.ns['GEN']) / 'overlay_font.h').read_text().splitlines()
@@ -441,7 +509,7 @@ class BuildMacOnMacTests(unittest.TestCase):
         values = [int(v) for row in rows for v in row.rstrip(',').split(',')]
         self.assertEqual(len(values), 27648)
         self.assertTrue(all(0 <= v <= 255 for v in values))
-        overlay = (ROOT / 'runtime' / 'gpu_overlay.c').read_text()
+        overlay = (ROOT / 'runtime' / 'macos' / 'gpu_metal_overlay.m').read_text()   # (its reader on the Mac)
         for name, value in (('CELL_W', 12), ('CELL_H', 24), ('COLS', 16)):
             self.assertIn(f'#define {name} {value}\n', overlay)
 
@@ -620,6 +688,20 @@ class CodecBuildTests(unittest.TestCase):
 
 
 # ---- tools/mac's test programs, built as their first lines say and run ---------------------------
+# The default Metal device as gpu_metal.m's init sees it: its name, and whether it is a Metal 3 GPU (the
+# renderer takes no other). Nothing printed without one.
+METAL_DEVICE = r"""#import <Metal/Metal.h>
+#include <stdio.h>
+int main(void) {
+    @autoreleasepool {
+        id<MTLDevice> d = MTLCreateSystemDefaultDevice();
+        if (d) printf("%s\n%d\n", d.name.UTF8String, (int)[d supportsFamily:MTLGPUFamilyMetal3]);
+    }
+    return 0;
+}
+"""
+
+
 @unittest.skipUnless(DARWIN, 'needs the Command Line Tools, and Metal')
 class TestProgramTests(unittest.TestCase):
     """shimtest.c (the platform layer, and the loader and kernel on a made-up game), msltest.m (the
@@ -633,12 +715,24 @@ class TestProgramTests(unittest.TestCase):
         r = subprocess.run(['clang', *cmd], cwd=ROOT, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
-    def run_program(self, exe, *args, cwd=None, env=None):
-        r = subprocess.run([exe, *args], cwd=cwd, env=env, capture_output=True, text=True, timeout=600)
+    def run_program(self, exe, *args, cwd=None, env=None, timeout=600):
+        try:
+            r = subprocess.run([exe, *args], cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as e:   # (what it wrote before it was stopped - bytes here, text=True or not - says where it was)
+            said = ''.join(s.decode(errors='replace') if isinstance(s, bytes) else s for s in (e.stdout, e.stderr) if s)
+            raise self.failureException(f'{os.path.basename(exe)} still running after {timeout} s; what it wrote:\n{said[-6000:]}') from None
         if 'no Metal device' in r.stderr:
             self.skipTest('no Metal device')
         self.assertEqual(r.returncode, 0, (r.stdout + r.stderr)[-6000:])
         return r.stdout
+
+    def metal_device(self, tmp):
+        """(the default Metal device's name, whether it is a Metal 3 GPU), or None without one."""
+        src, exe = os.path.join(tmp, 'device.m'), os.path.join(tmp, 'device')
+        write(src, METAL_DEVICE)
+        self.build(*self.F, '-fobjc-arc', src, '-framework', 'Metal', '-framework', 'Foundation', '-o', exe)
+        lines = subprocess.run([exe], capture_output=True, text=True, timeout=60).stdout.splitlines()
+        return (lines[0], lines[1] == '1') if len(lines) == 2 else None
 
     def test_shimtest(self):
         with tempfile.TemporaryDirectory(prefix='shimtest ') as tmp:
@@ -648,7 +742,8 @@ class TestProgramTests(unittest.TestCase):
                     'runtime/macos/platform.c', 'runtime/macos/profile.c']
             host, exe = os.path.join(tmp, 'host.o'), os.path.join(tmp, 'shimtest')
             self.build(*f, '-Dmain=rt_host_main', '-c', 'runtime/host.c', '-o', host)
-            self.build(*f, '-DSHIMTEST_HOST', 'tools/mac/shimtest.c', host, 'runtime/kernel.c', 'runtime/linux/upnp.c', *shim, '-o', exe)
+            self.build(*f, '-DSHIMTEST_HOST', 'tools/mac/shimtest.c', host, 'runtime/kernel.c', 'runtime/hle_hooks.c',
+                       'runtime/linux/upnp.c', *shim, '-o', exe)
             with open(os.path.join(tmp, 'ssbu.syms'), 'w') as syms:   # (the profiler's names)
                 subprocess.run(['nm', '-n', '--defined-only', exe], stdout=syms, check=True)
             out = self.run_program(exe, cwd=tmp)
@@ -665,6 +760,15 @@ class TestProgramTests(unittest.TestCase):
 
     def test_gfxtest(self):
         with tempfile.TemporaryDirectory(prefix='gfxtest ') as tmp:
+            device = self.metal_device(tmp)
+            if not device:
+                self.skipTest('no Metal device')
+            name, metal3 = device
+            if not metal3:   # (gpu_metal.m's init refuses it, and then each of gfxtest's draws waits 20 s for nothing)
+                self.skipTest(f'{name} is not a Metal 3 GPU: the renderer refuses it')
+            if 'Paravirtual' in name and not os.environ.get('GFXTEST_ON_VM'):
+                self.skipTest(f"{name}: a macOS virtual machine (GitHub's macOS runners), where gfxtest did not finish in 600 s; "
+                              'the renderer is checked on a Mac with Apple silicon (GFXTEST_ON_VM=1: run it anyway)')
             font, exe = os.path.join(tmp, 'font'), os.path.join(tmp, 'gfxtest')
             self.build(*self.F, '-fobjc-arc', '-O1', 'tools/mac/make_overlay_font.m', '-framework', 'CoreText', '-framework', 'CoreGraphics',
                        '-framework', 'Foundation', '-o', font)
@@ -676,7 +780,7 @@ class TestProgramTests(unittest.TestCase):
                        '-framework', 'QuartzCore', '-framework', 'CoreGraphics', '-framework', 'Foundation', '-o', exe)
             work = os.path.join(tmp, 'work')
             os.makedirs(work)
-            out = self.run_program(exe, cwd=tmp, env={**os.environ, 'GFXTEST_DIR': work})
+            out = self.run_program(exe, cwd=tmp, env={**os.environ, 'GFXTEST_DIR': work}, timeout=300)   # (seconds on a Mac)
             self.assertRegex(out, r'\d+ checks, 0 failed')
 
 
@@ -815,6 +919,7 @@ class BuildGameMacTests(unittest.TestCase):
     def setUp(self):
         self.g = runpy.run_path(str(ROOT / 'tools/build_game.py'), run_name='build_game_folders')['ask_folder'].__globals__
 
+    @unittest.skipIf(os.name == 'nt', "a Mac or Linux terminal's escaping, on real folders (this host's paths hold backslashes)")
     def test_dragged_folders(self):
         """A folder dragged into Terminal comes escaped as the shell would (My\\ Games, with a
         space after it); on Windows in quotes."""

@@ -1,0 +1,77 @@
+# WindowSmash's source-only tests (README.md, "For developers") on Windows, Linux and macOS: the unit tests in tests/
+# and the NEX server's offline self-test. Made-up data only: no dump, no game files, nothing derived from the game.
+# Every package a test needs is installed here, so a test skips only where it can't run at all (Windows PowerShell
+# and clang-cl outside Windows).
+name: WindowSmash tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # 3.14: the Python the Windows installer puts in deps/python
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      # pycryptodomex (requirements.txt), capstone and unicorn (tests/requirements-dev.txt); zstandard for
+      # test_arc_zstd's fallback-package test (requirements.txt asks for it only before Python 3.14)
+      - name: Python packages
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r tests/requirements-dev.txt zstandard
+
+      # clang, ld.lld, llvm-ar and llvm-nm: tools/linux/toolchain.py looks for them when it is imported
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm
+
+      # bash 5 for the Linux launchers' tests (macOS's own bash is 3.2); an LLVM for tools/linux/toolchain.py
+      # (SSBU_LLVM_BIN: it searches for one only on Linux and Windows); 127.0.0.2 for test_ssbu_relay's second
+      # address; SDL3 3.4.18's DMG (the SHA-256 tools/mac/install_mac.py pins) and the framework in it, as
+      # Install WindowSmash.command puts them, for test_mac_installer and test_mac_build
+      - name: macOS packages
+        if: runner.os == 'macOS'
+        run: |
+          brew install --quiet bash llvm lld
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+          echo "SSBU_LLVM_BIN=$(brew --prefix llvm)/bin" >> "$GITHUB_ENV"
+          sudo ifconfig lo0 alias 127.0.0.2 up
+          mkdir -p deps/downloads
+          curl -fsSL --retry 3 -o deps/downloads/SDL3-3.4.18.dmg \
+            https://github.com/libsdl-org/SDL/releases/download/release-3.4.18/SDL3-3.4.18.dmg
+          echo "c1adf3da91108dbc3e4205da5dacebc203085d283fa89e86eb2c889abd03a853  deps/downloads/SDL3-3.4.18.dmg" | shasum -a 256 -c
+          python -c "import sys; sys.path.insert(0, 'tools/mac'); import install_mac; install_mac.install_sdl3_framework('deps/downloads/SDL3-3.4.18.dmg', 'deps/SDL3')"
+
+      # gfxtest (the Metal renderer) skips on the runner's paravirtual GPU, where it never finished; a manual run
+      # (workflow_dispatch) runs it anyway and shows what it printed before its 300 s timeout
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+        env:
+          GFXTEST_ON_VM: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}
+
+      - name: NEX server self-test
+        working-directory: tools
+        run: python -m nex.selftest
