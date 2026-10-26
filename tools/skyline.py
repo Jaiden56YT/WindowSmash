@@ -31,6 +31,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RECOMPILER = ("recomp.py", "lift.py", "lift_simd.py", "regcache.py", "plugin_eh.py", "eh.py")   # (what makes a plugin's C)
@@ -404,17 +405,20 @@ def probe_and_apply(tree, log=print):
 def run_logged(cmd, log, keep=60):
     """Run the game's build with its output in `log` (the Mods app's window and manager.log - its
     pythonw.exe has no console, and a failed build said nothing of why): what reads as a problem as
-    it comes, and when it fails, its last `keep` lines. The progress bar's redraws are left out."""
+    it comes, and when it fails, its last `keep` lines; and every 15 s or so, how far the compile is."""
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
                             errors="replace", bufsize=1)
-    tail = []
+    tail, shown = [], 0.0
     for line in proc.stdout:
         line = line.rstrip()
-        if not line or "\r" in line:
+        if not line:
             continue
         tail = (tail + [line])[-keep:]
         if re.search(r"error|failed|warning: .*(undeclared|implicit)|did not compile|LNK\d", line, re.I):
             log(line[:400])
+        elif re.search(r"\d+/\d+ compiled|compiling \S+: [\d,]+ of|^link|linking|linked", line) and time.monotonic() - shown > 15:
+            shown = time.monotonic()   # (where it is, now and then: a long compile doesn't look stuck)
+            log(line[:200])
     rc = proc.wait()
     if rc:
         log(f"the build stopped (code {rc}); its last lines:")
