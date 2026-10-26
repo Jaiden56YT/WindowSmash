@@ -401,6 +401,28 @@ def probe_and_apply(tree, log=print):
         mods.apply(mods.Tree(tree), log)
 
 
+def run_logged(cmd, log, keep=60):
+    """Run the game's build with its output in `log` (the Mods app's window and manager.log - its
+    pythonw.exe has no console, and a failed build said nothing of why): what reads as a problem as
+    it comes, and when it fails, its last `keep` lines. The progress bar's redraws are left out."""
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                            errors="replace", bufsize=1)
+    tail = []
+    for line in proc.stdout:
+        line = line.rstrip()
+        if not line or "\r" in line:
+            continue
+        tail = (tail + [line])[-keep:]
+        if re.search(r"error|failed|warning: .*(undeclared|implicit)|did not compile|LNK\d", line, re.I):
+            log(line[:400])
+    rc = proc.wait()
+    if rc:
+        log(f"the build stopped (code {rc}); its last lines:")
+        for line in tail:
+            log("  " + line[:400])
+    return rc
+
+
 def build(tree, jobs, log=print, again=True):
     """sync, the C of the modules with new hook targets, the compile and link, then the probe and
     (if the plugins' characters changed) the mods applied again; then once more if that start listed
@@ -418,7 +440,7 @@ def build(tree, jobs, log=print, again=True):
         cmd = [sys.executable, os.path.join(HERE, "recomp.py"), "all", exefs, "--out", os.path.join(tree, "build"),
                "--jobs", str(jobs), "--tree", tree]
     log(" ".join(cmd))
-    rc = subprocess.call(cmd)
+    rc = run_logged(cmd, log)
     if rc:
         return rc
     probe_and_apply(tree, log)
