@@ -212,7 +212,7 @@ All of these are in the WindowSmash folder, unless the table says otherwise:
 | Your save | `save/`. Back it up now and then, with the game closed. |
 | Screenshots | `screenshots/` |
 | Crash and freeze reports | `reports/`, and macOS's own in `~/Library/Logs/DiagnosticReports` (`ssbu-*.ips`). |
-| Settings | `controllers.ini`, `display.ini`, `online_server.txt`, `online_name.txt`, `online_direct.txt`. |
+| Settings | `controllers.ini`, `display.ini`, `online_server.txt`, `online_name.txt`, `online_direct.txt`, `online_protocol.txt`. |
 | The installer's log | `install.log` |
 | WindowSmash's own tools | `deps/`: `venv` (its Python), `python` (when the Mac had none), `SDL3`. |
 | The generated C and objects | `build/`, `build-mac/obj/` (around 30 GB). |

@@ -11,6 +11,10 @@ repository and saved under the file names the console uses (`.ttf` for the firmw
   the box the game draws for a missing character, to the character map of the copy it loads (drawn as the font's
   U+FFFD, else U+25CA, else a space): none of these has it, and the game crashes on a face whose fonts all lack it
   (ssbu-recomp's `runtime/nnfontll.c` found that). The files here stay as they are.
+  It finds this folder from the game's data folder, `dump/modules/../../third_party/fonts_open`: in a checkout,
+  this one; the Linux package (`tools/linux/package_linux.py`) carries the folder as it is, licences included, in
+  the same place. Without a firmware, the build and the installers set the game up with these alone
+  (`tools/build_game.py --no-firmware`, or no firmware folder given).
 - ssbu-recomp (`ssbu-recomp/runtime/nnpl.c`) looks for them in `fonts_open` beside its exe when a font is not in
   `<dump>/sysdata/fonts` (`ssbu-recomp/tools/extract/fw_fonts.py`); its `scripts/setup.py` copies this folder
   there (`build/work/fonts_open`).

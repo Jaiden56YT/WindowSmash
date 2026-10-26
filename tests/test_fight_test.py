@@ -2,8 +2,9 @@
 SSBU_DEBUG_MATCH(_LIST) and SSBU_DEBUG_END. Their logic (runtime/fight_test.h) through
 tools/dev/fighttest.c, with the numbers it prints worked out here on our own: the hash line and its
 FNV-1a, the generators' fixed state, Hash40, XXH64 and the seed's streams. Then runtime/hle_fight_test.c
-itself through tools/dev/fightruntest.c: its wraps called as the game would, on made-up guest memory
-mapped at the game addresses, one scenario a run with its switches set. Made-up numbers throughout."""
+itself through tools/dev/fightruntest.c: its wraps and frame hooks (with runtime/hle_each_frame.c's
+wraps) called as the game would, on made-up guest memory mapped at the game addresses, one scenario a
+run with its switches set. Made-up numbers throughout."""
 from pathlib import Path
 import os
 import re
@@ -248,7 +249,8 @@ class RuntimeTests(unittest.TestCase):
         cls.exe = os.path.join(cls.dir, 'fightruntest')
         rt = ROOT / 'runtime'
         r = subprocess.run([POSIX_CLANG, '-O1', '-Wall', '-Werror', '-pthread', '-I', str(rt / 'macos' / 'include'), '-I', str(rt / 'linux' / 'include'),
-                            '-I', str(rt), str(ROOT / 'tools' / 'dev' / 'fightruntest.c'), str(rt / 'hle_fight_test.c'), '-o', cls.exe],
+                            '-I', str(rt), str(ROOT / 'tools' / 'dev' / 'fightruntest.c'), str(rt / 'hle_fight_test.c'), str(rt / 'hle_each_frame.c'),
+                            '-o', cls.exe],
                            capture_output=True, text=True)
         if r.returncode:
             raise AssertionError('fightruntest did not build:\n' + r.stdout + r.stderr)
@@ -359,12 +361,19 @@ class RuntimeTests(unittest.TestCase):
 class WrapTests(unittest.TestCase):
     def test_the_hooks(self):
         """The wraps the switches stand on (the frame end and the record builder by address,
-        test_game_addr; their signatures: test_wrap_signature)."""
+        test_game_addr; their signatures: test_wrap_signature). The frame end and the frame line
+        are the frame hooks' (runtime/hle_each_frame.c, test_frame_hooks), which the switches
+        register on; the rest are this file's own."""
         text = (ROOT / 'runtime' / 'hle_fight_test.c').read_text(encoding='utf-8')
-        self.assertEqual(re.findall(r'^HLE_WRAP\((\w+)\)', text, re.M), ['71038701e0', '71017880c0'])
+        self.assertEqual(re.findall(r'^HLE_WRAP\((\w+)\)', text, re.M), ['71017880c0'])
         self.assertEqual(re.findall(r'^HLE_WRAP_EXPORT\((\w+)\)', text, re.M),
-                         ['_ZN7lua2cpp16L2CFighterCommon31sys_line_system_control_fighterEv', '_ZN2nn2os13GetSystemTickEv',
-                          'nnosGetSystemTick', '_ZN2nn2os19GenerateRandomBytesEPvm'])
+                         ['_ZN2nn2os13GetSystemTickEv', 'nnosGetSystemTick', '_ZN2nn2os19GenerateRandomBytesEPvm'])
+        frames = (ROOT / 'runtime' / 'hle_each_frame.c').read_text(encoding='utf-8')
+        self.assertEqual(re.findall(r'^HLE_WRAP\((\w+)\)', frames, re.M), ['71038701e0'])
+        self.assertEqual(re.findall(r'^HLE_WRAP_EXPORT\((\w+)\)', frames, re.M),
+                         ['_ZN7lua2cpp16L2CFighterCommon31sys_line_system_control_fighterEv'])
+        self.assertIn('frame_hook_add(FRAME_HOOK_LINE, FRAME_ORDER_FIGHT_TEST, frame_line_hook', text)
+        self.assertIn('frame_hook_add(FRAME_HOOK_END, FRAME_ORDER_FIGHT_TEST, NULL, frame_end_hook', text)
 
 
 if __name__ == '__main__':

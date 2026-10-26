@@ -19,6 +19,7 @@
 
 #include "host.h"
 #include "gpu.h"   /* (gpu_memory_unmapping) */
+#include "kernel_watch.h"   /* (the write watch shared with the rollback ring) */
 #include "fight_test.h"   /* (SSBU_FIXED_SEED) */
 #include "sleep.h"   /* (svcSleepThread) */
 
@@ -419,6 +420,154 @@ int kernel_read64(u64 addr, u64 *out) {
     }
     LeaveCriticalSection(&klock);
     return ok;
+}
+
+/* ---- the write watch, shared (kernel_watch.h) --------------------------------------
+ * With SSBU_ROLLBACK_RING on, the heap, stack and thread-local areas are reserved with the write
+ * watch as the alias area is, and every question goes through kernel_watch_query: the system's
+ * bits are taken (and reset) here, into a bit a page for each user of the area, and each user is
+ * answered from its own. The renderer has the alias area, as it had the system's bits there
+ * before; the ring has all four. A page decommitted is news to the ring, which saw its contents
+ * go. The renderer's bits are left as they are: the system may forget a decommitted page's bit
+ * (the Linux and macOS layers do), so the renderer can hear of a page it would not have alone,
+ * which costs an upload, but never misses one.
+ *
+ * What sharing costs, only with the switch on: a renderer's question takes the system's bits
+ * whenever any are set, where its first, cheap one only looked before; and the ring takes all
+ * four areas' bits at each frame end, so where the watch is page protection (macOS, and Linux
+ * before 6.7) the first write to each page after a frame end faults. On Windows and newer Linux
+ * the system notes the writes itself. */
+#define WATCH_PAGE 0x1000ull
+#define WATCH_BRIDGE (32 * WATCH_PAGE)   /* written pages closer than this are reset in one call */
+typedef struct KWatch { u64 base, size; u32 users; u64 *pending[WATCH_USERS]; } KWatch;
+int kernel_watch_shared;
+static KWatch watch_areas[4];
+static u32 nwatch_areas;
+static SRWLOCK watch_lock = SRWLOCK_INIT;
+static void **watch_asked, **watch_taken;   /* (65536 each, under watch_lock; made with the first area) */
+
+static void watch_add(u64 base, u64 size, u32 users) {
+    if (!watch_asked && (!(watch_asked = malloc(65536 * sizeof *watch_asked)) || !(watch_taken = malloc(65536 * sizeof *watch_taken))))
+        rt_fatal("kernel: no memory for the write watch's answers");
+    KWatch *a = &watch_areas[nwatch_areas++];
+    a->base = base;
+    a->size = size;
+    a->users = users;
+    for (int u = 0; u < WATCH_USERS; u++)
+        if ((users >> u & 1) && !(a->pending[u] = calloc(size / WATCH_PAGE / 64 + 1, 8)))
+            rt_fatal("kernel: no memory for the write watch's bits");
+}
+
+static KWatch *watch_area(u64 lo, u64 hi) {
+    for (u32 i = 0; i < nwatch_areas; i++)
+        if (watch_areas[i].base <= lo && hi <= watch_areas[i].base + watch_areas[i].size) return &watch_areas[i];
+    return NULL;
+}
+
+static void watch_mark(KWatch *a, u64 addr) {
+    u64 i = (addr - a->base) / WATCH_PAGE;
+    for (int u = 0; u < WATCH_USERS; u++)
+        if (a->users >> u & 1) a->pending[u][i >> 6] |= 1ull << (i & 63);
+}
+
+/* The system's bits for [lo, hi) of an area into its users' (under watch_lock). Asking is cheap
+ * and resetting is not (on macOS it protects every host page it touches again): so ask first,
+ * then reset only around the pages found written. A write landing after its page's reset is
+ * news the next time. */
+static void watch_drain(KWatch *a, u64 lo, u64 hi) {
+    for (u64 at = lo; at < hi;) {
+        ULONG_PTR n = 65536;
+        ULONG granularity;
+        if (GetWriteWatch(0, G2H(at), hi - at, watch_asked, &n, &granularity) != 0 || !n) return;
+        for (ULONG_PTR k = 0; k < n;) {
+            u64 from = H2G(watch_asked[k]), to = from + WATCH_PAGE;
+            for (k++; k < n && H2G(watch_asked[k]) <= to + WATCH_BRIDGE; k++) to = H2G(watch_asked[k]) + WATCH_PAGE;
+            for (u64 t = from; t < to;) {
+                ULONG_PTR m = 65536;
+                if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, G2H(t), to - t, watch_taken, &m, &granularity) != 0 || !m) break;
+                for (ULONG_PTR j = 0; j < m; j++) watch_mark(a, H2G(watch_taken[j]));
+                if (m < 65536) break;
+                t = H2G(watch_taken[m - 1]) + WATCH_PAGE;
+            }
+        }
+        if (n < 65536) return;
+        at = H2G(watch_asked[n - 1]) + WATCH_PAGE;
+    }
+}
+
+UINT kernel_watch_query(int who, DWORD flags, PVOID base, SIZE_T size, PVOID *addresses, ULONG_PTR *count, ULONG *granularity) {
+    u64 lo = H2G(base) & ~(WATCH_PAGE - 1), hi = (H2G(base) + size + WATCH_PAGE - 1) & ~(WATCH_PAGE - 1);
+    KWatch *a = watch_area(lo, hi);
+    if (!a || who < 0 || who >= WATCH_USERS || !(a->users >> who & 1) || !count || hi <= lo) {   /* (as the system: not a watched area of its) */
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 1;
+    }
+    AcquireSRWLockExclusive(&watch_lock);
+    watch_drain(a, lo, hi);
+    u64 *bits = a->pending[who];
+    ULONG_PTR cap = *count, n = 0;
+    for (u64 i = (lo - a->base) / WATCH_PAGE, end = (hi - a->base) / WATCH_PAGE; i < end && n < cap;) {
+        u64 w = bits[i >> 6] >> (i & 63);
+        if (!w) { i = (i | 63) + 1; continue; }
+        i += (u64)__builtin_ctzll(w);
+        if (i >= end) break;
+        addresses[n++] = G2H(a->base + i * WATCH_PAGE);
+        if (flags & WRITE_WATCH_FLAG_RESET) bits[i >> 6] &= ~(1ull << (i & 63));
+        i++;
+    }
+    ReleaseSRWLockExclusive(&watch_lock);
+    *count = n;
+    if (granularity) *granularity = (ULONG)WATCH_PAGE;
+    return 0;
+}
+
+/* (svcUnmapMemory, svcUnmapPhysicalMemory: before the decommit) */
+static void watch_decommitting(u64 base, u64 size) {
+    if (!kernel_watch_shared) return;
+    u64 lo = base & ~(WATCH_PAGE - 1), hi = (base + size + WATCH_PAGE - 1) & ~(WATCH_PAGE - 1);
+    KWatch *a = watch_area(lo, hi);
+    if (!a || !(a->users >> WATCH_RING & 1)) return;
+    AcquireSRWLockExclusive(&watch_lock);
+    for (u64 i = (lo - a->base) / WATCH_PAGE; i < (hi - a->base) / WATCH_PAGE; i++) a->pending[WATCH_RING][i >> 6] |= 1ull << (i & 63);
+    ReleaseSRWLockExclusive(&watch_lock);
+}
+
+int kernel_ring_frames(void) {
+    const char *v = getenv("SSBU_ROLLBACK_RING");
+    if (!v || !*v) return 0;
+    if (!strcmp(v, "1")) return 8;
+    for (const char *d = v; *d; d++)
+        if (*d < '0' || *d > '9') return 0;
+    long n = strtol(v, NULL, 10);
+    return n >= 2 && n <= 64 ? (int)n : 0;
+}
+
+void kernel_memory_hold(void) { EnterCriticalSection(&klock); }
+void kernel_memory_release(void) { LeaveCriticalSection(&klock); }
+
+/* (merged only inside one watched area, or outside them all: the stack area ends where the
+ * thread-local one starts, and a question of the write watch is about one area) */
+u32 kernel_writable_ranges(KernelRange *out, u32 max) {
+    EnterCriticalSection(&klock);
+    u32 n = 0;
+    KernelRange last = {0, 0, 0};
+    KWatch *last_area = NULL;
+    for (u32 i = 0; i < region_count; i++) {
+        if ((regions[i].perm & 3) != 3) continue;
+        KWatch *a = watch_area(regions[i].base, regions[i].base + regions[i].size);
+        KernelRange k = {regions[i].base, regions[i].base + regions[i].size, a != NULL};
+        if (n && last.hi == k.lo && last_area == a) {
+            last.hi = k.hi;
+            if (n <= max) out[n - 1].hi = k.hi;
+            continue;
+        }
+        if (n < max) out[n] = k;
+        last = k;
+        last_area = a;
+        n++;
+    }
+    LeaveCriticalSection(&klock);
+    return n;
 }
 
 /* ---- memory mappings (svcMapMemory) ------------------------------------------------
@@ -968,6 +1117,7 @@ static void system_call(Cpu *c, u32 n) {
                 memcpy(G2H(maps[i].src), G2H(maps[i].dst), maps[i].size);
                 map_copy_ns += now_ns() - t0;
                 gpu_memory_unmapping(maps[i].dst, maps[i].size);   /* (queued GPU work and the renderer may read it) */
+                watch_decommitting(maps[i].dst, maps[i].size);
                 VirtualFree(G2H(maps[i].dst), maps[i].size, MEM_DECOMMIT);
                 unmap_range(maps[i].dst, maps[i].size);
                 maps[i].size = 0;
@@ -1098,6 +1248,7 @@ static void system_call(Cpu *c, u32 n) {
         break;
     case 0x2D:     /* UnmapPhysicalMemory(address, size) */
         gpu_memory_unmapping(x[0], x[1]);   /* (queued GPU work and the renderer may read it) */
+        watch_decommitting(x[0], x[1]);
         VirtualFree(G2H(x[0]), x[1], MEM_DECOMMIT);
         unmap_range(x[0], x[1]);
         x[0] = R_OK;
@@ -1218,15 +1369,27 @@ void kernel_init(void) {
     rt_clock_ns();   /* (the clock set up - and its line logged - before the game asks it) */
     /* Reserve the areas the guest maps into; pages are committed as they are used. The alias
      * area, where the game keeps its GPU memory, has its writes watched so that the renderer
-     * learns which textures the CPU changed (GetWriteWatch). */
-    static const struct { u64 base, size; const char *what; DWORD flags; } areas[] = {
-        {HEAP_BASE, HEAP_LIMIT, "heap", 0}, {ALIAS_BASE, ALIAS_SIZE, "alias", MEM_WRITE_WATCH}, {STACK_BASE, STACK_SIZE, "stack", 0},
+     * learns which textures the CPU changed (GetWriteWatch). With SSBU_ROLLBACK_RING every area
+     * has, for the ring too (see "the write watch, shared"). */
+    static const struct { u64 base, size; const char *what; int renderer; } areas[] = {
+        {HEAP_BASE, HEAP_LIMIT, "heap", 0}, {ALIAS_BASE, ALIAS_SIZE, "alias", 1}, {STACK_BASE, STACK_SIZE, "stack", 0},
         {KERNEL_BASE, TLR_AREA, "thread-local", 0},
     };
-    for (u32 i = 0; i < sizeof areas / sizeof *areas; i++)
-        if (VirtualAlloc(G2H(areas[i].base), areas[i].size, MEM_RESERVE | areas[i].flags, PAGE_READWRITE) != G2H(areas[i].base))
+    int ring = kernel_ring_frames();
+    kernel_watch_shared = ring > 0;
+    for (u32 i = 0; i < sizeof areas / sizeof *areas; i++) {
+        DWORD watch = areas[i].renderer || ring ? MEM_WRITE_WATCH : 0;
+        if (VirtualAlloc(G2H(areas[i].base), areas[i].size, MEM_RESERVE | watch, PAGE_READWRITE) != G2H(areas[i].base))
             rt_fatal("kernel: cannot reserve the %s area at %#llx", areas[i].what, areas[i].base);
+        if (ring) watch_add(areas[i].base, areas[i].size, (areas[i].renderer ? 1u << WATCH_RENDERER : 0) | 1u << WATCH_RING);
+    }
+    if (ring)
+        fprintf(stderr, "[kernel] the heap, stack and thread-local areas' writes watched too, and the write watch shared by the renderer and the rollback ring (SSBU_ROLLBACK_RING)\n");
     map_guard = getenv("SSBU_MAP_GUARD") && !strcmp(getenv("SSBU_MAP_GUARD"), "1");
+    if (map_guard && ring) {   /* (the ring reads every page the memory map has; and the watch protects the heap's pages itself, on macOS and older Linux) */
+        map_guard = 0;
+        fprintf(stderr, "[kernel] SSBU_MAP_GUARD=1 left off: the rollback ring reads every mapped page (SSBU_ROLLBACK_RING)\n");
+    }
     if (map_guard) fprintf(stderr, "[kernel] a memory mapping's source is inaccessible while it is mapped (SSBU_MAP_GUARD=1)\n");
     priority_queues = getenv("SSBU_PRIORITY_QUEUES") && !strcmp(getenv("SSBU_PRIORITY_QUEUES"), "1");
     if (priority_queues) fprintf(stderr, "[kernel] mutex, condition variable and address waiters queued by priority, then arrival (SSBU_PRIORITY_QUEUES=1)\n");

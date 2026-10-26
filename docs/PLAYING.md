@@ -46,10 +46,11 @@ Press <kbd>Esc</kbd> in the game to open the settings (on Windows and Linux; the
 | :--- | :--- |
 | **Display** | Window or full screen, frame pacing, how many frames the graphics card works ahead, the mouse pointer, the frame rate in the corner, the window's size, the render scale, the graphics card. |
 | **Controllers** | For each connected controller: which player it is, face buttons by position or by label, stick dead zone, rumble, how far a trigger is pulled for ZL / ZR, and which control is each button (**Buttons...**). For the keyboard: which player it adds to. Also **Rumble** on or off for every controller, and whether controllers work while another window is in front. |
-| **Online** | Public lobby, a private lobby code, your own server, or offline; your name; direct connections ([multiplayer guide](MULTIPLAYER.md)). |
+| **Online** | Public lobby, a private lobby code, your own server, or offline; your name; direct connections; the netplay version ([multiplayer guide](MULTIPLAYER.md)). |
 | **Game** | Restart or quit the game, the keys, and the game version. |
+| **Lobby** | The online lobby's rooms, the ones you can't join too (and why), and matchmaking. They need netplay version 3, which is being tried out ([multiplayer guide](MULTIPLAYER.md#room-browser-and-matchmaking-being-tried-out)). |
 
-- **Move** with the arrow keys or the D-pad. **Change** a setting with left and right. **Select** with <kbd>Enter</kbd> or **A**. **Switch pages** with <kbd>Tab</kbd>, the number keys <kbd>1</kbd>–<kbd>4</kbd>, or **L** / **R**.
+- **Move** with the arrow keys or the D-pad. **Change** a setting with left and right. **Select** with <kbd>Enter</kbd> or **A**. **Switch pages** with <kbd>Tab</kbd>, the number keys <kbd>1</kbd>–<kbd>5</kbd>, or **L** / **R**.
 - The game **keeps running** behind the settings, but it doesn't see your buttons or keys while they're open. In a match, pause first. In a netplay room, the other players keep playing.
 - Every change is **saved at once**. Settings marked **now** take effect straight away. Settings marked **next start** take effect the next time the game starts: **Game → Restart the game** does that for you. A match in progress is lost when you restart.
 - To type a name or a code, use the keyboard, or pick the letters with a controller: **A** types, **B** deletes, **+** finishes.
@@ -220,7 +221,7 @@ All of these are in the WindowSmash folder:
 | The game's log | `build\play.log` |
 | Crash and freeze reports | `reports\` |
 | Controller and window settings | `controllers.ini`, `display.ini` |
-| Your online name, lobby and direct connections | `online_name.txt`, `online_server.txt`, `online_direct.txt` |
+| Your online name, lobby, direct connections and netplay version | `online_name.txt`, `online_server.txt`, `online_direct.txt`, `online_protocol.txt` |
 | Your multiplayer identity | `netplay_id.txt`. Don't copy it to another PC: two PCs with the same one look like one player. |
 
 Your save is written as the console writes it: what the game saves reaches the `save` folder all at once, when the game finishes saving. A crash or a power cut while it saves leaves your last complete save, never half of one. While the game runs, the `save` folder also holds the changes not saved yet, in a folder ending in `.work.` and a number, beside your save's own folder, and for a moment while it saves, a `.journal.` file and a `.commit` file. On Linux and macOS a `.lock` file stays there too. Leave them be: the next start finishes a save that was cut short and clears the rest.

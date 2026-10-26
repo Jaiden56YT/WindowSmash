@@ -1,4 +1,4 @@
-"""The settings folder (runtime/hle_config.c, config.h): config/ with its version.ini, made on the
+"""The settings folder (runtime/hle_config.c, config_folder.h): config/ with its version.ini, made on the
 first start from WindowSmash's files in the port's folder and an ssbu-recomp install's in its build
 folder, once; and controllers.ini read in either port's schema (hle_pad.c), rewritten from
 ssbu-recomp's in this port's terms. Through tools/dev/configtest.c, on made-up folders: a new
@@ -191,7 +191,8 @@ class FolderTests(ConfigTestCase):
         got, _ = self.paths()
         self.assertEqual(got, {'display': self.config('display.ini'), 'controllers': self.config('controllers.ini'),
                                'launcher': self.config('launcher.ini'), 'online_server': 'online_server.txt',
-                               'online_name': self.config('online_name.txt'), 'online_direct': self.config('online_direct.txt')})
+                               'online_name': self.config('online_name.txt'), 'online_direct': self.config('online_direct.txt'),
+                               'online_protocol': self.config('online_protocol.txt')})
         self.assertEqual(sorted(tree(self.top)), ['config/version.ini'])
         text = self.version()
         self.assertIn('\nversion = 1\n', text.replace('\r\n', '\n'))

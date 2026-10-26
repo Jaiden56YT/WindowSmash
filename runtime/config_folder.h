@@ -8,7 +8,10 @@
  * was copied: the copy is made once. Where the folder cannot be made or written (a read-only
  * folder), the files stay where they were for that start, as before.
  *
- * SSBU_DISPLAY and SSBU_CONTROLLERS still name a file of their own (test runs). */
+ * SSBU_DISPLAY and SSBU_CONTROLLERS still name a file of their own (test runs).
+ *
+ * (Not config.h: the builds compile third-party sources with -I runtime, and vkd3d's include a
+ * config.h of their own, which this file would stand in for.) */
 #pragma once
 
 enum ConfigFile {
@@ -18,6 +21,7 @@ enum ConfigFile {
     CONFIG_ONLINE_SERVER,   /* online_server.txt: config/'s once there is one, else the port's own */
     CONFIG_ONLINE_NAME,     /* online_name.txt */
     CONFIG_ONLINE_DIRECT,   /* online_direct.txt */
+    CONFIG_ONLINE_PROTOCOL, /* online_protocol.txt (net_relay.c: the netplay version) */
     CONFIG_FILES
 };
 

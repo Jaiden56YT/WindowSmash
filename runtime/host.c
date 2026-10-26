@@ -6,7 +6,9 @@
  * OS layer, runs the game's nninitStartup, asks the linker to run every module's static
  * constructors, and finally calls the game's nnMain.
  *
- * Usage: ssbu <directory with *.reloc.bin images> [--trace] */
+ * Usage: ssbu <directory with *.reloc.bin images> [--trace]
+ * Built with the game's modules in a library of their own (tools/game_dll.py, runtime/game_dll.h),
+ * also: ssbu --game-library, which loads and checks that library and stops (0: it can be used). */
 #define _CRT_SECURE_NO_WARNINGS
 #include <stdarg.h>
 #include <stdio.h>
@@ -29,7 +31,19 @@
 #include <unistd.h>
 #endif
 
+#ifdef SSBU_GAME_DLL
+/* The game's modules are in a library of their own (runtime/game_dll.h), which game_open loads at
+ * start: the boot modules' tables are copied here, where the rest of the runtime finds them
+ * (net_relay.c reads main's build id), and the NROs' list is the library's. */
+#include "game_dll.h"
+RtModule rt_module_main, rt_module_subsdk0, rt_module_sdk;
+static const RtModule *const *game_nros;
+static u32 game_nro_count;
+#define rt_nro_modules game_nros
+#define rt_nro_count game_nro_count
+#else
 extern const RtModule rt_module_main, rt_module_subsdk0, rt_module_sdk;
+#endif
 #define BOOT_MODULES 3
 #define MAX_MODULES 1024
 /* Loaded modules in load (and symbol search) order: the three the process starts with, then
@@ -1196,6 +1210,127 @@ static void mac_start(int argc, char **argv, const char **dir, int *options) {
 }
 #endif
 
+#ifdef SSBU_GAME_DLL
+/* The game library cannot be used: why (detail, for the log), and what a player does about it. */
+static int game_refused(int quiet, const char *path, const char *detail) {
+    static const char text[] =
+        "This WindowSmash's game library (" RT_GAME_LIBRARY ") is missing, or was built for another version of "
+        "WindowSmash. Run Install WindowSmash again: it builds the game for this version.";
+    fprintf(stderr, "[boot] cannot use the game library %s: %s\n%s\n", path, detail, text);
+#ifdef _WIN32
+    if (!quiet) MessageBoxA(NULL, text, "WindowSmash", MB_OK | MB_ICONERROR);
+#else
+    (void)quiet;
+#endif
+    return 0;
+}
+
+/* The game library (runtime/game_dll.h), from beside the program (on macOS the app's
+ * Frameworks): loaded, its interface checked against this runtime's, then bound - each runtime
+ * function it calls, by name; each HLE_WRAP's original; its hook slots, which its constructors
+ * listed as it loaded (added here in their order, as the program's own would have been); its
+ * modules. 0 if it cannot be used, said why. quiet: no message box (ssbu --game-library). */
+static int game_open(int quiet) {
+    char path[4096], detail[512];
+#ifdef _WIN32
+    wchar_t wide[MAX_PATH + 32];
+    DWORD n = GetModuleFileNameW(NULL, wide, MAX_PATH);
+    wchar_t *slash = n && n < MAX_PATH ? wcsrchr(wide, L'\\') : NULL;
+    if (!slash) return game_refused(quiet, RT_GAME_LIBRARY, "the program's own folder is not known");
+    wcscpy(slash + 1, L"" RT_GAME_LIBRARY);
+    snprintf(path, sizeof path, "%ls", wide);
+    HMODULE lib = LoadLibraryExW(wide, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (!lib) {
+        snprintf(detail, sizeof detail, "it could not be loaded (error %lu)", GetLastError());
+        return game_refused(quiet, path, detail);
+    }
+    RtGameEntry *entry = (RtGameEntry *)(void *)GetProcAddress(lib, RT_GAME_ENTRY);
+#else
+#ifdef __APPLE__
+    snprintf(path, sizeof path - 64, "%s", rt_exe_path());   /* <app>/Contents/MacOS/ssbu */
+    char *slash = strrchr(path, '/');
+    if (slash) { *slash = 0; slash = strrchr(path, '/'); }
+    if (slash) snprintf(slash, sizeof path - (size_t)(slash - path), "/Frameworks/%s", RT_GAME_LIBRARY);
+#else
+    ssize_t len = readlink("/proc/self/exe", path, sizeof path - 64);
+    path[len > 0 ? len : 0] = 0;
+    char *slash = strrchr(path, '/');
+    if (slash) snprintf(slash + 1, sizeof path - (size_t)(slash + 1 - path), "%s", RT_GAME_LIBRARY);
+#endif
+    if (!slash) return game_refused(quiet, RT_GAME_LIBRARY, "the program's own folder is not known");
+    void *lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (!lib) return game_refused(quiet, path, dlerror());
+    RtGameEntry *entry = (RtGameEntry *)dlsym(lib, RT_GAME_ENTRY);
+#endif
+    if (!entry) return game_refused(quiet, path, "it has no " RT_GAME_ENTRY ": not a game library");
+    const RtGameTables *t = entry();
+    if (!t || t->abi != RT_GAME_ABI) {
+        snprintf(detail, sizeof detail, "it is built for game interface %u, and this runtime's is %u", t ? t->abi : 0, RT_GAME_ABI);
+        return game_refused(quiet, path, detail);
+    }
+    static const u32 sizes[4] = RT_GAME_SIZES;
+    if (memcmp(t->sizes, sizes, sizeof sizes)) {
+        snprintf(detail, sizeof detail, "its structures are not this runtime's (their sizes %u %u %u %u, here %u %u %u %u): "
+                 "built from other runtime headers", t->sizes[0], t->sizes[1], t->sizes[2], t->sizes[3], sizes[0], sizes[1],
+                 sizes[2], sizes[3]);
+        return game_refused(quiet, path, detail);
+    }
+    if (!t->isa || strcmp(t->isa, RT_GAME_ISA)) {
+        snprintf(detail, sizeof detail, "it is compiled for %s, and this runtime for %s", t->isa ? t->isa : "?", RT_GAME_ISA);
+        return game_refused(quiet, path, detail);
+    }
+    /* the runtime functions it calls: each one this runtime must have, and every HLE and HLE_WRAP
+     * it has must be among them (the game's C is written for one set of them: tools/recomp.py) */
+    u32 hle = 0, wraps = 0, wraps_here = 0;
+    for (u32 k = 0; k < rt_game_func_count; k++) wraps_here += !strncmp(rt_game_funcs[k].name, "hle_", 4);
+    for (u32 i = 0; i < t->import_count; i++) {
+        const char *name = t->imports[i].name;
+        RtGameFn *fn = NULL;
+        for (u32 k = 0; k < rt_game_func_count && !fn; k++)
+            if (!strcmp(rt_game_funcs[k].name, name)) { fn = rt_game_funcs[k].fn; wraps += !strncmp(name, "hle_", 4); }
+        for (u32 k = 0; k < hle_count && !fn && !strncmp(name, "hle_", 4); k++)
+            if (!strcmp(hle_table[k].name, name + 4)) { fn = (RtGameFn *)hle_table[k].fn; hle++; }
+        if (!fn) {
+            snprintf(detail, sizeof detail, "it calls %s, which this runtime does not have: built from other runtime sources", name);
+            return game_refused(quiet, path, detail);
+        }
+        *t->imports[i].slot = fn;
+    }
+    if (hle != hle_count || wraps != wraps_here) {
+        snprintf(detail, sizeof detail, "it is built for other native functions (%u of this runtime's %u HLE, %u of its %u "
+                 "HLE_WRAP): built from other runtime sources", hle, hle_count, wraps, wraps_here);
+        return game_refused(quiet, path, detail);
+    }
+    for (u32 k = 0; k < rt_game_func_count; k++) {
+        if (!rt_game_funcs[k].orig) continue;
+        u32 i = 0;
+        while (i < t->orig_count && t->origs[i].addr != rt_game_funcs[k].addr) i++;
+        if (i == t->orig_count) {
+            snprintf(detail, sizeof detail, "it has no original of HLE_WRAP(%llx): built from other runtime sources",
+                     (unsigned long long)rt_game_funcs[k].addr);
+            return game_refused(quiet, path, detail);
+        }
+        *rt_game_funcs[k].orig = t->origs[i].fn;
+    }
+    u32 hooks = 0;
+    for (RtHook *h = *t->hooks; h; h = h->next) hooks++;
+    RtHook **list = hooks ? malloc(hooks * sizeof *list) : NULL;
+    if (hooks && !list) return game_refused(quiet, path, "no memory for its hook slots' list");
+    u32 at = 0;
+    for (RtHook *h = *t->hooks; h; h = h->next) list[at++] = h;
+    while (at) rt_hook_add(list[--at]);   /* (rt_hook_add puts each in front: the oldest goes in first) */
+    free(list);
+    rt_module_main = *t->boot[0];
+    rt_module_subsdk0 = *t->boot[1];
+    rt_module_sdk = *t->boot[2];
+    game_nros = t->nros;
+    game_nro_count = t->nro_count;
+    fprintf(stderr, "[boot] game library %s: interface %u, %u runtime functions bound, %u hook slots, %u NROs\n", path,
+            t->abi, t->import_count, hooks, t->nro_count);
+    return 1;
+}
+#endif
+
 /* The game is version 13.0.5: its main module's build id (tools/game_version.py MAIN_BUILD_ID, which
  * tests/test_game_version.py checks this against). The build refuses other versions; a game built
  * from one before that (or by hand) says so plainly and stops - not a crash report, not a bug. */
@@ -1235,6 +1370,9 @@ int main(int argc, char **argv) {
 #ifdef __APPLE__
     mac_start(argc, argv, &dir, &options);
 #endif
+#ifdef SSBU_GAME_DLL
+    if (argc == 2 && !strcmp(argv[1], "--game-library")) return game_open(1) ? 0 : 4;
+#endif
     if (!dir) { fprintf(stderr, "usage: ssbu <directory with *.reloc.bin images> [--trace]\n"); return 2; }
     display_dpi_aware();
 #ifdef _WIN32
@@ -1266,6 +1404,9 @@ int main(int argc, char **argv) {
         if (len > 0 && !stat(exe, &st)) localtime_r(&st.st_mtime, &tm);
         fprintf(stderr, "[boot] %s, built %04d-%02d-%02d %02d:%02d\n", exe, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min);
     }
+#endif
+#ifdef SSBU_GAME_DLL
+    if (!game_open(0)) return 4;
 #endif
     if (!game_version_ok()) return 4;
     for (int i = options; i < argc; i++) {

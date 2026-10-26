@@ -1,4 +1,4 @@
-/* Display options: display.ini (SSBU_DISPLAY=<file>, else config/display.ini: config.h), written
+/* Display options: display.ini (SSBU_DISPLAY=<file>, else config/display.ini: config_folder.h), written
  * with the defaults and their documentation when it does not exist.
  *
  * The window: windowed (resizable, kept 16:9 while dragged), borderless over its monitor, or
@@ -35,7 +35,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include <stdio.h>
 
-#include "config.h"
+#include "config_folder.h"
 #include "display.h"
 #include "host.h"
 #include "testrun.h"

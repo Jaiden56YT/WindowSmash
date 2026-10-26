@@ -12,7 +12,7 @@ their comments and every line it does not change:
   online_name.txt   the online name (empty: the game picks one at its first online start)
   online_direct.txt on / off: direct connections
   launcher.ini      show_launcher = 0: Play SSBU.bat starts the game directly (hold Shift for this window)
-They are in config\ once the game has made that folder (runtime/config.h), in the port's folder before.
+They are in config\ once the game has made that folder (runtime/config_folder.h), in the port's folder before.
 Play saves only the values changed in the window, then starts what Play SSBU.bat starts: the game
 with --online, its output in build\play.log. Close starts nothing and saves nothing. The game
 version shown is version.txt's (what the build wrote: 13.0.5).
@@ -268,7 +268,7 @@ function Get-Number([string]$s) {
 }
 
 function Get-ConfigPath([string]$Name) {
-    <# Where the game reads a settings file (runtime/config.h): config\ once the game has made it
+    <# Where the game reads a settings file (runtime/config_folder.h): config\ once the game has made it
        (config\version.ini), else the port's folder; online_server.txt is config\'s only once there
        is one there. #>
     $inFolder = Join-Path (Join-Path $Root 'config') $Name

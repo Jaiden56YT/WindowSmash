@@ -4,7 +4,9 @@
 # no dump, no game files, nothing derived from the game. On Windows and Linux for both instruction sets players'
 # builds compile for (tools/isa.py). The program is not started. A runtime source the program lacks fails the job
 # unless the driver's LEFT_OUT says why it is left out, and so does any source in a subfolder of runtime/ other than
-# linux/ and macos/, where no build looks.
+# linux/ and macos/, where no build looks. Each system also builds as build_game.py --game-dll does (dll: the game's
+# modules in a library of their own, the program the runtime alone: tools/game_dll.py); then the program is started,
+# but only to load that library and check it (ssbu --game-library), and the job fails if it does not accept it.
 name: Runtime compile
 
 on:
@@ -22,7 +24,7 @@ concurrency:
 
 jobs:
   runtime:
-    name: runtime (${{ matrix.os }}${{ matrix.isa && format(', {0}', matrix.isa) || '' }})
+    name: runtime (${{ matrix.os }}${{ matrix.isa && format(', {0}', matrix.isa) || '' }}${{ matrix.dll && ', game library' || '' }})
     strategy:
       fail-fast: false
       matrix:
@@ -32,6 +34,9 @@ jobs:
           - {os: ubuntu-24.04, isa: avx2}
           - {os: ubuntu-24.04, isa: x86-64-v2}
           - {os: macos-15}
+          - {os: windows-2025, isa: avx2, dll: true}
+          - {os: ubuntu-24.04, isa: avx2, dll: true}
+          - {os: macos-15, dll: true}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
@@ -100,4 +105,4 @@ jobs:
 
       # in a folder with a space in its name, as players' often are; the job's page says what was linked
       - name: Compile and link the runtime
-        run: python tools/dev/runtime_compile_check.py --tree "${{ runner.temp }}/made-up game"
+        run: python tools/dev/runtime_compile_check.py --tree "${{ runner.temp }}/made-up game" ${{ matrix.dll && '--game-dll' || '' }}

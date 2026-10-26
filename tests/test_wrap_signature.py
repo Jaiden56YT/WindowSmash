@@ -92,7 +92,7 @@ class HleWraps(unittest.TestCase):
     # Hooks still waiting for theirs (tools/recomp.py wrap-sig prints it, from the game): the fight
     # test switches' frame end and player record builder, and their hooks by exported name: the
     # fighters' frame line, the system tick (both names) and the SDK's random bytes
-    # (runtime/hle_fight_test.c).
+    # (runtime/hle_fight_test.c; the frame end and the frame line in runtime/hle_each_frame.c).
     AWAITING = {0x71038701e0, 0x71017880c0}
     AWAITING_EXPORTS = {'_ZN7lua2cpp16L2CFighterCommon31sys_line_system_control_fighterEv', '_ZN2nn2os13GetSystemTickEv',
                         'nnosGetSystemTick', '_ZN2nn2os19GenerateRandomBytesEPvm'}

@@ -232,3 +232,25 @@ def link(objs, exe, options=()):
         errors = [l for l in lines if "error" in l.lower()] or lines   # (the third-party libraries' CRT warnings drown them)
         raise RuntimeError("link failed\n" + "\n".join(errors)[:4000])
     return exe
+
+
+def library_command(rsp, dll):
+    """clang-cl's command that links the objects listed in `rsp` into the DLL `dll`: the game's modules
+    (--game-dll: tools/game_dll.py), as link() links the program but with none of its libraries, which only
+    the runtime calls (the game's C reaches the runtime through the tables the library hands it). Placed as
+    the program is (/HIGHENTROPYVA:NO); its one export is the function that hands over those tables."""
+    return [CLANG, "/nologo", "/LD", *LINK_FLAGS, "@" + rsp, "/Fe" + dll, "/link", *LINK_OPTIONS, "/HIGHENTROPYVA:NO",
+            "/MAP:" + dll[:-4] + ".map"]
+
+
+def link_library(objs, dll):
+    """Link objects into a DLL (library_command)."""
+    rsp = dll + ".rsp"
+    with open(rsp, "w") as f:
+        f.write("\n".join(f'"{o}"' for o in objs))
+    r = subprocess.run(library_command(rsp, dll), capture_output=True, text=True)
+    if r.returncode:
+        lines = (r.stdout + r.stderr).splitlines()
+        errors = [l for l in lines if "error" in l.lower()] or lines
+        raise RuntimeError("the game library's link failed\n" + "\n".join(errors)[:4000])
+    return dll

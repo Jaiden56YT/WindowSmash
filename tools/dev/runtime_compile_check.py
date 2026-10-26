@@ -7,25 +7,35 @@ laid out as a game tree. What .github/workflows/runtime-compile.yml runs on Wind
   Linux    tools/linux/build_vkd3d.py linux when vkd3d-shader is not built for this instruction set
            (as build_game.py), then tools/linux/build_linux.py: <tree>/build-linux/ssbu
   macOS    tools/mac/build_mac.py: <tree>/build-mac/WindowSmash.app
-The program is not started (tools/mac/boottest/boottest.py starts it on a Mac). SSBU_ISA chooses
-the instruction set on Windows and Linux, as for a player's build (tools/isa.py).
+The program is not started (tools/mac/boottest/boottest.py starts it on a Mac), except with
+--game-dll, to load its library (below). SSBU_ISA chooses the instruction set on Windows and
+Linux, as for a player's build (tools/isa.py).
 
 Then every runtime source must be in the program, by its link's list of objects, unless LEFT_OUT
 (below) says why it is not, and no source may be where no build looks for one (only the top of
 runtime/, runtime/linux and runtime/macos): a file left out of a build's list, or moved into a
 subfolder, fails the check rather than dropping out of the program unseen.
 
-Usage: runtime_compile_check.py [--tree <dir>] [--jobs N]
-  --tree  the made-up game's folder (default: windowsmash-runtime-check in the system's temporary
-          folder; not this checkout, whose build/ is the real game's). Kept: a second run compiles
-          only what changed
-  --jobs  files compiled at a time (default: each build's own)
+With --game-dll the build is build_game.py --game-dll's: the program is the runtime alone and the
+game's modules are a library of their own, which it loads (tools/game_dll.py). Then the program
+must have only the runtime's objects, the library each module's and none of a runtime source's,
+and the program, started as  ssbu --game-library, must load the library and accept it: every
+runtime function the game's C calls found, the interface's version, structures and instruction
+set the same.
+
+Usage: runtime_compile_check.py [--tree <dir>] [--jobs N] [--game-dll]
+  --tree      the made-up game's folder (default: windowsmash-runtime-check in the system's
+              temporary folder; not this checkout, whose build/ is the real game's). Kept: a
+              second run compiles only what changed
+  --jobs      files compiled at a time (default: each build's own)
+  --game-dll  the game in a library of its own, the program the runtime alone (above)
 
 The tools are a player's: on Windows clang-cl (tools/cc.py finds it) and SDL3 in deps\\SDL3 if
 there; on Linux install-windowsmash.sh's packages and deps/linux-toolchain; on macOS the Command
 Line Tools and SDL3.framework in deps/SDL3 (SSBU_SDL3_DIR names another folder).
-Exit status: 0 the program linked with every source, 1 a step failed (its output says why) or a
-source is missing or misplaced, 2 a wrong argument."""
+Exit status: 0 the program linked with every source (and with --game-dll loaded the library), 1 a
+step failed (its output says why), a source is missing or misplaced, or the library is wrong, 2 a
+wrong argument."""
 import importlib.util
 import os
 import subprocess
@@ -35,6 +45,8 @@ import time
 
 TOOLS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TOOLS)
+sys.path.insert(0, TOOLS)
+import game_dll  # noqa: E402
 RUNTIME = os.path.join(REPO, "runtime")
 BOOTTEST = os.path.join(TOOLS, "mac", "boottest", "boottest.py")
 MODULES = ("main", "subsdk0", "sdk")
@@ -98,11 +110,27 @@ def runtime_folder(tree, host):
             "macos": os.path.join(tree, "build-mac", "obj", "rt")}[host]
 
 
-def link_list(tree, host):
+def library(tree, host):
+    """Where a --game-dll build puts the game's library: beside the program (macOS: in the app's Frameworks)."""
+    return {"windows": os.path.join(tree, "build", game_dll.DLL), "linux": os.path.join(tree, "build-linux", game_dll.SO),
+            "macos": os.path.join(tree, "build-mac", "WindowSmash.app", "Contents", "Frameworks", game_dll.DYLIB)}[host]
+
+
+def module_folder(tree, host, module):
+    """The folder the build compiles a module's objects into."""
+    return {"windows": os.path.join(tree, "build", module), "linux": os.path.join(tree, "build-linux", module),
+            "macos": os.path.join(tree, "build-mac", "obj", module)}[host]
+
+
+def link_list(tree, host, of_library=False):
     """The objects the program was linked from, as its link listed them for the linker (Windows' and
-    Linux's response file, macOS's file list), or None without one."""
-    path = {"windows": program(tree, host) + ".rsp", "linux": os.path.join(tree, "build-linux", "ssbu.rsp"),
-            "macos": os.path.join(tree, "build-mac", "ssbu.filelist")}[host]
+    Linux's response file, macOS's file list), or None without one. of_library: the game library's
+    (--game-dll), as its own link listed them."""
+    if of_library:
+        path = os.path.join(tree, "build-mac", "ssbu_game.filelist") if host == "macos" else library(tree, host) + ".rsp"
+    else:
+        path = {"windows": program(tree, host) + ".rsp", "linux": os.path.join(tree, "build-linux", "ssbu.rsp"),
+                "macos": os.path.join(tree, "build-mac", "ssbu.filelist")}[host]
     try:
         with open(path, errors="replace") as f:   # (in the encoding the build wrote it in: this Python's own)
             return [line.strip().strip('"') for line in f.read().splitlines() if line.strip()]
@@ -110,15 +138,21 @@ def link_list(tree, host):
         return None
 
 
+def inside(path, folder):
+    """path relative to folder, when it is in it (else None)."""
+    try:
+        rel = os.path.relpath(os.path.abspath(path), folder)
+    except ValueError:   # (another drive)
+        return None
+    return rel if rel not in (os.curdir, os.pardir) and not rel.startswith(os.pardir + os.sep) else None
+
+
 def linked(objects, rt):
     """{(folder in rt, name without its extension)} of the objects in rt (the runtime's) among objects."""
     found = set()
     for obj in objects:
-        try:
-            rel = os.path.relpath(os.path.abspath(obj), rt)
-        except ValueError:   # (another drive)
-            continue
-        if rel not in (os.curdir, os.pardir) and not rel.startswith(os.pardir + os.sep):
+        rel = inside(obj, rt)
+        if rel:
             folder, name = os.path.split(rel)
             found.add((folder.replace(os.sep, "/"), os.path.splitext(name)[0]))
     return found
@@ -143,6 +177,14 @@ MISPLACED = ("the builds take the runtime's sources only from the top of runtime
              "no program has it")
 
 
+def runtime_keys(rel, host):
+    """The (folder in the runtime's object folder, name) an object of runtime source rel may have (linked's)."""
+    folder, _, name = rel.rpartition("/")
+    stem, ext = os.path.splitext(name)
+    sub = folder if host == "macos" else ""   # (macOS's build keeps each folder's objects apart; fiber.c, fiber.S)
+    return {(sub, stem), (sub, f"{stem}_{ext[1:]}")}
+
+
 def source_problems(runtime, host, have):
     """What is wrong with the program's runtime sources, in words ([]: nothing). have: linked's, of its
     link list. A source misplaced; one at the top of runtime/ or in this system's PLATFORMS that the
@@ -150,12 +192,10 @@ def source_problems(runtime, host, have):
     sources, left_out = runtime_sources(runtime), LEFT_OUT[host]
     problems = [f"runtime/{rel}: {MISPLACED}" for rel in misplaced(sources)]
     for rel in sources:
-        folder, _, name = rel.rpartition("/")
+        folder = rel.rpartition("/")[0]
         if folder and folder not in PLATFORMS[host]:
             continue   # (another system's platform layer, or misplaced)
-        stem, ext = os.path.splitext(name)
-        sub = folder if host == "macos" else ""   # (macOS's build keeps each folder's objects apart; fiber.c, fiber.S)
-        has = bool({(sub, stem), (sub, f"{stem}_{ext[1:]}")} & have)
+        has = bool(runtime_keys(rel, host) & have)
         if rel in left_out and has:
             problems.append(f"runtime/{rel}: in the {host} program, though LEFT_OUT says it is left out ({left_out[rel]}): "
                             "take it off LEFT_OUT")
@@ -167,22 +207,40 @@ def source_problems(runtime, host, have):
     return problems
 
 
-def steps(tree, host, jobs=None, vkd3d_ready=True, python=sys.executable):
-    """[(what, command)] of the build, in order; jobs None: each build's own default."""
+def library_problems(runtime, tree, host, program_objects, library_objects):
+    """--game-dll: what is wrong with how the program and the game's library were linked, in words ([]: nothing).
+    The program has only the runtime's objects (in its object folder), the library each module's and no
+    runtime source's (the tables tools/game_dll.py writes for it are its own)."""
+    rt = runtime_folder(tree, host)
+    problems = [f"the program has {os.path.basename(o)}, which is not the runtime's (not in {rt}): the game's objects "
+                "are the library's" for o in program_objects if not inside(o, rt)]
+    have = linked(library_objects, rt)
+    problems += [f"the game's library has runtime/{rel}'s object: it is linked without the runtime's (tools/game_dll.py)"
+                 for rel in runtime_sources(runtime) if runtime_keys(rel, host) & have]
+    for m in MODULES:
+        folder = module_folder(tree, host, m)
+        if not any(inside(o, folder) for o in library_objects):
+            problems.append(f"the game's library has none of {m}'s objects (in {folder})")
+    return problems
+
+
+def steps(tree, host, jobs=None, vkd3d_ready=True, python=sys.executable, dll=False):
+    """[(what, command)] of the build, in order; jobs None: each build's own default; dll: --game-dll."""
     more = ["--jobs", str(jobs)] if jobs else []
+    split = ["--game-dll"] if dll else []
     dirs = [os.path.join(tree, "build", m) for m in MODULES]
     if host == "windows":
         recomp = os.path.join(TOOLS, "recomp.py")
-        link = [python, recomp, "link", "--dirs", ",".join(dirs), "--out", program(tree, host)]
+        link = [python, recomp, "link", "--dirs", ",".join(dirs), "--out", program(tree, host), *split]
         return [(f"compile {m}", [python, recomp, "compile", d, *more]) for m, d in zip(MODULES, dirs)] + \
             [("compile the runtime and link", link)]
     if host == "linux":
         vkd3d = [("vkd3d-shader", [python, os.path.join(TOOLS, "linux", "build_vkd3d.py"), "linux"])]
         build = [python, os.path.join(TOOLS, "linux", "build_linux.py"), "--port", tree,
-                 "--out", os.path.join(tree, "build-linux"), *more]
+                 "--out", os.path.join(tree, "build-linux"), *more, *split]
         return ([] if vkd3d_ready else vkd3d) + [("compile and link", build)]
     return [("compile and link", [python, os.path.join(TOOLS, "mac", "build_mac.py"), "--port", tree,
-                                  "--out", os.path.join(tree, "build-mac"), *more])]
+                                  "--out", os.path.join(tree, "build-mac"), *more, *split])]
 
 
 def vkd3d_ready():
@@ -217,6 +275,7 @@ def main(argv=None, run=subprocess.run, host=None):
     host = host or this_host()
     tree = os.path.abspath(arg(argv, "--tree") or TREE)
     jobs = arg(argv, "--jobs")
+    dll = "--game-dll" in argv
     if jobs is not None and not (jobs.isdigit() and int(jobs) > 0):
         print(f"--jobs {jobs}: not a number of files")
         return 2
@@ -233,7 +292,7 @@ def main(argv=None, run=subprocess.run, host=None):
         if not cc.SDL3_DLL:
             print("(no SDL3 in deps\\SDL3: the runtime is compiled without its SDL3 controllers)", flush=True)
     t0 = time.time()
-    for what, command in steps(tree, host, jobs, vkd3d_ready() if host == "linux" else True):
+    for what, command in steps(tree, host, jobs, vkd3d_ready() if host == "linux" else True, dll=dll):
         print(f"\n{what}:\n  {subprocess.list2cmdline(command)}", flush=True)
         code = run(command, cwd=REPO).returncode
         if code:
@@ -249,8 +308,28 @@ def main(argv=None, run=subprocess.run, host=None):
         problems = ["the build left no list of the objects it linked: which sources the program has is not known"]
     else:
         problems = source_problems(RUNTIME, host, linked(objects, runtime_folder(tree, host)))
+    lib, loaded = library(tree, host), None
+    if dll and not os.path.isfile(lib):
+        problems.append(f"the build ended without the game's library, {lib}")
+    elif dll and link_list(tree, host, of_library=True) is None:
+        problems.append("the build left no list of the objects it linked into the game's library")
+    elif dll:
+        problems += library_problems(RUNTIME, tree, host, objects or [], link_list(tree, host, of_library=True))
+    if dll and not problems:   # (the program started only to load the library and check it: runtime/host.c)
+        command = [exe, "--game-library"]
+        print(f"\nload the game's library:\n  {subprocess.list2cmdline(command)}", flush=True)
+        r = run(command, cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
+        print(r.stdout, end="", flush=True)
+        loaded = next((line for line in r.stdout.splitlines() if line.startswith("[boot] game library ")), None)
+        if r.returncode or not loaded:
+            problems.append(f"the program did not load the game's library (exit status {r.returncode}): its output says why")
     if problems:
-        lines = [f"FAILED ({host}): {p}" for p in problems]
+        lines = [f"FAILED ({host}{', --game-dll' if dll else ''}): {p}" for p in problems]
+    elif dll:
+        lines = [f"{host}, {built_for(tree, host)}, --game-dll: the runtime compiled and linked into {os.path.basename(exe)} "
+                 f"({os.path.getsize(exe) / 1048576:,.1f} MB) and the made-up game into {os.path.basename(lib)} "
+                 f"({os.path.getsize(lib) / 1048576:,.1f} MB) in {seconds:,.0f} s, which the program loaded "
+                 f"({loaded.rsplit(': ', 1)[-1]}), every source in it but those left out on purpose: {', '.join(LEFT_OUT[host])}"]
     else:
         lines = [f"{host}, {built_for(tree, host)}: the runtime compiled and linked into {os.path.basename(exe)} "
                  f"({os.path.getsize(exe) / 1048576:,.1f} MB) in {seconds:,.0f} s, every source in it but those left out "

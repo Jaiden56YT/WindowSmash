@@ -232,7 +232,7 @@ class LauncherIniTests(unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
 
     def test_config_folder(self):
-        """The files where the game reads them (runtime/config.h): config\\ once it has a version.ini;
+        """The files where the game reads them (runtime/config_folder.h): config\\ once it has a version.ini;
         online_server.txt config\\'s only once there is one there."""
         names = ('display.ini', 'controllers.ini', 'launcher.ini', 'online_server.txt', 'online_name.txt', 'online_direct.txt')
         script = dot_source(self.dir) + ''.join(f'(Get-ConfigPath {ps_quote(n)}).Substring($Root.Length)\n' for n in names)

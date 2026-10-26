@@ -58,7 +58,8 @@ int main(int argc, char **argv) {
     const char *what = argc > 1 ? argv[1] : "";
     config_defaults();
     if (!strcmp(what, "paths")) {
-        static const char *const NAMES[CONFIG_FILES] = {"display", "controllers", "launcher", "online_server", "online_name", "online_direct"};
+        static const char *const NAMES[CONFIG_FILES] = {"display", "controllers", "launcher", "online_server", "online_name", "online_direct",
+                                                        "online_protocol"};
         for (int f = 0; f < CONFIG_FILES; f++) printf("%s: %s\n", NAMES[f], config_path((enum ConfigFile)f));
         return 0;
     }

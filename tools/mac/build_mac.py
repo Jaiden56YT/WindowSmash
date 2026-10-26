@@ -2,7 +2,7 @@
 """Build the game for macOS on Apple silicon (arm64, macOS 14 or newer; the toolchain:
 tools/mac/toolchain.py).
 
-Usage: build_mac.py [--port <tree>] [--out <dir>] [--jobs N] [--runtime-only] [--link-only] [--replace]
+Usage: build_mac.py [--port <tree>] [--out <dir>] [--jobs N] [--runtime-only] [--link-only] [--replace] [--game-dll]
 
 The recompiled game is the C tools/recomp.py generates into <tree>/build/{main,subsdk0,sdk,nro/*}
 (recomp.py all --generate-only); this compiles it, with the runtime, into <out> (default
@@ -14,7 +14,9 @@ the Direct3D 11 renderer, the POSIX parts of the Linux platform layer (runtime/l
 macOS one (runtime/macos: memory, fibers, window, the Metal renderer); it links against
 SDL3.framework (deps/SDL3) and libopus and libvpx, built from third_party/ (tools/codec_libs.py).
 The program is an app: <out>/WindowSmash.app, with SDL3.framework in it, signed (ad hoc) as a
-whole; <out>/ssbu.syms names its functions for the profiler.
+whole; <out>/ssbu.syms names its functions for the profiler. With --game-dll the game's modules are
+linked into a library of their own instead, the app's Contents/Frameworks/ssbu_game.dylib, which the
+program loads at start (tools/game_dll.py): the program is then the runtime alone.
   <out>/obj/       the objects: rt/ (the runtime), main/, subsdk0/, sdk/, nro/<module>/
   <out>/gen/       the files made for the build: hle_table.c, wrap_missing.c, nro_table.c,
                    overlay_font.h (tools/mac/make_overlay_font.m), windowsmash.icns
@@ -46,6 +48,7 @@ sys.path.insert(0, HERE)                          # (toolchain, also under a Pyt
 sys.path.insert(1, os.path.dirname(HERE))         # a script's folder off sys.path; codec_libs)
 from toolchain import (AR, CFLAGS, CLANG, CODESIGN, CXXFLAGS, MIN_MACOS, NM, REPO, RUNTIME, SDL3_DIR,  # noqa: E402
                        SDL3_FRAMEWORK, TARGET, compile_command, run, wrapped)
+import game_dll  # noqa: E402
 import ladder  # noqa: E402
 import progress  # noqa: E402
 
@@ -75,6 +78,18 @@ RUNTIME_LEFT_OUT = ("gpu_d3d11.c", "gpu_overlay.c", "gpu_menu.c")
 LINUX_PARTS = ("win32.c", "upnp.c", "eh.cpp")   # (runtime/linux: the Win32 calls on POSIX, UPnP, C++ landing sites)
 MAC_SOURCES = (".c", ".m", ".cpp", ".S")
 FRAMEWORKS = ("SDL3", "Metal", "QuartzCore", "AppKit", "Foundation", "CoreFoundation", "IOKit", "CoreGraphics")
+# --game-dll (tools/game_dll.py): the game's modules in LIBRARY, which the program's runtime, compiled to
+# (game_dll.DEFINE), loads. Then a guest C++ exception the runtime throws (linux/eh.cpp) is caught by a
+# landing site in the library, and on arm64 the type_info of a type with hidden visibility is matched by
+# its address, which each image has its own of: so both sides' C++ is compiled with the types' visibility
+# default (GAME_DLL_CXX), which has them matched by name. The rest stays hidden, as it is.
+GAME_DLL = "--game-dll" in sys.argv
+GAME_DLL_CXX = ["-fvisibility-ms-compat"]
+LIBRARY = os.path.join(APP, "Contents", "Frameworks", game_dll.DYLIB)
+if GAME_DLL:
+    RUNTIME_DEFINES = RUNTIME_DEFINES + ["-D" + game_dll.DEFINE]
+# (how game_sources.tsv tells a C++ object of the library from one of the program: compiled with GAME_DLL_CXX)
+CXX_LANG = "c++dll" if GAME_DLL else "c++"
 
 
 def listing(folder, suffixes=None):
@@ -134,7 +149,8 @@ def use_tree():
               else f"--replace: compiling {PORT}'s game from the start")
         for path in game + [APP]:
             shutil.rmtree(path, ignore_errors=True)
-        for path in (os.path.join(OUT, "ssbu.syms"), os.path.join(OUT, "ssbu.filelist"), GAME_SOURCES):
+        for path in (os.path.join(OUT, "ssbu.syms"), os.path.join(OUT, "ssbu.filelist"), os.path.join(OUT, "ssbu_game.filelist"),
+                     GAME_SOURCES):
             if os.path.exists(path):
                 os.remove(path)
     write_port_stamp(OUT, PORT)
@@ -239,7 +255,7 @@ def kept_way(was, fname, src, biggest, above):
     """Whether a game object's line (read_game_sources) says it was compiled the way this build compiles
     its file: its level and SSBU_OPTNONE_ABOVE's header, or one of the ladder's ways from there (with the
     header that way makes from the C as it is now; not with SSBU_COMPILE_LIMIT=0)."""
-    opt, how, _own = game_way(fname, src, biggest, was[1] == "c++", above)
+    opt, how, _own = game_way(fname, src, biggest, was[1] != "c", above)
     if was[0] != opt:
         return False
     if was[3] == how:
@@ -291,14 +307,14 @@ def game_jobs():
             key = os.path.relpath(obj, OBJ)
             ident = source_id(src)
             was = record.get(key)
-            if was and was[2] == ident and kept_way(was, fname, src, biggest, above) and \
+            if was and was[2] == ident and was[1] in ("c", CXX_LANG) and kept_way(was, fname, src, biggest, above) and \
                     not needs(obj, src, recomp_h, *([module_h] if fname == "g_module.c" else [])) and \
                     not hook_slots_stale(obj, src, hookable_time):
                 kept.append(record_line(key, *was))
                 continue
             cxx = fname != "g_module.c" and has_landing_sites(src)
             opt, how, own = game_way(fname, src, biggest, cxx, above)
-            compiled_from[obj] = (key, opt, "c++" if cxx else "c", ident, how)
+            compiled_from[obj] = (key, opt, CXX_LANG if cxx else "c", ident, how)
             model = progress.TABLE if fname == "g_module.c" else progress.clang_cost(int(insns), own.left if own else int(biggest),
                                                                                      opt, cxx)
             name = key[:-2].replace(os.sep, "/") + ".c"
@@ -316,7 +332,7 @@ def game_jobs():
                 if not os.path.exists(wrapper) or read(wrapper) != text:
                     with open(wrapper, "w") as f:
                         f.write(text)
-                jobs.append((wrapper, obj, opt, ["-I", RUNTIME]))
+                jobs.append((wrapper, obj, opt, ["-I", RUNTIME] + (GAME_DLL_CXX if GAME_DLL else [])))
             else:
                 jobs.append((src, obj, opt, ["-I", RUNTIME]))
     os.makedirs(OBJ, exist_ok=True)
@@ -484,17 +500,37 @@ def runtime_headers():
     return found + ([font] if os.path.exists(font) else [])
 
 
+def nro_names():
+    return [n for n, src, _o in modules() if os.path.basename(os.path.dirname(src)) == "nro"]
+
+
 def generated_sources():
-    """gen/hle_table.c, wrap_missing.c and nro_table.c, written when they change: (source, object, flags)."""
+    """gen/hle_table.c, wrap_missing.c and nro_table.c, written when they change: (source, object, flags).
+    With --game-dll the program's are hle_table.c and game_funcs.c (tools/game_dll.py): the originals of
+    the wrapped functions and the NROs' list are the library's (library_sources)."""
     os.makedirs(GEN, exist_ok=True)
-    nros = [n for n, src, _o in modules() if os.path.basename(os.path.dirname(src)) == "nro"]
+    made = (("hle_table", hle_table_text(hle_names()), RUNTIME_INCLUDES + RUNTIME_DEFINES),
+            ("wrap_missing", wrap_missing_text(hle_wraps()), RUNTIME_INCLUDES + RUNTIME_DEFINES),
+            ("nro_table", nro_table_text(nro_names()), ["-I", RUNTIME]))
+    if GAME_DLL:
+        made = (made[0], (game_dll.FUNCS[:-2], game_dll.funcs_text(RUNTIME), RUNTIME_INCLUDES + RUNTIME_DEFINES))
     out = []
-    for name, text, flags in (("hle_table", hle_table_text(hle_names()), RUNTIME_INCLUDES + RUNTIME_DEFINES),
-                              ("wrap_missing", wrap_missing_text(hle_wraps()), RUNTIME_INCLUDES + RUNTIME_DEFINES),
-                              ("nro_table", nro_table_text(nros), ["-I", RUNTIME])):
+    for name, text, flags in made:
         src = os.path.join(GEN, name + ".c")
         write_if_changed(src, text)
         out.append((src, os.path.join(OBJ, "rt", "gen", name + ".o"), flags))
+    return out
+
+
+def library_sources():
+    """--game-dll: the library's own files, gen/game_tables.c (tools/game_dll.py) and nro_table.c, written when
+    they change and compiled as the game is, into obj/game: (source, object, flags)."""
+    os.makedirs(GEN, exist_ok=True)
+    out = []
+    for name, text in ((game_dll.TABLES[:-2], game_dll.tables_text(RUNTIME)), ("nro_table", nro_table_text(nro_names()))):
+        src = os.path.join(GEN, name + ".c")
+        write_if_changed(src, text)
+        out.append((src, os.path.join(OBJ, "game", name + ".o"), ["-I", RUNTIME]))
     return out
 
 
@@ -514,8 +550,9 @@ def runtime_jobs():
     jobs = []
     for src, obj in runtime_sources():
         if every or needs(obj, src, *headers):
-            jobs.append((src, obj, "-O2", RUNTIME_INCLUDES + RUNTIME_DEFINES))
-    for src, obj, flags in generated_sources():
+            jobs.append((src, obj, "-O2", RUNTIME_INCLUDES + RUNTIME_DEFINES
+                         + (GAME_DLL_CXX if GAME_DLL and src.endswith(".cpp") else [])))
+    for src, obj, flags in generated_sources() + (library_sources() if GAME_DLL else []):
         if every or needs(obj, src, *headers):
             jobs.append((src, obj, "-O1", flags))
     return jobs
@@ -675,10 +712,10 @@ def link_errors(out):
 
 
 def link():
-    objs = runtime_objects()
+    objs, library = runtime_objects(), [obj for _src, obj, _f in library_sources()] if GAME_DLL else None
     for _name, src_dir, out_dir in modules():
-        objs += game_objects(src_dir, out_dir)
-    absent = [o for o in objs if not os.path.isfile(o)]
+        (objs if library is None else library).extend(game_objects(src_dir, out_dir))
+    absent = [o for o in objs + (library or []) if not os.path.isfile(o)]
     if absent:
         print(f"not compiled yet: {len(absent)} objects ({', '.join(os.path.relpath(o, OUT) for o in absent[:5])}"
               f"{', ...' if len(absent) > 5 else ''}): build without --link-only")
@@ -707,10 +744,35 @@ def link():
         r = subprocess.run([NM, "-n", "--defined-only", EXE], stdout=f, stderr=subprocess.PIPE, text=True)
     if r.returncode:
         print(f"(no ssbu.syms: the profiler names no functions)\n{r.stderr[:1000]}")
+    if os.path.exists(LIBRARY):   # (a --game-dll build's: made again below, or not wanted)
+        os.remove(LIBRARY)
+    if library is not None and not link_library(library):
+        os.remove(EXE)
+        return False
     if not bundle():
         os.remove(EXE)   # (not a finished app: the next build makes it again, and no launcher starts it)
         return False
     print(f"linked {len(objs)} objects into {EXE} ({os.path.getsize(EXE) / 1048576:,.0f} MB) in {time.time() - t0:,.0f}s")
+    return True
+
+
+def link_library(objs):
+    """--game-dll: the game's modules (objs, with library_sources') linked into LIBRARY, a library that exports
+    only game_dll.ENTRY, the function that hands the program its tables (tools/game_dll.py). As the program
+    was linked with them: the C++ library, and no folding of identical functions (the hook slots' bodies)."""
+    filelist = os.path.join(OUT, "ssbu_game.filelist")
+    with open(filelist, "w", newline="\n") as f:
+        f.write("".join(o + "\n" for o in objs))
+    partial = os.path.join(OUT, "ssbu_game.partial")
+    t0 = time.time()
+    code, out = run([CLANG, *TARGET, "-dynamiclib", "-Xlinker", "-filelist", "-Xlinker", filelist, "-o", partial, "-lc++",
+                     "-Wl,-no_deduplicate", "-Wl,-exported_symbol,_" + game_dll.ENTRY, "-install_name", "@rpath/" + game_dll.DYLIB])
+    if code:
+        print("the game library's link failed\n" + "\n".join(link_errors(out))[:6000])
+        return False
+    os.makedirs(os.path.dirname(LIBRARY), exist_ok=True)
+    os.replace(partial, LIBRARY)
+    print(f"linked {len(objs)} objects into {LIBRARY} ({os.path.getsize(LIBRARY) / 1048576:,.0f} MB) in {time.time() - t0:,.0f}s")
     return True
 
 

@@ -107,11 +107,13 @@ class RuntimeUseTests(unittest.TestCase):
         cls.sources = {p.name: p.read_text(encoding='utf-8', errors='replace') for p in (ROOT / 'runtime').rglob('*.[ch]')}
 
     def test_wraps_by_address_are_the_rows(self):
-        """hle_fight_test.c's HLE_WRAP lines (a literal, as tools/recomp.py reads them) are the
-        13.0.5 addresses of the rows named beside them."""
-        text = self.sources['hle_fight_test.c']
-        wraps = [int(a, 16) for a in re.findall(r'^HLE_WRAP\(([0-9a-f]+)\)', text, re.M)]
-        self.assertEqual(wraps, [self.at_13_0_5['FRAME_END'], self.at_13_0_5['PLAYER_RECORD_BUILDER']])
+        """The HLE_WRAP lines of the test switches (a literal, as tools/recomp.py reads them) are the
+        13.0.5 addresses of the rows named beside them: the frame end in hle_each_frame.c (the
+        frame hooks), the record builder in hle_fight_test.c."""
+        wraps = {name: [int(a, 16) for a in re.findall(r'^HLE_WRAP\(([0-9a-f]+)\)', self.sources[name], re.M)]
+                 for name in ('hle_each_frame.c', 'hle_fight_test.c')}
+        self.assertEqual(wraps, {'hle_each_frame.c': [self.at_13_0_5['FRAME_END']],
+                                 'hle_fight_test.c': [self.at_13_0_5['PLAYER_RECORD_BUILDER']]})
 
     def test_every_name_used_is_a_row(self):
         used = {name for text in self.sources.values() for name in re.findall(r'\bGAME_ADDR\((\w+)\)', text)} - {'name'}

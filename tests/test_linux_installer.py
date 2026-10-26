@@ -242,6 +242,10 @@ class SystemTests(unittest.TestCase):
             open(os.path.join(tmp, 'prod.keys'), 'w').close()
             self.assertEqual(il.check_keys(tmp), (True, 'prod.keys found; no title.keys (needed for games bought from the eShop)'))
             self.assertFalse(il.check_firmware(tmp)[0])
+            self.assertFalse(il.check_firmware(os.path.join(tmp, 'none'))[0])   # (named, and not there)
+            ok, text = il.check_firmware(None)   # (optional: none is fine)
+            self.assertTrue(ok)
+            self.assertIn('the open fonts of third_party/fonts_open', text)
             open(os.path.join(tmp, 'a.nca'), 'w').close()
             self.assertTrue(il.check_firmware(tmp)[0])
 
@@ -444,7 +448,7 @@ class RebuildTests(unittest.TestCase):
         self.assertEqual(files, {'game': None, 'keys': None, 'firmware': None, 'name': 'Me'})
 
     def test_online_name_in_config_folder(self):
-        """online_name.txt where the game reads it (runtime/config.h): config/ once the game has made it
+        """online_name.txt where the game reads it (runtime/config_folder.h): config/ once the game has made it
         (config/version.ini), else the folder itself; online_server.txt stays the folder's own."""
         with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.object(il, 'ROOT', tmp), \
                 unittest.mock.patch.object(il, 'detected_folders', lambda: {'game': None, 'keys': None, 'firmware': None}), \
@@ -478,8 +482,90 @@ class RebuildTests(unittest.TestCase):
         with unittest.mock.patch.object(il.subprocess, 'run', run), contextlib.redirect_stdout(io.StringIO()):
             il.step_build(self.args(), {'game': None, 'keys': None, 'firmware': None})
             il.step_build(self.args(), {'game': '/g', 'keys': '/k', 'firmware': '/f'})
+            il.step_build(self.args(), {'game': '/g', 'keys': '/k', 'firmware': None})
         self.assertNotIn('--game', seen[0])
+        self.assertNotIn('--no-firmware', seen[0])   # (read already: build_game.py knows how the fonts were done)
         self.assertEqual(seen[1][seen[1].index('--game') + 1], '/g')
+        self.assertEqual(seen[1][seen[1].index('--firmware') + 1], '/f')
+        self.assertNotIn('--no-firmware', seen[1])
+        self.assertIn('--no-firmware', seen[2])   # (none chosen: the open fonts, not asked again by the build)
+        self.assertNotIn('--firmware', seen[2])
+
+
+class TtyInput(io.StringIO):
+    def isatty(self):
+        return True
+
+
+class NoFirmwareTests(unittest.TestCase):
+    """Step 6 with the firmware optional (only for the console's own fonts): none found, --no-firmware, none typed."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='linux-firmware-test-')
+        self.addCleanup(self.temp.cleanup)
+        self.top = Path(self.temp.name)
+        self.dirs = {n: self.top / n for n in ('game', 'keys', 'firmware', 'emulator firmware')}
+        for d in self.dirs.values():
+            d.mkdir()
+        (self.dirs['keys'] / 'prod.keys').write_text('')
+        (self.dirs['keys'] / 'title.keys').write_text('')
+        (self.dirs['firmware'] / '0100.nca').write_bytes(b'')   # (a made-up firmware: an .nca file is all the check looks at)
+
+    def args(self, **kw):
+        return types.SimpleNamespace(**{**dict(game=str(self.dirs['game']), keys=str(self.dirs['keys']), firmware=None,
+                                               dry_run=False, online_name='Me', yes=True, jobs=None, skip_build=False), **kw})
+
+    def files(self, a, found_firmware=None, typed=None):
+        found = {'game': None, 'keys': None, 'firmware': found_firmware}
+        stdin = TtyInput() if typed is not None else io.StringIO()
+        with unittest.mock.patch.object(il, 'ROOT', str(self.top)), \
+                unittest.mock.patch.object(il, 'detected_folders', lambda: dict(found)), \
+                unittest.mock.patch.object(il, 'scan_game', lambda folder, keys: (True, 'the game: 13.0.5')), \
+                unittest.mock.patch.object(il.sys, 'stdin', stdin), \
+                unittest.mock.patch('builtins.input', side_effect=list(typed or []) or AssertionError('asked')), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            files = il.step_files(a)
+        return files, out.getvalue()
+
+    def test_none_found(self):
+        files, out = self.files(self.args())
+        self.assertIsNone(files['firmware'])
+        self.assertIn('firmware: (none) - optional; without it the game uses the open fonts of third_party/fonts_open', out)
+        self.assertEqual(files['game'], str(self.dirs['game']))
+
+    def test_no_firmware_over_the_one_found(self):
+        files, _out = self.files(self.args(firmware=''), found_firmware=str(self.dirs['firmware']))
+        self.assertIsNone(files['firmware'])
+
+    def test_found_and_given_as_before(self):
+        files, _out = self.files(self.args(), found_firmware=str(self.dirs['firmware']))
+        self.assertEqual(files['firmware'], str(self.dirs['firmware']))
+        with self.assertRaises(il.Stop) as stop:   # (one named that is no firmware: a mistake, it stops)
+            self.files(self.args(firmware=str(self.dirs['emulator firmware'])))
+        self.assertIn('Name it with --firmware (or --no-firmware: the open fonts)', str(stop.exception))
+
+    def test_asked(self):
+        # the question says it is optional and what for; Enter on nothing, or none over the one found, is none
+        a = self.args(yes=False, game=None, keys=None)
+        typed = [str(self.dirs['keys']), '', str(self.dirs['game'])]
+        files, out = self.files(a, typed=typed)
+        self.assertIsNone(files['firmware'])
+        self.assertIn('The firmware is optional', out)
+        self.assertIn('Chinese, Japanese and Korean', out)
+        files, out = self.files(a, found_firmware=str(self.dirs['firmware']), typed=[str(self.dirs['keys']), 'none',
+                                                                                   str(self.dirs['game'])])
+        self.assertIsNone(files['firmware'])
+        files, out = self.files(a, found_firmware=str(self.dirs['firmware']), typed=[str(self.dirs['keys']), '',
+                                                                                   str(self.dirs['game'])])
+        self.assertEqual(files['firmware'], str(self.dirs['firmware']))
+
+    def test_an_emulator_folder_without_firmware_is_not_suggested(self):
+        c = {'keys': [], 'game': [], 'firmware': [str(self.dirs['emulator firmware']), str(self.dirs['firmware'])]}
+        with unittest.mock.patch.object(il, 'ROOT', str(self.top)), \
+                unittest.mock.patch.object(il, 'folder_candidates', lambda *x: c):
+            self.assertEqual(il.detected_folders()['firmware'], str(self.dirs['firmware']))
+            c['firmware'] = c['firmware'][:1]   # (an emulator installed without its firmware)
+            self.assertIsNone(il.detected_folders()['firmware'])
 
 
 class CheckToolsTests(unittest.TestCase):
@@ -603,7 +689,7 @@ class LauncherTests(unittest.TestCase):
         self.assertIn('Playing offline (no lobby in online_server.txt).', r.stdout)
 
     def test_online_files_in_config_folder(self):
-        """Once the game has made config/ (runtime/config.h: its version.ini), online_name.txt is read
+        """Once the game has made config/ (runtime/config_folder.h: its version.ini), online_name.txt is read
         there; online_server.txt stays the port's own until there is one there."""
         (self.top / 'online_server.txt').write_text('lobby.example:39421 FRIENDS\n', newline='\n')
         (self.top / 'online_name.txt').write_text('Old Name\n', newline='\n')

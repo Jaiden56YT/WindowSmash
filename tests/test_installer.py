@@ -165,6 +165,46 @@ class InstallerDecisionTests(unittest.TestCase):
         self.assertIsNone(got['none'])
         self.assertTrue(got['ryugame'] and got['ryufw'] and got['switch'])
 
+    def test_firmware_optional(self):
+        # (only for the fonts: none is fine, a folder that is named must be a firmware; an emulator's is suggested only
+        # when it has one)
+        with tempfile.TemporaryDirectory() as tmp:
+            fw, empty = os.path.join(tmp, 'fw'), os.path.join(tmp, 'empty')
+            for d in (fw, empty):
+                os.makedirs(d)
+            open(os.path.join(fw, '0100.nca'), 'w').close()
+            got = ps(f"@{{ none = (Test-FirmwareFolder ''); empty = (Test-FirmwareFolder '{empty}'); "
+                     f"gone = (Test-FirmwareFolder '{tmp}\\missing'); fw = (Test-FirmwareFolder '{fw}') }}")
+            self.assertTrue(got['none']['Ok'])
+            self.assertIn('the open fonts of third_party\\fonts_open', got['none']['Text'])
+            self.assertEqual([got['empty']['Ok'], got['gone']['Ok'], got['fw']['Ok']], [False, False, True])
+            detect = ("function Get-SavedFolders { @{} }; "
+                      "function Get-FolderCandidates { @{ Keys = @(); Firmware = $global:fws; Game = @() } }; ")
+            got = ps(detect + f"$global:fws = @('{empty}', '{fw}'); $a = (Get-DetectedFolders).Firmware; "
+                     f"$global:fws = @('{empty}'); @{{ a = $a; b = (Get-DetectedFolders).Firmware }}")
+            self.assertEqual(got['a'], fw)
+            self.assertIsNone(got['b'])
+
+    def test_build_with_and_without_firmware(self):
+        out = ps_text("$DryRun = $true; $Script:Python = @('python'); "
+                      "Step-Build @{ Game = 'D:\\G'; Keys = 'D:\\K'; Firmware = '' } | Out-Null; "
+                      "Step-Build @{ Game = 'D:\\G'; Keys = 'D:\\K'; Firmware = 'D:\\F' } | Out-Null")
+        self.assertIn('--game D:\\G --keys D:\\K --no-firmware', out)
+        self.assertIn('--game D:\\G --keys D:\\K --firmware D:\\F', out)
+
+    def test_firmware_question_optional(self):
+        # -NoWizard: the question says it is optional and what for; Enter on nothing, or none over the one found, is none
+        mocks = ("$global:prompts = @(); "
+                 "function Read-Host { param([string]$Prompt) $global:prompts += $Prompt; $a = $global:q[0]; $global:q.RemoveAt(0); $a }; "
+                 "function Test-GameFolder { @{ Ok = $true; Text = 'the game' } }; function Test-KeysFolder { @{ Ok = $true; Text = 'keys' } }; ")
+        for typed, found in (("''", '$null'), ("'none'", "'D:\\FW'")):
+            out = ps_text(mocks + f"$global:q = [Collections.ArrayList]@('D:\\G', 'D:\\K', {typed}, 'Me', 'n', 'n', 'n'); "
+                          f"$r = Read-Answers @{{ Game = $null; Keys = $null; Firmware = {found} }} 'P'; "
+                          "'RESULT firmware=[' + $r.Firmware + '] prompt=[' + $global:prompts[2] + ']'")
+            self.assertIn('RESULT firmware=[] prompt=[Folder with your firmware', out)
+            self.assertIn('(optional; none: the open fonts) [none]]' if found == '$null' else '[D:\\FW]]', out)
+            self.assertIn('The firmware is optional', out)
+
     def test_avx2_by_processor_name(self):
         cases = {
             'Intel(R) Core(TM) i5-4590 CPU @ 3.30GHz': True,
@@ -412,7 +452,7 @@ class InstallerDecisionTests(unittest.TestCase):
             self.assertEqual(got[k].replace('\r\n', '\n'), want, k)
 
     def test_config_path(self):
-        """online_name.txt where the game reads it (runtime/config.h): config\\ once the game has made it."""
+        """online_name.txt where the game reads it (runtime/config_folder.h): config\\ once the game has made it."""
         with tempfile.TemporaryDirectory() as tmp:
             expr = (f"$r = '{tmp}'; @(foreach ($n in 'online_name.txt', 'online_server.txt') "
                     "{ (Get-ConfigPath $r $n).Substring($r.Length) })")

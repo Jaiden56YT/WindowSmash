@@ -45,6 +45,7 @@ const RtModule rt_module_main = {.build_id = build_text};
 int settings_online(void) { return 0; }   /* (no --online: the files are not read) */
 int settings_line_read(const char *path, char *out, int size) { (void)path; (void)out; (void)size; return 0; }
 int settings_line_write(const char *path, const char *line) { (void)path; (void)line; return 0; }
+const char *config_path(enum ConfigFile file) { (void)file; return "none.txt"; }   /* (online_protocol.txt: none, as read above) */
 #ifndef _WIN32
 u64 rt_now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (u64)t.tv_sec * 1000000000ull + (u64)t.tv_nsec; }
 int rt_upnp_add(u16 port_, const char *lan, const char *what, char *pub, size_t n) { (void)port_; (void)lan; (void)what; (void)pub; (void)n; return 2; }

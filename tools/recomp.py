@@ -8,8 +8,8 @@ Usage:
   recomp.py image    <nso> --out <file.bin>
   recomp.py build    <nso> --out <dir> [--jobs N] [--per-file INSNS] [--exefs <dir>]
   recomp.py compile  <dir> [--jobs N]
-  recomp.py link     --dirs <dir>[,<dir>...] --out <exe>
-  recomp.py all      <exefs dir> --out <build dir> [--jobs N] [--generate-only]
+  recomp.py link     --dirs <dir>[,<dir>...] --out <exe> [--game-dll]
+  recomp.py all      <exefs dir> --out <build dir> [--jobs N] [--generate-only] [--game-dll]
   recomp.py check    <exefs dir>
   recomp.py wrap-sig <nso> <address | exported name>
 
@@ -28,6 +28,9 @@ all       image + build + compile every module of an ExeFS, then link; a module 
           --generate-only stops before compiling (the Linux build compiles the C itself:
           tools/linux/build_linux.py; so does the macOS one, tools/mac/build_mac.py, and on
           macOS all always stops there)
+          --game-dll (link, all): the modules linked into a library of their own, ssbu_game.dll
+          beside the exe, which the exe loads at start; the exe is then the runtime alone
+          (tools/game_dll.py)
 check     list each module's imports that no module exports and the runtime does not implement
 wrap-sig  print the code signature (a hash) of a guest function, for an HLE_WRAP (see hle_wraps),
           an HLE_WRAP_EXPORT (by its exported name: hle_export_wraps) or a tools/hooks.txt entry
@@ -57,6 +60,7 @@ from multiprocessing import Pool
 # this folder, for the modules below: a Python with a ._pth file (the embeddable one the installer
 # sets up when the PC has none) does not put a script's own folder on the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import game_dll  # noqa: E402
 import isa  # noqa: E402
 import ladder  # noqa: E402
 import modcache  # noqa: E402
@@ -75,6 +79,9 @@ MODULES = {"main": 0x7100000000, "subsdk0": 0x7108000000, "sdk": 0x7109000000}
 # own for good, recorded in dump/nro/bases.txt, so that rebuilding never moves a module
 # (modcache.place).
 NRO_DIR = os.path.join(ROOT, "dump", "nro")
+# --game-dll (link, all; the command line sets it): link() links the modules into game_dll.DLL beside the
+# exe, which the exe's runtime, compiled to (game_dll.DEFINE), loads (tools/game_dll.py).
+GAME_DLL = False
 _state = {}
 
 
@@ -1319,7 +1326,10 @@ def link(dirs, exe, rt_dir=None, steps=None):
     """Compile the host runtime and link it with the given module build directories. The
     runtime's objects go to rt_dir (default: rt beside the exe). steps: the build's ladder.Ladder
     (a runtime file the compiler crashed on is in its report), else one of its own, whose report
-    is said once the runtime is compiled (and written beside the exe)."""
+    is said once the runtime is compiled (and written beside the exe). With GAME_DLL the modules
+    are linked into game_dll.DLL beside the exe instead, with the library's side of the interface
+    (game_tables.c) and the NROs' list, and the exe is the runtime with the program's side
+    (game_funcs.c): tools/game_dll.py. The game's objects are the same either way."""
     import cc
     t0 = time.time()
     rt_dir = os.path.abspath(rt_dir or os.path.join(os.path.dirname(exe), "rt"))   # (one spelling: its objects' keys name it)
@@ -1337,9 +1347,10 @@ def link(dirs, exe, rt_dir=None, steps=None):
         if reason:
             why[reason] += 1
             jobs.setdefault(None if flags is None else tuple(flags), []).append((src, obj, opt))
+    rt_flags = [*cc.CFLAGS, "/D" + game_dll.DEFINE] if GAME_DLL else None   # (its runtime loads the library: runtime/host.c)
     sources = [n for n in os.listdir(cc.RUNTIME) if re.fullmatch(r"(host|kernel|gpu\w*|hle\w*|ipc\w*|debug\w*|net\w*)\.c", n)]
     for n in sources:
-        want(os.path.join(cc.RUNTIME, n), os.path.join(rt_dir, n[:-2] + ".obj"), "/O2")
+        want(os.path.join(cc.RUNTIME, n), os.path.join(rt_dir, n[:-2] + ".obj"), "/O2", rt_flags)
     # the processor check, for any x64 processor (it runs before the rest: runtime/cpu_check.c)
     check = os.path.join(rt_dir, "cpu_check.obj")
     want(os.path.join(cc.RUNTIME, "cpu_check.c"), check, "/O2", cc.CHECK_CFLAGS)
@@ -1349,7 +1360,7 @@ def link(dirs, exe, rt_dir=None, steps=None):
     write_if_changed(table, '#include "host.h"\n\n' + "".join(f"GuestFn hle_{n};\n" for n in names)
                      + "const HleEntry hle_table[] = {\n" + "".join(f'    {{"{n}", hle_{n}}},\n' for n in names)
                      + f"    {{0, 0}}\n}};\nconst u32 hle_count = {len(names)};\n")
-    want(table, table[:-2] + ".obj", "/O1")
+    want(table, table[:-2] + ".obj", "/O1", rt_flags)
     # The run-time loadable modules (NROs) linked in, for nn::ro to find by build id.
     nros = [os.path.basename(os.path.normpath(d)) for d in dirs
             if os.path.basename(os.path.dirname(os.path.normpath(d))) == "nro"]
@@ -1360,6 +1371,12 @@ def link(dirs, exe, rt_dir=None, steps=None):
                      + "".join(f"&rt_module_{n}, " for n in nros) + "0};\n"
                      + f"const u32 rt_nro_count = {len(nros)};\n")
     want(nro_table, nro_table[:-2] + ".obj", "/O1")
+    funcs, tables = os.path.join(rt_dir, game_dll.FUNCS), os.path.join(rt_dir, game_dll.TABLES)
+    if GAME_DLL:   # (the program's side of the interface, and the library's, compiled as the game is)
+        write_if_changed(funcs, game_dll.funcs_text(cc.RUNTIME))
+        write_if_changed(tables, game_dll.tables_text(cc.RUNTIME))
+        want(funcs, funcs[:-2] + ".obj", "/O1", rt_flags)
+        want(tables, tables[:-2] + ".obj", "/O1", cc.GAME_CFLAGS)
     if objcache.summary(why):
         print(f"runtime: {objcache.summary(why)}")
     every = [job for group in jobs.values() for job in group]
@@ -1381,10 +1398,20 @@ def link(dirs, exe, rt_dir=None, steps=None):
     if failures:
         return False
     objs = [os.path.join(rt_dir, n[:-2] + ".obj") for n in sources] + [check, table[:-2] + ".obj", nro_table[:-2] + ".obj"]
+    game = []
     for d in dirs:
-        objs += sorted(os.path.join(d, n) for n in os.listdir(d) if n.endswith(".obj"))
-    # a wrap no module has (a made-up game's modules, tools/mac/boottest): its original is a stub nothing calls
-    cc.link(objs, exe, [f"/alternatename:f_{a:x}_orig=rt_wrap_missing" for a in sorted(hle_wraps())])
+        game += sorted(os.path.join(d, n) for n in os.listdir(d) if n.endswith(".obj"))
+    game_lib = os.path.join(os.path.dirname(os.path.abspath(exe)), game_dll.DLL)
+    if os.path.exists(game_lib):   # (a --game-dll build's: made again below, or not wanted)
+        os.remove(game_lib)
+    if GAME_DLL:   # (the NROs' list is the library's)
+        objs, library = objs[:-1] + [funcs[:-2] + ".obj"], [tables[:-2] + ".obj", objs[-1]] + game
+        cc.link(objs, exe)
+        cc.link_library(library, game_lib)
+    else:
+        objs += game
+        # a wrap no module has (a made-up game's modules, tools/mac/boottest): its original is a stub nothing calls
+        cc.link(objs, exe, [f"/alternatename:f_{a:x}_orig=rt_wrap_missing" for a in sorted(hle_wraps())])
     isa.record(os.path.dirname(os.path.abspath(exe)), cc.ISA, cc.ISA_TOLD)   # (what build_game.py's build_is_current compares)
     # the controllers' SDL3.dll, which the runtime loads from the exe's own folder
     if cc.SDL3_DLL:
@@ -1394,6 +1421,8 @@ def link(dirs, exe, rt_dir=None, steps=None):
                 os.path.getmtime(dll) < os.path.getmtime(cc.SDL3_DLL):
             shutil.copy2(cc.SDL3_DLL, dll)
     print(f"linked {len(objs)} objects into {exe} ({os.path.getsize(exe) / 1048576:,.0f} MB) in {time.time() - t0:,.0f}s")
+    if GAME_DLL:
+        print(f"linked {len(library)} objects into {game_lib} ({os.path.getsize(game_lib) / 1048576:,.0f} MB)")
     return True
 
 
@@ -1512,6 +1541,7 @@ if __name__ == "__main__":
     if len(sys.argv) < 3:
         sys.exit(__doc__)
     cmd, nso = sys.argv[1], sys.argv[2]
+    GAME_DLL = "--game-dll" in sys.argv
     if cmd == "coverage":
         coverage(nso, int(arg("--jobs", "20")))
     elif cmd == "emit":

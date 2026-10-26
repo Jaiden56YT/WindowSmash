@@ -1,4 +1,4 @@
-/* The settings files' folder (config.h): config/, its version.ini, and the copy of the old files
+/* The settings files' folder (config_folder.h): config/, its version.ini, and the copy of the old files
  * into it on the first start that has it. (Not an HLE of anything: named hle_ so both builds'
  * runtime file patterns take it.)
  *
@@ -12,9 +12,10 @@
  * it had copied, so the next start copies the files as they are then.
  *
  * WindowSmash kept display.ini, controllers.ini, launcher.ini, online_name.txt and
- * online_direct.txt in the port's folder: each is copied as it is. online_server.txt is the port's
- * own file there (the installers update it, keeping a lobby code added to it): it is read there
- * until config/ has one of its own.
+ * online_direct.txt in the port's folder: each is copied as it is (and online_protocol.txt, newer
+ * than the folder, if one is there). online_server.txt is the port's own file there (the
+ * installers update it, keeping a lobby code added to it): it is read there until config/ has
+ * one of its own.
  *
  * ssbu-recomp kept its settings beside its program, in <build folder>/config: build/ in its folder
  * (build-linux/, build-macos/), or the folder its build_location.txt names; or the same in this
@@ -33,7 +34,7 @@
 #include <string.h>
 
 #include "host.h"
-#include "config.h"
+#include "config_folder.h"
 #include "settings.h"
 
 #ifdef _WIN32
@@ -44,7 +45,7 @@
 #define FOLDER "config"
 
 static const char *const NAMES[CONFIG_FILES] = {"display.ini", "controllers.ini", "launcher.ini", "online_server.txt",
-                                                "online_name.txt", "online_direct.txt"};
+                                                "online_name.txt", "online_direct.txt", "online_protocol.txt"};
 static char paths[CONFIG_FILES][64];
 
 /* ---- files ------------------------------------------------------------------------------- */

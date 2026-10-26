@@ -152,7 +152,7 @@ vulkan_installed() {
     return 1
 }
 
-# Where the game reads a settings file (runtime/config.h): config/ once the game has made it
+# Where the game reads a settings file (runtime/config_folder.h): config/ once the game has made it
 # (config/version.ini), else here; online_server.txt is config/'s only once there is one there.
 config_file() {
     if [ -f config/version.ini ] && { [ "$1" != online_server.txt ] || [ -f "config/$1" ]; }; then

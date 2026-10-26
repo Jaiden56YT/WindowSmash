@@ -1,10 +1,11 @@
 /* runtime/hle_fight_test.c on a made-up game (docs/TESTING-RUNS.md): its wraps and hooks called
- * as the game would call them, with the runtime's calls stubbed here and made-up guest memory
+ * as the game would call them (the frame line's and the frame end's through runtime/hle_each_frame.c,
+ * the frame hooks' wraps), with the runtime's calls stubbed here and made-up guest memory
  * mapped at the game addresses it reads (game_addr.h), as the runtime maps the game. The getters
  * answer from made-up fighters. macOS and Linux (the runtime's POSIX headers); not Windows.
  *
  *   clang -pthread -I runtime/macos/include -I runtime/linux/include -I runtime tools/dev/fightruntest.c \
- *         runtime/hle_fight_test.c -o fightruntest && ./fightruntest unset
+ *         runtime/hle_fight_test.c runtime/hle_each_frame.c -o fightruntest && ./fightruntest unset
  *
  * One scenario a run, its switches set by the caller (tests/test_fight_test.py): unset, hash,
  * stdout, det, off, match, list, seed, race, end. Prints "<n> checks, 0 failed" (and the numbers the test works

@@ -38,7 +38,9 @@ Steps, each skipped when it is already done, so running it again carries on wher
                game build (tools\codec_libs.py).
   7. files     a window asking where your game files, keys and firmware are, filled in from yuzu's
                or Ryujinx's folders when they have them, showing what was found, and your online
-               name (online_name.txt), so the first start asks nothing.
+               name (online_name.txt), so the first start asks nothing. The firmware is optional,
+               for your console's own fonts: left empty, the game uses the open fonts of
+               third_party\fonts_open (no Chinese, Japanese or Korean text).
   8. extras    a desktop shortcut to Play SSBU.bat and, if ticked, a Windows Firewall rule for
                build\ssbu.exe (asks for administrator rights once).
   9. build     tools\build_game.py with those folders: the game's program, fonts, data, DLC,
@@ -58,6 +60,9 @@ Say what each step would do and do nothing: no downloads, no installs, no wizard
 .PARAMETER Keys
 .PARAMETER Firmware
 The folders, instead of the wizard's auto-detection (the wizard still shows them unless -NoWizard).
+The firmware is optional.
+.PARAMETER NoFirmware
+No firmware, over one found: the game uses the open fonts of third_party\fonts_open.
 .PARAMETER OnlineName
 The online name to write into online_name.txt.
 .PARAMETER NoWizard
@@ -80,6 +85,7 @@ param(
     [string]$Game,
     [string]$Keys,
     [string]$Firmware,
+    [switch]$NoFirmware,
     [string]$OnlineName,
     [switch]$NoWizard,
     [switch]$SkipBuild,
@@ -206,7 +212,7 @@ function Merge-OnlineServer {
 }
 
 function Get-ConfigPath {
-    <# Where the game reads a settings file (runtime/config.h): config\ once the game has made it
+    <# Where the game reads a settings file (runtime/config_folder.h): config\ once the game has made it
        (config\version.ini), else the port's folder; online_server.txt is config\'s only once there
        is one there. (tools\launcher.ps1 has the same.) #>
     param([string]$Root, [string]$Name)
@@ -1081,9 +1087,11 @@ function Get-DetectedFolders {
     $saved = Get-SavedFolders
     $c = Get-FolderCandidates $env:APPDATA $env:USERPROFILE
     $exists = { param($p) Test-Path -LiteralPath $p -PathType Container }
+    $hasNca = { param($p) (Test-Path -LiteralPath $p -PathType Container) -and @(Get-ChildItem -LiteralPath $p -Filter '*.nca' -ErrorAction SilentlyContinue).Count -gt 0 }
     $keys = $null; $firmware = $null; $game = $null
     if ($saved.ContainsKey('keys')) { $keys = $saved['keys'] } else { $keys = Resolve-FirstExisting ($c.Keys | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'prod.keys') }) $exists }
-    if ($saved.ContainsKey('firmware')) { $firmware = $saved['firmware'] } else { $firmware = Resolve-FirstExisting $c.Firmware $exists }
+    # (an emulator's firmware folder only when it has one: the firmware is optional)
+    if ($saved.ContainsKey('firmware')) { $firmware = $saved['firmware'] } else { $firmware = Resolve-FirstExisting $c.Firmware $hasNca }
     if ($saved.ContainsKey('game')) { $game = $saved['game'] } else { $game = Resolve-FirstExisting $c.Game $exists }
     return @{ Game = $game; Keys = $keys; Firmware = $firmware }
 }
@@ -1099,8 +1107,10 @@ function Test-KeysFolder {
 }
 
 function Test-FirmwareFolder {
+    <# The firmware is optional (only for the fonts): none is fine, and the game uses the open fonts. #>
     param([string]$Folder)
-    if (-not $Folder -or -not (Test-Path -LiteralPath $Folder -PathType Container)) { return @{ Ok = $false; Text = 'Choose the folder with your firmware (a few hundred .nca files).' } }
+    if (-not $Folder) { return @{ Ok = $true; Text = "None: the game uses the open fonts of third_party\fonts_open, without Chinese, Japanese or Korean text. Your firmware gives your console's own fonts." } }
+    if (-not (Test-Path -LiteralPath $Folder -PathType Container)) { return @{ Ok = $false; Text = 'Choose the folder with your firmware (a few hundred .nca files), or leave this empty.' } }
     $n = @(Get-ChildItem -LiteralPath $Folder -Filter '*.nca' -ErrorAction SilentlyContinue).Count
     if ($n -eq 0) { return @{ Ok = $false; Text = 'There are no .nca files here.' } }
     return @{ Ok = $true; Text = "$n .nca files (the game's fonts are taken out of them)." }
@@ -1155,7 +1165,7 @@ function Show-Wizard {
     foreach ($spec in @(
         @{ Key = 'Game'; Title = 'Game files'; Hint = "yuzu's or Ryujinx's game folder, or yours: the game (.xci/.nsp/.nca), its 13.0.5 update, DLC" },
         @{ Key = 'Keys'; Title = 'Keys'; Hint = "The folder with prod.keys and title.keys" },
-        @{ Key = 'Firmware'; Title = 'Firmware'; Hint = "The folder with your Switch firmware's .nca files (for the fonts)" }
+        @{ Key = 'Firmware'; Title = 'Firmware'; Hint = "Optional: its .nca files give the console's own fonts (with Chinese, Japanese and Korean text)" }
     )) {
         $title = New-Object Windows.Forms.Label
         $title.Text = "$($spec.Title):  $($spec.Hint)"
@@ -1295,13 +1305,17 @@ function Read-Answers {
     <# The same questions in this window, for -NoWizard. #>
     param([hashtable]$Detected, [string]$DefaultName)
     $answers = @{}
-    foreach ($spec in @(@{ Key = 'Game'; Q = 'Folder with your game files' }, @{ Key = 'Keys'; Q = 'Folder with prod.keys and title.keys' }, @{ Key = 'Firmware'; Q = "Folder with your firmware's .nca files" })) {
+    foreach ($spec in @(@{ Key = 'Game'; Q = 'Folder with your game files' }, @{ Key = 'Keys'; Q = 'Folder with prod.keys and title.keys' }, @{ Key = 'Firmware'; Q = "Folder with your firmware's .nca files (optional; none: the open fonts)" })) {
         $default = [string]$Detected[$spec.Key]
+        if ($spec.Key -eq 'Firmware') {
+            Write-Host "The firmware is optional: the game takes your console's own fonts from it, with Chinese, Japanese and Korean text. Without it the game uses the open fonts of third_party\fonts_open: Latin text in Open Sans, the button icons from yuzu's icon font, no Chinese, Japanese or Korean text. Fights are the same."
+        }
         while ($true) {
             $prompt = $spec.Q
-            if ($default) { $prompt += " [$default]" }
+            if ($default) { $prompt += " [$default]" } elseif ($spec.Key -eq 'Firmware') { $prompt += ' [none]' }
             $a = (Read-Host $prompt).Trim().Trim('"')
             if (-not $a) { $a = $default }
+            if ($spec.Key -eq 'Firmware' -and $a -eq 'none') { $a = '' }
             $r = switch ($spec.Key) { 'Keys' { Test-KeysFolder $a } 'Firmware' { Test-FirmwareFolder $a } default { Test-GameFolder $a $answers['Keys'] } }
             Write-Host "  $($r.Text)"
             if ($r.Ok) { $answers[$spec.Key] = $a; break }
@@ -1322,8 +1336,9 @@ function Step-GameFiles {
     if ($Game) { $detected.Game = $Game }
     if ($Keys) { $detected.Keys = $Keys }
     if ($Firmware) { $detected.Firmware = $Firmware }
+    if ($NoFirmware) { $detected.Firmware = $null }
     foreach ($k in @('Game', 'Keys', 'Firmware')) {
-        if ($detected[$k]) { Write-Info "$($k.ToLower()): $($detected[$k])" } else { Write-Info "$($k.ToLower()): not found on this PC (to be chosen)" }
+        if ($detected[$k]) { Write-Info "$($k.ToLower()): $($detected[$k])" } elseif ($k -eq 'Firmware') { Write-Info 'firmware: none (optional: without it the game uses the open fonts of third_party\fonts_open)' } else { Write-Info "$($k.ToLower()): not found on this PC (to be chosen)" }
     }
     $nameFile = Get-ConfigPath $Root 'online_name.txt'
     $default = $OnlineName
@@ -1405,7 +1420,8 @@ function Step-Extras {
 function Step-Build {
     param([hashtable]$Answers)
     Write-Step '[9/10] Build the game'
-    $build = @((Join-Path $Root 'tools\build_game.py'), '--game', $Answers.Game, '--keys', $Answers.Keys, '--firmware', $Answers.Firmware)
+    $build = @((Join-Path $Root 'tools\build_game.py'), '--game', $Answers.Game, '--keys', $Answers.Keys)
+    if ($Answers.Firmware) { $build += @('--firmware', $Answers.Firmware) } else { $build += '--no-firmware' }   # (none: the open fonts)
     if ($Jobs) { $build += @('--jobs', "$Jobs") }
     if ($SkipBuild) { $build += '--prepare-only' }
     if ($DryRun) { Write-Would ('run: ' + ($Script:Python -join ' ') + ' ' + ($build -join ' ')); return $false }

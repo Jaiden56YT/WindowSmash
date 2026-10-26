@@ -9,7 +9,7 @@
  * (same GUID and serial number, else the same device path, else the first free player such a
  * pad had); [players] in controllers.ini keeps a player for one pad.
  *
- * controllers.ini (SSBU_CONTROLLERS=<file>, else config/controllers.ini: config.h) says how pads
+ * controllers.ini (SSBU_CONTROLLERS=<file>, else config/controllers.ini: config_folder.h) says how pads
  * become players; it is written with the defaults and their documentation when it does not exist.
  * ssbu-recomp's controllers.ini reads as one too (see below).
  *
@@ -32,7 +32,7 @@
 #include <math.h>
 #include <stdio.h>
 
-#include "config.h"
+#include "config_folder.h"
 #include "pad.h"
 #include "padusb.h"
 #include "settings.h"
@@ -209,7 +209,7 @@ static void config_line(DevCfg *dc, const char *key, char *value, int line) {
 }
 
 /* ---- ssbu-recomp's controllers.ini -----------------------------------------------------------
- * The other port's file (config.h carries it over from an ssbu-recomp install) has these sections
+ * The other port's file (config_folder.h carries it over from an ssbu-recomp install) has these sections
  * with keys of its own:
  *   [general]   layout = positional | labels | auto, deadzone and trigger_threshold as fractions
  *               (0.10), rumble = on | off, rumble_strength (0-2), gamecube_style = native | pro,

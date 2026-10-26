@@ -20,7 +20,9 @@
  *   SSBU_NET_LOG=1          log every socket/network call (debugging)
  *   SSBU_NET_PROTOCOL=3     (being tried out) join the lobby in protocol version 3, which has a room browser
  *                           and matchmaking; a lobby or a private room's relay of version 2 says no, and the
- *                           game joins it in version 2 at once. 2, the default: version 2 only, as before
+ *                           game joins it in version 2 at once. 2, the default: version 2 only, as before.
+ *                           Without it, online_protocol.txt says the same (3 or 2; the settings menu's Online
+ *                           > Netplay version writes it), whatever names the lobby; hosting is version 2.
  * With neither set the game stays offline, as before. */
 #pragma once
 #include "recomp.h"
@@ -67,12 +69,19 @@ void net_status(char *out, size_t n);
  * room's relay, both say NET_*_OFF. Nothing here blocks: the client thread asks the lobby and
  * reads its answers. */
 
+/* The netplay version this game asks for first (SSBU_NET_PROTOCOL, else online_protocol.txt; 2 when
+ * it hosts), and the one it speaks now: the lobby's answer once joined (2 after a REJECT of version
+ * 2's), 0 before. */
+int net_protocol_wanted(void);
+int net_protocol_spoken(void);
+
 /* The room browser: every room of this lobby code, whatever its game's build, simulation version
  * (sim_version.h) or mods, the rooms of this game's own key (those three) first; a room of another
  * key comes with why this game cannot join it (the game's own Rooms List, in Local Wireless, keeps
  * to the ones it can). net_rooms_ask asks the lobby again (answered within a moment); net_rooms_get
  * copies the last answer, at most max rooms (asking itself the first time), and says how it stands. */
 enum { NET_ROOMS_OFF, NET_ROOMS_ASKING, NET_ROOMS_NO_ANSWER, NET_ROOMS_LISTED };
+enum { NET_WHY_NONE, NET_WHY_BUILD, NET_WHY_SIM, NET_WHY_MODS };   /* the first of the three that differs */
 typedef struct NetRoom {
     u32 host;                      /* its host's address (10.13.x.y) */
     char name[33], build[41];      /* its host's name; its game's build id */
@@ -82,6 +91,7 @@ typedef struct NetRoom {
     int nmods;
     char mods[256];                /* its mods' names, ", " between them ("" for none) */
     char why[256];                 /* not joinable: why, in one line or more */
+    int why_kind;                  /* not joinable: NET_WHY_* (another build, simulation version or mods) */
 } NetRoom;
 void net_rooms_ask(void);
 int net_rooms_get(NetRoom *out, int max, int *state);   /* the rooms copied; state: NET_ROOMS_* */

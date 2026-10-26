@@ -1,13 +1,15 @@
 /* Fights in test runs (docs/TESTING-RUNS.md): SSBU_FIGHT_HASH, SSBU_DETERMINISTIC (SSBU_DET_OFF),
  * SSBU_FIXED_SEED, SSBU_DEBUG_MATCH, SSBU_DEBUG_MATCH_LIST and SSBU_DEBUG_END, ported from
  * ssbu-recomp (fighter_sdk/fighter_host.c, runtime/debug_mode.c; fight_test.h has their logic).
- * Each is off unless its variable is set, and the wraps here then only call the game's function.
+ * Each is off unless its variable is set, and the wraps here then only call the game's function;
+ * so do the frame hooks', with nothing of this file registered on them.
  *
  * The fighters' frame line (lua2cpp::L2CFighterCommon::sys_line_system_control_fighter, which the
- * game runs for every fighter once a frame before its status scripts) is wrapped by its exported
- * name, as lua2cpp_common lies where each install puts it. Its first call for a fighter is the
- * first battle frame: SSBU_SEQ's mark "fight", and the generators' fixed state. Calls since then
- * are that fighter's fight frames, which the hash log and the sequence's steps count.
+ * game runs for every fighter once a frame before its status scripts) and the frame end are
+ * reached through the frame hooks (frame_hooks.h; hle_each_frame.c wraps both), which rollback
+ * shares. The frame line's first call for a fighter is the first battle frame: SSBU_SEQ's mark
+ * "fight", and the generators' fixed state. Calls since then are that fighter's fight frames,
+ * which the hash log and the sequence's steps count.
  *
  * The wraps have no code signature yet (tools/recomp.py wrap-sig prints one, from the game).
  *
@@ -18,6 +20,7 @@
 #include <stdio.h>
 
 #include "fight_test.h"
+#include "frame_hooks.h"
 #include "game_addr.h"
 #include "host.h"
 #include "input_seq.h"
@@ -162,20 +165,20 @@ static void frame_line(Cpu *c) {
     }
 }
 
-HLE_WRAP_EXPORT(_ZN7lua2cpp16L2CFighterCommon31sys_line_system_control_fighterEv) {
-    if (hash_on || det) frame_line(c);
-    orig(c);
+/* Before the frame line (registered with SSBU_FIGHT_HASH or SSBU_DETERMINISTIC). */
+static void frame_line_hook(Cpu *c, const u64 args[8], void *unused) {
+    (void)args; (void)unused;
+    frame_line(c);
 }
 
-/* The frame end of the graphics module (FRAME_END): compares the game's refresh count with the
- * one at the last frame, and reports count - (last + 1) "dropped" refreshes through its third
- * argument, result 0xF0044007 / 0xF0044005; the game then runs that many extra logic frames on
- * the same pad sample. When the counting thread ran is wall time, so SSBU_DETERMINISTIC clears
- * the report after the call (ssbu-recomp's reading of the game). */
-HLE_WRAP(71038701e0) {
-    if (!det) { f_71038701e0_orig(c); return; }
-    u64 result = c->x[0], count = c->x[2];
-    f_71038701e0_orig(c);
+/* After the frame end (FRAME_END), which reports "dropped" refreshes through its third argument,
+ * result 0xF0044007 / 0xF0044005 through its first (hle_each_frame.c), and the game then runs that
+ * many extra logic frames on the same pad sample. When the counting thread ran is wall time, so
+ * SSBU_DETERMINISTIC clears the report after the call (ssbu-recomp's reading of the game).
+ * (Registered with SSBU_DETERMINISTIC.) */
+static void frame_end_hook(Cpu *c, const u64 args[8], void *unused) {
+    (void)c; (void)unused;
+    u64 result = args[0], count = args[2];
     fight_frame_end(&drops, count ? P(u8, count) : NULL, result ? P(u8, result) : NULL, det_off & DET_OFF_DROPS);
 }
 
@@ -330,9 +333,12 @@ void test_fight_start(void) {
         hash_on = hash_out != NULL;
         if (!hash_on) fprintf(stderr, "[fight] SSBU_FIGHT_HASH: cannot write %s\n", h);
     }
-    if (hash_on || det)
+    if (hash_on || det) {
         fprintf(stderr, "[fight] SSBU_FIGHT_HASH %s, SSBU_DETERMINISTIC %d (off mask %d): the fighters' frame line is watched\n",
                 hash_on ? "on" : "off", det, det_off);
+        frame_hook_add(FRAME_HOOK_LINE, FRAME_ORDER_FIGHT_TEST, frame_line_hook, NULL, NULL);
+    }
+    if (det) frame_hook_add(FRAME_HOOK_END, FRAME_ORDER_FIGHT_TEST, NULL, frame_end_hook, NULL);
     if (det && !(det_off & DET_OFF_STEPS)) input_seq_set_steps(seq_steps);
     if (fixed_seed_parse(getenv("SSBU_FIXED_SEED"), &n)) {
         fixed_on = 1;

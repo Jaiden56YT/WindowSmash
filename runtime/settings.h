@@ -1,5 +1,5 @@
 /* Settings written back (hle_settings.c): the settings menu (gpu_menu.c) changes display.ini,
- * controllers.ini and the online_*.txt files (in config/: config.h) in place, keeping their
+ * controllers.ini and the online_*.txt files (in config/: config_folder.h) in place, keeping their
  * comments and every line it does not change, so the files stay what players and the docs edit
  * by hand.
  *

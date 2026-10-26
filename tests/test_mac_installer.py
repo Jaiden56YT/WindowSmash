@@ -467,6 +467,13 @@ class StubChecks:
         return {'game': self.game(f['game'], f['keys']), 'keys': self.keys(f['keys']), 'firmware': self.firmware(f['firmware'])}
 
 
+class OptionalFirmwareChecks(StubChecks):
+    """As the installer's: no firmware will do (the open fonts)."""
+
+    def firmware(self, folder):
+        return (True, 'optional: the open fonts') if not folder else super().firmware(folder)
+
+
 class DialogTests(unittest.TestCase):
     def test_arguments_never_in_the_script(self):
         quoted = 'x" & (do shell script "touch /tmp/windowsmash-quoted") & "'
@@ -540,7 +547,7 @@ class DialogTests(unittest.TestCase):
             self.assertEqual(len(calls), 17)
             summary = calls[0][0][0]
             self.assertIn('Game files: ' + im.shown(game) + '\n    ✓ the game: 13.0.5', summary)
-            self.assertIn('Firmware: (none yet)\n    ✗ choose the firmware folder', summary)
+            self.assertIn('Firmware: (none)\n    ✗ choose the firmware folder', summary)
             self.assertIn('Online name (what other players see): Player1234', summary)
             self.assertIn('Options: ' + im.OPTION_LAUNCHER + '; ' + im.OPTION_FIREWALL, summary)
             self.assertEqual(calls[0][0][1:], [im.TITLE, 'Set up and build', 'Cancel', 'Cancel', 'Change…', 'Set up and build'])
@@ -559,6 +566,50 @@ class DialogTests(unittest.TestCase):
             for argv, script in calls:   # (no folder, name or text of any kind in a script)
                 self.assertNotIn(tmp, script)
                 self.assertNotIn('NNNN', script)
+
+    @unittest.skipUnless(BASH, 'needs bash')
+    def test_wizard_without_firmware(self):
+        # none found: nothing to fix, it sets up and builds with the open fonts
+        with tempfile.TemporaryDirectory(prefix='wizard test ') as tmp:
+            game, keys = (os.path.join(tmp, n) for n in ('My Game', 'keys'))
+            for d in (game, keys):
+                os.makedirs(d)
+            fake = FakeOsascript(self, ['=Set up and build'])
+            with fake.active():
+                folders, _name, _options = im.wizard({'game': game, 'keys': keys, 'firmware': None}, 'P',
+                                                     {'launcher': True, 'firewall': False}, 'off', OptionalFirmwareChecks())
+            self.assertEqual(folders, {'game': game, 'keys': keys, 'firmware': None})
+            self.assertIn('Firmware: (none)\n    ✓ optional: the open fonts', fake.calls[0][0][0])
+            self.assertEqual(len(fake.calls), 1)
+
+    @unittest.skipUnless(BASH, 'needs bash')
+    def test_wizard_firmware_taken_away_and_chosen(self):
+        # one found: Change… > Firmware asks first whether to do without it (the dialog says what for) or choose another
+        with tempfile.TemporaryDirectory(prefix='wizard test ') as tmp:
+            game, keys, firmware, other = (os.path.join(tmp, n) for n in ('My Game', 'keys', 'firmware', 'other firmware'))
+            for d in (game, keys, firmware, other):
+                os.makedirs(d)
+            fake = FakeOsascript(self, [
+                '=Change…', '=Firmware', '=No firmware',
+                '=Change…', '=Firmware', '=' + other + '/',     # (none now: straight to the folder)
+                '=Change…', '=Firmware', '=Choose…', '',        # (the folder dialog cancelled: kept)
+                '=Change…', '=Firmware', '',                    # (cancelled: kept)
+                '=Set up and build'])
+            with fake.active():
+                folders, _name, _options = im.wizard({'game': game, 'keys': keys, 'firmware': firmware}, 'P',
+                                                     {'launcher': True, 'firewall': False}, 'off', OptionalFirmwareChecks())
+            self.assertEqual(folders, {'game': game, 'keys': keys, 'firmware': other})
+            calls = [c[0] for c in fake.calls]
+            self.assertEqual(calls[2][0], im.FIRMWARE_OPTIONAL)
+            self.assertIn('Chinese, Japanese and Korean', calls[2][0])
+            self.assertEqual(calls[2][1:], [im.TITLE, 'Choose…', 'Cancel', 'Cancel', 'No firmware', 'Choose…'])
+            self.assertIn('Firmware: (none)\n    ✓ optional: the open fonts', calls[3][0])
+            self.assertEqual(calls[5][0], im.PROMPTS['firmware'])
+            self.assertIn('optional', im.PROMPTS['firmware'])
+            self.assertEqual(calls[8][0], im.FIRMWARE_OPTIONAL)
+            self.assertEqual(calls[9][:2], [im.PROMPTS['firmware'], other])
+            self.assertEqual(calls[12][0], im.FIRMWARE_OPTIONAL)
+            self.assertEqual(len(calls), 14)
 
     @unittest.skipUnless(BASH, 'needs bash')
     def test_wizard_cancel(self):
@@ -597,6 +648,43 @@ class TerminalTests(unittest.TestCase):
         self.assertEqual(options, {'launcher': False, 'firewall': True})
         self.assertIn('  game: /no/such/folder - choose the game folder\n', out.getvalue())
 
+    def test_firmware_optional(self):
+        # the question says what the firmware is for; none (typed, or Enter on nothing) is none
+        for typed_firmware, found in (('none', self.dirs['My Firmware']), ('', None)):
+            typed = [self.dirs['My Keys'], typed_firmware, self.dirs['My Game'], '', '', '']
+            with mock.patch('builtins.input', side_effect=typed), contextlib.redirect_stdout(io.StringIO()) as out:
+                folders, _name, _options = im.terminal_answers(arguments(), {'game': None, 'keys': None, 'firmware': found},
+                                                               'P', {'launcher': True, 'firewall': True}, 'on',
+                                                               OptionalFirmwareChecks(), True)
+            self.assertIsNone(folders['firmware'])
+            self.assertIn(im.FIRMWARE_OPTIONAL, out.getvalue())
+            self.assertIn('  firmware: (none) - optional: the open fonts\n', out.getvalue())
+
+    def test_yes_without_firmware(self):
+        # none found, or --no-firmware over the one found: no firmware, and the build is told so
+        for given, found in ((None, None), ('', self.dirs['My Firmware'])):
+            a = arguments(yes=True, game=self.dirs['My Game'], keys=self.dirs['My Keys'], firmware=given)
+            with mock.patch.object(im, 'ROOT', self.top), mock.patch.object(im, 'Checks', OptionalFirmwareChecks), \
+                    mock.patch.object(im, 'detected_folders', lambda: {'game': None, 'keys': None, 'firmware': found}), \
+                    mock.patch('builtins.input', side_effect=AssertionError('asked')), \
+                    contextlib.redirect_stdout(io.StringIO()) as out:
+                files = im.step_files(a, 'off')
+            self.assertIsNone(files['firmware'])
+            self.assertIn('firmware: none: the open fonts', out.getvalue())
+            cmd = im.build_command(arguments(), files)
+            self.assertIn('--no-firmware', cmd)
+            self.assertNotIn('--firmware', cmd)
+            self.assertEqual(cmd[cmd.index('--game') + 1], self.dirs['My Game'])
+        cmd = im.build_command(arguments(), {'game': '/g', 'keys': '/k', 'firmware': '/f'})
+        self.assertEqual(cmd[cmd.index('--firmware') + 1], '/f')
+        self.assertNotIn('--no-firmware', cmd)
+        with mock.patch.object(im, 'ROOT', self.top), mock.patch.object(im, 'Checks', OptionalFirmwareChecks), \
+                mock.patch.object(im, 'detected_folders', lambda: {'game': None, 'keys': None, 'firmware': None}), \
+                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(im.Stop) as stop:
+            im.step_files(arguments(yes=True, game=self.dirs['My Game'], keys=self.dirs['My Keys'],
+                                    firmware=os.path.join(self.top, 'missing')), 'off')
+        self.assertIn('Name it with --firmware (or --no-firmware: the open fonts)', str(stop.exception))
+
     def test_yes(self):
         a = arguments(yes=True, game=self.dirs['My Game'], keys=self.dirs['My Keys'], firmware=self.dirs['My Firmware'])
         with mock.patch.object(im, 'ROOT', self.top), mock.patch.object(im, 'Checks', StubChecks), \
@@ -617,7 +705,7 @@ class TerminalTests(unittest.TestCase):
 
 
     def test_online_name_in_config_folder(self):
-        """online_name.txt where the game reads it (runtime/config.h): config/ once the game has made it
+        """online_name.txt where the game reads it (runtime/config_folder.h): config/ once the game has made it
         (config/version.ini), else the port's folder."""
         def files(**kw):
             with mock.patch.object(im, 'ROOT', self.top), mock.patch.object(im, 'Checks', StubChecks), \
@@ -965,7 +1053,7 @@ class LaunchScriptTests(unittest.TestCase):
         self.assertRegex((self.top / 'online_name.txt').read_text(), r'^Player\d{4}\n$')
 
     def test_online_files_in_config_folder(self):
-        """Once the game has made config/ (runtime/config.h: its version.ini), the name and the direct
+        """Once the game has made config/ (runtime/config_folder.h: its version.ini), the name and the direct
         setting are read and written there; online_server.txt stays the port's own until there is one there."""
         (self.top / 'online_server.txt').write_text('a.example:1\n')
         (self.top / 'online_name.txt').write_text('Old Name\n')

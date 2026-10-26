@@ -2,7 +2,7 @@
 """Build the game for x86-64 Linux: cross-compiled on Windows, or on Linux itself (the toolchain:
 tools/linux/toolchain.py).
 
-Usage: build_linux.py [--port <dir>] [--out <dir>] [--jobs N] [--runtime-only] [--link-only] [--replace]
+Usage: build_linux.py [--port <dir>] [--out <dir>] [--jobs N] [--runtime-only] [--link-only] [--replace] [--game-dll]
 
 The recompiled game is the C the Windows build already generated (tools/recomp.py writes it into
 <port>/build/{main,subsdk0,sdk,nro/*}); this compiles each file again for Linux, next to nothing
@@ -12,7 +12,9 @@ compiled as C++ (see recomp.h). The runtime is runtime/*.c with the Linux platfo
 (runtime/linux), and the program links against DXVK (Direct3D 11 on Vulkan), SDL2, vkd3d-shader
 (built by build_vkd3d.py), libopus and libvpx, the last three statically (on Linux, libopus and
 libvpx as the system has them). Built on Linux, the DXVK libraries go into <out>/lib, so the
-program runs from its own folder.
+program runs from its own folder. With --game-dll the game's modules are linked into a library of
+their own instead, <out>/ssbu_game.so, which the program loads at start (tools/game_dll.py): the
+program is then the runtime alone.
 Incremental: a file is compiled again when its source, the runtime headers it is built with, its
 compile command or the compiler changed (tools/objcache.py: <out>/rt/ and each module's folder keep
 an objcache.json); --link-only links only when nothing is to be compiled, so that <out>/isa.txt, which
@@ -37,6 +39,7 @@ from toolchain import (CFLAGS, CLANG, DXVK_INCLUDE, DXVK_LIBS, HOST_LINUX, ISA, 
                        read_port_stamp, run, same_path, wrapped, write_port_stamp)
 
 sys.path.insert(0, os.path.join(REPO, "tools"))
+import game_dll  # noqa: E402
 import isa  # noqa: E402
 import ladder  # noqa: E402
 import objcache  # noqa: E402
@@ -56,6 +59,19 @@ RUNTIME_INCLUDES = ["-I", os.path.join(RUNTIME, "linux", "include"), "-I", os.pa
                     "-I", os.path.join(DXVK_INCLUDE, "directx"), "-I", os.path.join(SYSROOT, "usr", "include", "SDL2"),
                     "-I", os.path.join(VKD3D_SRC, "include"), "-I", GEN]
 RUNTIME_DEFINES = ["-D_GNU_SOURCE", "-D_REENTRANT", "-DSSBU_HAVE_OPUS", "-DSSBU_HAVE_VPX", "-DSSBU_HAVE_SDL2"]
+# --game-dll (tools/game_dll.py): the game's modules in LIBRARY, which the program's runtime, compiled to
+# (game_dll.DEFINE), loads; the library's objects of its own in LIBRARY_OBJ. A shared library's code is
+# position-independent (-fPIC, after toolchain.py's -fno-pic: the last one counts), and the game's
+# functions are hidden, so that a call between two of them stays a direct call, not one through the
+# library's symbol table. The program stays as it is (-fno-pic, -no-pie). The cost, which only the
+# game can measure: each switch's jump table is offsets added to its address, not addresses, and the
+# loader relocates the modules' tables of functions when it loads the library.
+GAME_DLL = "--game-dll" in sys.argv
+GAME_DLL_FLAGS = ["-fPIC", "-fvisibility=hidden"]
+LIBRARY = os.path.join(OUT, game_dll.SO)
+LIBRARY_OBJ = os.path.join(OUT, "game")
+if GAME_DLL:
+    RUNTIME_DEFINES = RUNTIME_DEFINES + ["-D" + game_dll.DEFINE]
 # Each job's estimated compile in seconds, by its source, for the progress bar (tools/progress.py).
 # A game file's grows with its size and with the square of its biggest function, as on Windows
 # (progress.clang_cost, measured with this build), or is what it took last time (compile_times.json:
@@ -169,6 +185,8 @@ def game_jobs():
                     with open(wrapper, "w") as f:
                         f.write(text)
                 job, inputs = (wrapper, obj, opt), [wrapper, src]
+            if GAME_DLL:
+                job = (*job, GAME_DLL_FLAGS)
             model = progress.TABLE if fname == "g_module.c" else progress.clang_cost(insns, left, opt, cxx)
             rel = os.path.relpath(obj, OUT)[:-2].replace(os.sep, "/") + ".c"
             measured = TIMES.measured(rel, digest, opt)
@@ -262,6 +280,18 @@ def runtime_jobs():
                      + "const HleEntry hle_table[] = {\n" + "".join(f'    {{"{n}", hle_{n}}},\n' for n in names)
                      + f"    {{0, 0}}\n}};\nconst u32 hle_count = {len(names)};\n")
     want((table, os.path.join(rt_out, "hle_table.o"), "-O1", RUNTIME_INCLUDES + RUNTIME_DEFINES))
+    # (the program is linked from every object in rt/: the other kind of build's go)
+    for name in ("wrap_missing.o", "nro_table.o") if GAME_DLL else ("game_funcs.o",):
+        if os.path.exists(os.path.join(rt_out, name)):
+            os.remove(os.path.join(rt_out, name))
+    if GAME_DLL:   # (the originals of the wrapped functions and the NROs' list are the library's: library_jobs)
+        funcs = os.path.join(GEN, game_dll.FUNCS)
+        write_if_changed(funcs, game_dll.funcs_text(RUNTIME))
+        want((funcs, os.path.join(rt_out, "game_funcs.o"), "-O1", RUNTIME_INCLUDES + RUNTIME_DEFINES))
+        record.save()
+        if objcache.summary(why):
+            print(f"runtime: {objcache.summary(why)}")
+        return jobs + library_jobs(headers)
     # A wrapped function no module of this build has (a made-up game's): the original its wrapper names
     # (f_<address>_orig, which nothing reaches) is rt_wrap_missing. The Windows link says so
     # with /alternatename (tools/recomp.py); here it is a weak stub a module's own replaces.
@@ -279,6 +309,29 @@ def runtime_jobs():
     record.save()
     if objcache.summary(why):
         print(f"runtime: {objcache.summary(why)}")
+    return jobs
+
+
+def nro_table_text():
+    nros = [n for n, src, _o in modules() if os.path.basename(os.path.dirname(src)) == "nro"]
+    return ('#include "module.h"\n\n' + "".join(f"extern const RtModule rt_module_{n};\n" for n in nros)
+            + "const RtModule *const rt_nro_modules[] = {" + "".join(f"&rt_module_{n}, " for n in nros) + "0};\n"
+            + f"const u32 rt_nro_count = {len(nros)};\n")
+
+
+def library_jobs(headers):
+    """--game-dll: the library's own objects, of gen/game_tables.c (tools/game_dll.py) and gen/nro_table.c, compiled
+    as the game is (GAME_DLL_FLAGS), into LIBRARY_OBJ."""
+    record, why, jobs = objcache.Record(LIBRARY_OBJ), Counter(), []
+    for name, text in ((game_dll.TABLES, game_dll.tables_text(RUNTIME)), ("nro_table.c", nro_table_text())):
+        src = os.path.join(GEN, name)
+        write_if_changed(src, text)
+        job = (src, os.path.join(LIBRARY_OBJ, name[:-2] + ".o"), "-O1", GAME_DLL_FLAGS)
+        if stale(record, job, [src], headers, why):
+            jobs.append(job)
+    record.save()
+    if objcache.summary(why):
+        print(f"game library: {objcache.summary(why)}")
     return jobs
 
 
@@ -370,8 +423,11 @@ def link():
     objs = []
     rt_out = os.path.join(OUT, "rt")
     objs += sorted(os.path.join(rt_out, n) for n in os.listdir(rt_out) if n.endswith(".o"))
+    library = sorted(os.path.join(LIBRARY_OBJ, n) for n in os.listdir(LIBRARY_OBJ) if n.endswith(".o")) if GAME_DLL else None
     for _name, _src, out_dir in modules():
-        objs += sorted(os.path.join(out_dir, n) for n in os.listdir(out_dir) if n.endswith(".o"))
+        (objs if library is None else library).extend(sorted(os.path.join(out_dir, n) for n in os.listdir(out_dir) if n.endswith(".o")))
+    if os.path.exists(LIBRARY):   # (a --game-dll build's: made again below, or not wanted)
+        os.remove(LIBRARY)
     exe = os.path.join(OUT, "ssbu")
     rsp = exe + ".rsp"
     with open(rsp, "w") as f:
@@ -398,6 +454,25 @@ def link():
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 shutil.copy2(src, dst)
     print(f"linked {len(objs)} objects into {exe} ({os.path.getsize(exe) / 1048576:,.0f} MB) in {time.time() - t0:,.0f}s")
+    return library is None or link_library(library)
+
+
+def link_library(objs):
+    """--game-dll: the game's modules (objs, with library_jobs') linked into LIBRARY, a shared library whose one
+    exported name is game_dll.ENTRY (the rest is hidden: GAME_DLL_FLAGS). It reaches the program's runtime only
+    through its tables (tools/game_dll.py), so -z defs fails the link on any symbol neither it nor the C and C++
+    libraries define."""
+    rsp = LIBRARY + ".rsp"
+    with open(rsp, "w") as f:
+        f.write("\n".join('"%s"' % o.replace("\\", "/") for o in objs))
+    t0 = time.time()
+    code, out = run([CLANG, *TARGET, "-fuse-ld=lld", "-shared", "@" + rsp, "-o", LIBRARY, "-lstdc++", "-lm",
+                     "-Wl,-z,defs", "-Wl,-z,noexecstack", "-Wl,--build-id", "-Wl,-Map=" + LIBRARY + ".map"])
+    if code:
+        errors = [l for l in out.splitlines() if "error" in l.lower()] or out.splitlines()
+        print("the game library's link failed\n" + "\n".join(errors)[:6000])
+        return False
+    print(f"linked {len(objs)} objects into {LIBRARY} ({os.path.getsize(LIBRARY) / 1048576:,.0f} MB) in {time.time() - t0:,.0f}s")
     return True
 
 
