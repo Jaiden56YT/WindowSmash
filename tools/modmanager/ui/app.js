@@ -1,4 +1,4 @@
-// WindowSmash Mods: the page. It asks the app's own server (server.py) for everything.
+// OpenSmash Ultimate Mods: the page. It asks the app's own server (server.py) for everything.
 "use strict";
 const KEY = new URLSearchParams(location.search).get("key") || "";
 const $ = (s, el = document) => el.querySelector(s);
@@ -94,9 +94,13 @@ function render(lib) {
     .filter(Boolean).join("\n\n");
   $("#apply").disabled = lib.game_running;
   const unbuilt = lib.unbuilt || [];
-  $("#build-plugins").hidden = !unbuilt.length;
+  // (always there: a character's or moveset's plugins can be built in any time; marked when one is waiting)
+  $("#build-plugins").hidden = false;
   $("#build-plugins").disabled = lib.game_running;
-  $("#build-plugins").title = `${unbuilt.join(", ")}: ${unbuilt.length > 1 ? "their plugins aren't" : "its plugin isn't"} in the game yet. Compiles ${unbuilt.length > 1 ? "them" : "it"} in (a few minutes).`;
+  $("#build-plugins").classList.toggle("ghost", !unbuilt.length);
+  $("#build-plugins").title = unbuilt.length
+    ? `${unbuilt.join(", ")}: ${unbuilt.length > 1 ? "their plugins aren't" : "its plugin isn't"} in the game yet. Compiles ${unbuilt.length > 1 ? "them" : "it"} in (a few minutes).`
+    : "Compiles the turned-on mods' code plugins (movesets, new characters) and the community plugins into the game again (a few minutes).";
   $("#vanilla").disabled = lib.game_running || !lib.modded;
 
   const q = $("#lib-filter").value.trim().toLowerCase();
@@ -420,7 +424,7 @@ $("#url-go").addEventListener("click", async () => {
 $("#inst-plain").addEventListener("click", () => makeInstaller(null));
 $("#uninstall").addEventListener("click", () => {
   const n = state.lib ? state.lib.mods.length : 0;
-  const d = dialog(`<h2>Uninstall WindowSmash Mods?</h2>
+  const d = dialog(`<h2>Uninstall OpenSmash Ultimate Mods?</h2>
     <p class="hint">The game goes back to its own files, the modded game data is deleted and this app is removed. Your save isn't touched.</p>
     <label><input type="checkbox" id="un-mods"> Also delete my ${n} downloaded mod${n === 1 ? "" : "s"} (the mods folder)</label>
     <div class="dialog-actions"><button class="ghost" data-close>Cancel</button><button class="big" id="un-go">Uninstall</button></div>`);
@@ -430,7 +434,7 @@ $("#uninstall").addEventListener("click", () => {
       closeOverlays();
       runJob(job, (j) => {
         if (j.error) return;
-        document.body.innerHTML = `<div class="empty" style="height:100vh;display:grid;place-content:center"><h2>WindowSmash Mods is uninstalled</h2><p>${esc(j.log.slice(-6).join(" · "))}</p><p>You can close this window.</p></div>`;
+        document.body.innerHTML = `<div class="empty" style="height:100vh;display:grid;place-content:center"><h2>OpenSmash Ultimate Mods is uninstalled</h2><p>${esc(j.log.slice(-6).join(" · "))}</p><p>You can close this window.</p></div>`;
       });
     } catch (e) { fail(e); }
   });
@@ -488,7 +492,7 @@ function packTile(p) {
       <button data-use>Use</button>
       <button class="ghost" data-share>Share</button>
       <button class="ghost" data-file>Save file</button>
-      <button class="ghost" data-inst title="One download that installs WindowSmash Mods and this pack">Installer</button>
+      <button class="ghost" data-inst title="One download that installs OpenSmash Ultimate Mods and this pack">Installer</button>
       <button class="ghost danger" data-del>Delete</button>
     </div></div>`;
   $("[data-use]", el).addEventListener("click", () => openPack({ pack: p }));
@@ -542,7 +546,7 @@ async function sharePack(p) {
     return;
   }
   const d = dialog(`<h2>Share ${esc(p.name)}</h2>
-    <p class="hint">Send this code (Discord, a message…). Your friend pastes it into Modpacks; WindowSmash Mods downloads the same files, in the same order.</p>
+    <p class="hint">Send this code (Discord, a message…). Your friend pastes it into Modpacks; OpenSmash Ultimate Mods downloads the same files, in the same order.</p>
     ${p.unsafe && p.unsafe.length ? onlineBanner({ level: "unsafe", reasons: [p.unsafe.join(", ") + (p.unsafe.length > 1 ? " aren't" : " isn't") + " online safe: play this pack offline, or online only with friends who have it"] }) : ""}
     <div class="code">${esc(code)}</div>
     <div class="dialog-actions"><button class="ghost" data-close>Close</button><button id="copy">Copy code</button></div>`);
@@ -567,8 +571,8 @@ function savePackFile(p) {
 }
 
 function makeInstaller(p) {
-  const d = dialog(`<h2>${p ? "Installer for " + esc(p.name) : "WindowSmash Mods installer"}</h2>
-    <p class="hint">One .zip for Windows and Mac. Your friend unzips it and double-clicks <b>Install WindowSmash Mods</b>: it adds this mod manager to their WindowSmash${p ? " and sets up the pack's mods, turned on and applied" : ""}.</p>
+  const d = dialog(`<h2>${p ? "Installer for " + esc(p.name) : "OpenSmash Ultimate Mods installer"}</h2>
+    <p class="hint">One .zip for Windows and Mac. Your friend unzips it and double-clicks <b>Install OpenSmash Ultimate Mods</b>: it adds this mod manager to their WindowSmash${p ? " and sets up the pack's mods, turned on and applied" : ""}.</p>
     ${p ? '<label><input type="checkbox" id="mi-all"> Carry every mod\'s files in the zip (bigger, but nothing to download while installing)</label>' : ""}
     <div class="dialog-actions"><button class="ghost" data-close>Cancel</button><button class="big" id="mi-go">Make it</button></div>`);
   $("#mi-go", d).addEventListener("click", async () => {
@@ -628,7 +632,7 @@ matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => set
 function showSettings() {
   setTheme(document.documentElement.dataset.theme || "dark");
   const lib = state.lib || {};
-  $("#about").innerHTML = `WindowSmash Mods · ${esc(({ darwin: "macOS", win32: "Windows", linux: "Linux" })[lib.platform] || lib.platform || "")}<br>
+  $("#about").innerHTML = `OpenSmash Ultimate Mods · ${esc(({ darwin: "macOS", win32: "Windows", linux: "Linux" })[lib.platform] || lib.platform || "")}<br>
     WindowSmash folder: <code>${esc(lib.root || "")}</code><br>
     Log (send it if something goes wrong): <code>${esc(lib.log || "")}</code>`;
   showPlugins();

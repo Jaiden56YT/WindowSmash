@@ -5,7 +5,7 @@ OpenSmash-Ultimate turns *Super Smash Bros. Ultimate* into a native PC program b
 > [!NOTE]
 > This is **Jaiden56's mod-focused build**, based on
 > [OpenSmash-Ultimate](https://github.com/OpenSmash-Ultimate/OpenSmash-Ultimate). On top of it: the
-> **WindowSmash Mods** app (GameBanana mods: skins, custom models, new costume slots c08 and up, real Skyline
+> **OpenSmash Ultimate Mods** app (GameBanana mods: skins, custom models, new costume slots c08 and up, real Skyline
 > plugins - ARCropolis, Smashline, the CSK Collection - moveset mods and new characters, modpacks), macOS fixes,
 > Discord Rich Presence and your own Miis. Problems with these additions belong here, not with the original project.
 

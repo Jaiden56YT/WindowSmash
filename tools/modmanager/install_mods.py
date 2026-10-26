@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Installs WindowSmash Mods (the mod manager) into a WindowSmash folder, from the installer zip
+"""Installs OpenSmash Ultimate Mods (the mod manager) into a WindowSmash folder, from the installer zip
 make_installer.py makes - and, when the zip carries a modpack, that pack's mods too, turned on and
-applied. Run by the zip's "Install WindowSmash Mods" (.command on macOS, .bat on Windows), with
+applied. Run by the zip's "Install OpenSmash Ultimate Mods" (.command on macOS, .bat on Windows), with
 WindowSmash's own Python:
 
   install_mods.py --target <WindowSmash folder> [--no-apply] [--no-app] [--no-build]
@@ -31,9 +31,12 @@ PACK = os.path.join(os.path.dirname(HERE), "modpack")
 MANIFEST = os.path.join("tools", "modmanager", "installed.json")
 # the mod manager's files, for a WindowSmash set up before installs kept a record of them
 KNOWN = ["tools/mods.py", "tools/prc.py", "tools/msbt.py", "tools/modmanager", "tools/mac/ModsShell.swift",
-         "tools/mac/build_mods_app.sh", "launchers/WindowSmash Mods.bat", "launchers/WindowSmash Mods.command",
-         "launchers/Uninstall WindowSmash Mods.bat", "launchers/Uninstall WindowSmash Mods.command"]
-APP = "WindowSmash Mods.app"
+         "tools/mac/build_mods_app.sh", "launchers/OpenSmash Ultimate Mods.bat", "launchers/OpenSmash Ultimate Mods.command",
+         "launchers/Uninstall OpenSmash Ultimate Mods.bat", "launchers/Uninstall OpenSmash Ultimate Mods.command"]
+APP = "OpenSmash Ultimate Mods.app"
+# the mod manager's launchers under its old name (WindowSmash Mods): removed when it's installed again
+OLD = ["launchers/WindowSmash Mods.bat", "launchers/WindowSmash Mods.command",
+       "launchers/Uninstall WindowSmash Mods.bat", "launchers/Uninstall WindowSmash Mods.command"]
 
 
 def say(text=""):
@@ -81,6 +84,9 @@ def copy_payload(target):
             if f.endswith((".command", ".sh")):
                 os.chmod(dst, 0o755)
             changed += 1
+    for rel in OLD:   # (the old name's launchers: the mod manager's own, never the game's)
+        remove(os.path.join(target, *rel.split("/")))
+        record.pop(rel, None)
     with open(os.path.join(target, MANIFEST), "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=1)
     return changed
@@ -89,30 +95,37 @@ def copy_payload(target):
 def mac_app(target):
     if subprocess.run(["xcrun", "--find", "swiftc"], capture_output=True).returncode:
         say("  (the app needs Apple's Command Line Tools to build: run  xcode-select --install  then open")
-        say("   launchers/WindowSmash Mods.command; until then it opens in your browser)")
+        say("   launchers/OpenSmash Ultimate Mods.command; until then it opens in your browser)")
         return False
     r = subprocess.run(["bash", os.path.join(target, "tools", "mac", "build_mods_app.sh")], capture_output=True, text=True)
     if r.returncode:
         say("  the app didn't build:\n" + (r.stderr or r.stdout)[-800:])
         return False
-    say("  WindowSmash Mods is in your Applications folder (~/Applications), and Spotlight finds it.")
+    say("  OpenSmash Ultimate Mods is in your Applications folder (~/Applications), and Spotlight finds it.")
     return True
 
 
 def desktop_shortcut():
-    return os.path.join(os.environ.get("USERPROFILE", os.path.expanduser("~")), "Desktop", "WindowSmash Mods.lnk")
+    return os.path.join(os.environ.get("USERPROFILE", os.path.expanduser("~")), "Desktop", "OpenSmash Ultimate Mods.lnk")
 
 
 def windows_shortcut(target):
     q = lambda path: path.replace("'", "''")   # (PowerShell's single-quoted strings)
-    bat = q(os.path.join(target, "launchers", "WindowSmash Mods.bat"))
+    bat = q(os.path.join(target, "launchers", "OpenSmash Ultimate Mods.bat"))
     ico = os.path.join(target, "tools", "modmanager", "ui", "icon.ico")
-    ps = (f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Desktop')+'\\WindowSmash Mods.lnk');"
+    ps = (f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Desktop')+'\\OpenSmash Ultimate Mods.lnk');"
           f"$s.TargetPath='{bat}';$s.WorkingDirectory='{q(target)}';$s.WindowStyle=7;"
           + (f"$s.IconLocation='{q(ico)}';" if os.path.exists(ico) else "") + "$s.Save()")
     r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps], capture_output=True, text=True)
+    # the old name's shortcut, when it opened this folder's mod manager (another folder's is left alone)
+    old = os.path.join(os.path.dirname(desktop_shortcut()), "WindowSmash Mods.lnk")
+    if os.path.exists(old):
+        t = subprocess.run(["powershell", "-NoProfile", "-Command", f"(New-Object -ComObject WScript.Shell).CreateShortcut('{q(old)}').TargetPath"],
+                           capture_output=True, text=True).stdout.strip()
+        if os.path.normcase(os.path.dirname(os.path.dirname(t))) == os.path.normcase(target):
+            remove(old)
     if r.returncode == 0:
-        say("  A \"WindowSmash Mods\" shortcut is on your desktop.")
+        say("  A \"OpenSmash Ultimate Mods\" shortcut is on your desktop.")
 
 
 def install_code_fixes(target):
@@ -155,6 +168,34 @@ def rebuild(target, code_fixes):
         say("\nThe game is built with the fixes.")
 
 
+def community_plugins(target, build):
+    """The community plugins mods are built on (ARCropolis, Smashline 2, One Slot Effects, nro_hook, the CSK
+    Collection: tools/std_plugins.py, from their official releases, checked), fetched the first time, and
+    built into the game; a mod's own plugins (movesets, new characters) are built later, any time, from
+    the app's Build plugins into the game."""
+    py, tools = sys.executable, os.path.join(target, "tools")
+    if not os.path.exists(os.path.join(tools, "std_plugins.py")) or not os.path.exists(os.path.join(target, "runtime", "hle_skyline.c")):
+        return   # (a game without the Skyline runtime: its update brings it)
+    say("\nThe community plugins (ARCropolis, Smashline 2, One Slot Effects, nro_hook, the CSK Collection):")
+    if subprocess.run([py, os.path.join(tools, "std_plugins.py"), "fetch", "--keep", "--tree", target], cwd=target).returncode:
+        say("  they couldn't all be fetched (see above): the app gets them when you press Build plugins into the game")
+        return
+    if not build:
+        return
+    if subprocess.run([py, os.path.join(tools, "skyline.py"), "uptodate", "--tree", target], cwd=target,
+                      capture_output=True).returncode == 0:
+        say("  fetched; the game has them built in already")
+        return
+    if game_open():
+        say("  fetched; the game is open: close it, then press Build plugins into the game in the app")
+        return
+    say("  building them into the game - a few minutes (don't start the game until this says Done)")
+    if subprocess.run([py, os.path.join(tools, "skyline.py"), "build", "--jobs", "2", "--tree", target], cwd=target).returncode:
+        say("  the build stopped (see above): the app's Build plugins into the game tries again")
+    else:
+        say("  built in")
+
+
 def install_pack(target, apply):
     files = [f for f in os.listdir(PACK) if f.endswith(".wsmodpack")] if os.path.isdir(PACK) else []
     if not files:
@@ -194,12 +235,12 @@ def install_pack(target, apply):
     if left:
         say("  not installed: " + ", ".join(m["name"] for m in left))
     if apply and server.game_running():
-        say("  The game is open: the mods are turned on; press Apply in WindowSmash Mods after closing it.")
+        say("  The game is open: the mods are turned on; press Apply in OpenSmash Ultimate Mods after closing it.")
     elif apply:
         try:
             mods.apply(tree, lambda t: say("  " + t))
         except mods.Error as e:
-            say(f"  The mods are installed and turned on, but not applied yet ({e}): open WindowSmash Mods and press Apply.")
+            say(f"  The mods are installed and turned on, but not applied yet ({e}): open OpenSmash Ultimate Mods and press Apply.")
 
 
 # ---- uninstalling ----------------------------------------------------------------------------
@@ -226,7 +267,7 @@ def uninstall(target, delete_mods):
     if game_open():
         say("The game is open: close it first, then run this again.")
         return 1
-    say(f"Removing WindowSmash Mods from {target}")
+    say(f"Removing OpenSmash Ultimate Mods from {target}")
     # the game as it is: its own layer map again, the modded data deleted
     modules = os.path.join(target, "dump", "modules")
     cfg, vanilla = os.path.join(modules, "romfs.cfg"), os.path.join(modules, "romfs_vanilla.cfg")
@@ -246,9 +287,9 @@ def uninstall(target, delete_mods):
         remove(os.path.join(target, "mods"))
         say("  the installed mods are deleted")
     else:
-        say("  your mods are kept in the mods folder (install WindowSmash Mods again to use them)")
+        say("  your mods are kept in the mods folder (install OpenSmash Ultimate Mods again to use them)")
     # the mod manager's files: its own removed, the ones it replaced back
-    record = read_manifest(target).get("files") or {k: "new" for k in KNOWN}
+    record = read_manifest(target).get("files") or {k: "new" for k in KNOWN + OLD}
     restored = 0
     for rel, how in sorted(record.items(), key=lambda kv: -len(kv[0])):
         path = os.path.join(target, *rel.split("/"))
@@ -281,7 +322,7 @@ def uninstall(target, delete_mods):
             shutil.copytree(built, mine, symlinks=True)
             say("  the mod manager app you had before is back")
         else:
-            say("  the WindowSmash Mods app is removed")
+            say("  the OpenSmash Ultimate Mods app is removed")
     elif os.name == "nt":
         remove(desktop_shortcut())
         say("  the desktop shortcut is removed")
@@ -311,7 +352,7 @@ def main():
             except EOFError:
                 delete = False
         return uninstall(target, delete)
-    say(f"Installing WindowSmash Mods into {target}")
+    say(f"Installing OpenSmash Ultimate Mods into {target}")
     n = copy_payload(target)
     say(f"  {n} files put in place (any it replaced are kept as *.before-modmanager)")
     if a.no_app:
@@ -324,7 +365,8 @@ def main():
     install_pack(target, not a.no_apply)
     if not a.no_build:
         rebuild(target, fixes)
-    say("\nDone. Open WindowSmash Mods to find, install and share mods.")
+    community_plugins(target, not a.no_build)
+    say("\nDone. Open OpenSmash Ultimate Mods to find, install and share mods.")
     return 0
 
 

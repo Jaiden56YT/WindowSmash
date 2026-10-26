@@ -1105,7 +1105,7 @@ def build(path, outdir, jobs, per_file, imports=None):
         os.environ["SSBU_DYNAMIC_JUMPS"] = "1"
         os.environ["SSBU_FLAGS_XFER"] = "1"
     try:
-        _build(mod, found, funcs, path, outdir, jobs, per_file)
+        _build(mod, found, funcs, path, outdir, jobs, per_file, imports)
     finally:
         if plain:
             os.environ.pop("SSBU_DYNAMIC_JUMPS", None)
@@ -1135,7 +1135,7 @@ def standard_plugins():
     return {r["module"] for r in record.values() if str(r.get("mod", "")).startswith("(standard) ")}
 
 
-def _build(mod, found, funcs, path, outdir, jobs, per_file):
+def _build(mod, found, funcs, path, outdir, jobs, per_file, imports=None):
     name, base = module_key(path), base_of(path)
     os.makedirs(outdir, exist_ok=True)
     modcache.clear_stamp(outdir)   # (until generated and compiled again)

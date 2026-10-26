@@ -1,8 +1,8 @@
-// WindowSmash Mods on macOS: a window around the mod manager's page. tools/modmanager/server.py
+// OpenSmash Ultimate Mods on macOS: a window around the mod manager's page. tools/modmanager/server.py
 // is the app (the same on Windows, where it opens in Edge's app mode); this starts it, shows its
 // page in a web view, gives the page what a browser would (file pickers, confirm dialogs, saving a
 // modpack file, links opened in the browser) and stops the server when the window closes.
-// Built by tools/mac/build_mods_app.sh into build-mac/WindowSmash Mods.app.
+// Built by tools/mac/build_mods_app.sh into build-mac/OpenSmash Ultimate Mods.app.
 import AppKit
 import WebKit
 
@@ -43,14 +43,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 820),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
-        window.title = "WindowSmash Mods"
+        window.title = "OpenSmash Ultimate Mods"
         window.titlebarAppearsTransparent = true
         window.appearance = NSAppearance(named: .darkAqua)
         window.backgroundColor = NSColor(red: 0.043, green: 0.039, blue: 0.141, alpha: 1)
         window.minSize = NSSize(width: 720, height: 520)
         window.contentView = web
         window.center()
-        window.setFrameAutosaveName("WindowSmashMods")
+        window.setFrameAutosaveName("OpenSmashUltimateMods")
         window.makeKeyAndOrderFront(nil)
         menus()
         web.loadHTMLString("<body style='background:#0b0a24;color:#a69fd2;font:15px system-ui;display:grid;place-items:center;height:90vh'>Starting…</body>", baseURL: nil)
@@ -92,7 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
 
     func fail(_ text: String) {
         let a = NSAlert()
-        a.messageText = "WindowSmash Mods"
+        a.messageText = "OpenSmash Ultimate Mods"
         a.informativeText = text
         a.runModal()
         NSApp.terminate(nil)
@@ -112,7 +112,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         let main = NSMenu()
         let app = NSMenuItem(); main.addItem(app)
         let am = NSMenu()
-        am.addItem(withTitle: "Quit WindowSmash Mods", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        am.addItem(withTitle: "Quit OpenSmash Ultimate Mods", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         app.submenu = am
         let edit = NSMenuItem(); main.addItem(edit)
         let em = NSMenu(title: "Edit")

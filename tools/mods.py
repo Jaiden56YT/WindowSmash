@@ -69,6 +69,7 @@ import sys
 import tempfile
 import time
 import zlib
+import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
@@ -337,7 +338,7 @@ def gamebanana_get(path):
         return json.load(r), ctx
 
 
-def gamebanana_install(tree, mod_id, file_id=None, progress=None):
+def gamebanana_install(tree, mod_id, file_id=None, progress=None, log=None):
     data, ctx = gamebanana_get(f"/Mod/{int(mod_id)}?_csvProperties=_sName,_aFiles,_aPreviewMedia,_aSubmitter,_aCategory")
     files = data.get("_aFiles") or []
     if not files:
@@ -351,18 +352,46 @@ def gamebanana_install(tree, mod_id, file_id=None, progress=None):
     image = f"{images[0]['_sBaseUrl']}/{images[0].get('_sFile530') or images[0]['_sFile']}" if images else ""
     with tempfile.TemporaryDirectory(prefix="windowsmash-dl-") as tmp:
         target = os.path.join(tmp, os.path.basename(f["_sFile"]))
-        req = urllib.request.Request(f["_sDownloadUrl"], headers={"User-Agent": "WindowSmash mod manager"})
-        md5 = hashlib.md5()
-        with urllib.request.urlopen(req, timeout=60, context=ctx) as r, open(target, "wb") as out:
-            total, done = int(r.headers.get("Content-Length") or f.get("_nFilesize") or 0), 0
-            while chunk := r.read(1 << 20):
-                out.write(chunk)
-                md5.update(chunk)
-                done += len(chunk)
-                if progress:
-                    progress(done, total)
-        if f.get("_sMd5Checksum") and md5.hexdigest() != f["_sMd5Checksum"].lower():
-            raise Error(f"{f['_sFile']} did not download whole (its checksum differs): try again")
+        # (a large download can stop short on a slow or busy connection: it's tried again, from where it
+        # stopped when the server allows that, before giving up)
+        tries = 4
+        for attempt in range(1, tries + 1):
+            have = os.path.getsize(target) if os.path.exists(target) else 0
+            headers = {"User-Agent": "WindowSmash mod manager"}
+            if have:
+                headers["Range"] = f"bytes={have}-"
+            try:
+                with urllib.request.urlopen(urllib.request.Request(f["_sDownloadUrl"], headers=headers), timeout=60, context=ctx) as r:
+                    resumed = have and r.status == 206
+                    total = (have if resumed else 0) + int(r.headers.get("Content-Length") or 0) or int(f.get("_nFilesize") or 0)
+                    with open(target, "ab" if resumed else "wb") as out:
+                        done = have if resumed else 0
+                        while chunk := r.read(1 << 20):
+                            out.write(chunk)
+                            done += len(chunk)
+                            if progress:
+                                progress(done, total)
+            except urllib.error.HTTPError as e:
+                if not (have and e.code == 416):   # (416: nothing after what's there, so it's all there: checked below)
+                    raise Error(f"{f['_sFile']} didn't download (GameBanana said {e.code} {e.reason}): try again later")
+            except (OSError, urllib.error.URLError) as e:   # (a connection dropped: tried again)
+                if attempt == tries:
+                    raise Error(f"{f['_sFile']} didn't download ({e}): try again")
+                if log:
+                    log(f"  the download stopped ({e}); trying again ({attempt + 1} of {tries})")
+                time.sleep(2 * attempt)
+                continue
+            md5 = hashlib.md5()
+            with open(target, "rb") as got:
+                while chunk := got.read(1 << 20):
+                    md5.update(chunk)
+            if not f.get("_sMd5Checksum") or md5.hexdigest() == f["_sMd5Checksum"].lower():
+                break
+            os.remove(target)   # (a wrong file is downloaded again from the start)
+            if attempt == tries:
+                raise Error(f"{f['_sFile']} did not download whole (its checksum differs, {tries} tries): try again later")
+            if log:
+                log(f"  {f['_sFile']} came down incomplete (its checksum differs); downloading it again ({attempt + 1} of {tries})")
         meta = {"gamebanana": int(mod_id), "title": data.get("_sName", ""), "image": image,
                 "author": (data.get("_aSubmitter") or {}).get("_sName", ""),
                 "category": (data.get("_aCategory") or {}).get("_sName", ""), "file": f["_sFile"], "file_id": f["_idRow"],
@@ -420,7 +449,7 @@ def replace_file(tmp, path):
     try:
         os.replace(tmp, path)
     except PermissionError:
-        raise Error(f"{os.path.basename(path)} is open in another program (the game, or another WindowSmash Mods window): "
+        raise Error(f"{os.path.basename(path)} is open in another program (the game, or another OpenSmash Ultimate Mods window): "
                     "close it and apply again")
 
 

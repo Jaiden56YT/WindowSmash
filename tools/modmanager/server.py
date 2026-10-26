@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""WindowSmash Mods: the mod manager's app, for Windows and macOS - a small web server on this
+"""OpenSmash Ultimate Mods: the mod manager's app, for Windows and macOS - a small web server on this
 computer (127.0.0.1 only, a random port and key) that the window talks to, over tools/mods.py.
 
 Usage:
   server.py [--tree <port folder>] [--no-window] [--port N]
 
-The window: on macOS the WindowSmash Mods app (tools/mac/ModsShell.swift, a web view) starts this
+The window: on macOS the OpenSmash Ultimate Mods app (tools/mac/ModsShell.swift, a web view) starts this
 and shows its page; elsewhere this opens it in Edge's or Chrome's app mode (a window of its own),
 else the default browser. Started that way, the server ends when the window has been closed for a
 while (the page pings it every few seconds).
@@ -291,6 +291,15 @@ def fetch_standard(root, log, every=False):
 
 # ---- the server ------------------------------------------------------------------------------
 
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        """A window closed or reloaded mid-request (Edge's app window, the web view): not an error to log."""
+        if isinstance(sys.exc_info()[1], (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, TimeoutError)):
+            return
+        note(f"a request from {client_address[0]} failed:\n" + traceback.format_exc())
+
 def has_new_slots(folder):
     """Whether a mod adds costume slots (its config.json's new directories; a config.json can hold only an
     unshare-blacklist)."""
@@ -344,6 +353,8 @@ class App:
         out["unsafe_on"] = [m.get("title") or m["name"] for m in out["mods"] if m["enabled"] and m["online"]["level"] == "unsafe"]
         out["same_on"] = [m.get("title") or m["name"] for m in out["mods"] if m["enabled"] and m["online"]["level"] == "same"]
         out["unbuilt"] = [m.get("title") or m["name"] for m in out["mods"] if m["enabled"] and any(not p["built"] for p in m["plugin_state"])]
+        if any(p[5] == "runs" and not os.path.exists(os.path.join(std_plugins.folder(self.tree.root), n)) for n, p in std_plugins.PLUGINS.items()):
+            out["unbuilt"].insert(0, "The community plugins")   # (Build plugins into the game fetches and builds them in)
         out["game_running"] = game_running()
         out["root"] = self.tree.root
         out["platform"] = sys.platform
@@ -447,7 +458,7 @@ class App:
         if path == "/api/install/gamebanana":
             mid, fid = int(body["id"]), body.get("file")
             return self.jobs.start(body.get("title") or f"GameBanana mod {mid}",
-                                   lambda log, progress: {"installed": mods.gamebanana_install(t, mid, fid, progress)})
+                                   lambda log, progress: {"installed": mods.gamebanana_install(t, mid, fid, progress, log)})
         if path == "/api/install/url":
             url = body["url"].strip()
             if not re.match(r"https?://", url):
@@ -497,7 +508,7 @@ class App:
                     raise mods.Error(out.getvalue().strip().splitlines()[-1])
                 threading.Timer(8, lambda: os._exit(0)).start()   # (nothing left to serve)
                 return {"done": True}
-            return self.jobs.start("Removing WindowSmash Mods", gone)
+            return self.jobs.start("Removing OpenSmash Ultimate Mods", gone)
         if path == "/api/pack/delete":
             packs.delete_pack(t, body["id"])
             return {"packs": packs.saved_packs(t)}
@@ -510,21 +521,30 @@ class App:
 
             def use(log, progress):
                 need = packs.missing(t, pack)
+                failed = []   # (one mod that can't be had doesn't stop the rest of the pack)
                 for k, m in enumerate(need):
-                    log(f"downloading {m.get('title') or m['name']} ({k + 1} of {len(need)})")
-                    if m.get("gamebanana"):
-                        mods.gamebanana_install(t, int(m["gamebanana"]), m.get("file_id") or pack_file(m),
-                                                lambda d, tot: progress((k + (d / tot if tot else 0)) / max(1, len(need))))
-                    elif m.get("url"):
-                        install_url(t, m["url"], log, lambda d, tot: progress((k + (d / tot if tot else 0)) / max(1, len(need))))
-                    else:
-                        log(f"{m['name']} travels with the pack's installer: it isn't here")
+                    title = m.get("title") or m["name"]
+                    log(f"downloading {title} ({k + 1} of {len(need)})")
+                    try:
+                        if m.get("gamebanana"):
+                            mods.gamebanana_install(t, int(m["gamebanana"]), m.get("file_id") or pack_file(m),
+                                                    lambda d, tot: progress((k + (d / tot if tot else 0)) / max(1, len(need))), log)
+                        elif m.get("url"):
+                            install_url(t, m["url"], log, lambda d, tot: progress((k + (d / tot if tot else 0)) / max(1, len(need))))
+                        else:
+                            log(f"{m['name']} travels with the pack's installer: it isn't here")
+                    except (mods.Error, OSError, urllib.error.URLError, ValueError) as e:
+                        log(f"{title}: couldn't install it ({e}); carrying on with the others")
+                        failed.append(f"{title} ({e})")
                 left = packs.use_pack(t, pack, only)
                 packs.save_pack(t, pack)
                 if left:
                     log("not installed: " + ", ".join(m["name"] for m in left))
                 if body.get("apply", True) and not game_running():
                     mods.apply(t, log)
+                if failed:
+                    raise mods.Error(f"the rest of the pack is in, but {len(failed)} couldn't be installed (use the pack again to retry): "
+                                     + "; ".join(failed))
                 return {"left": [m["name"] for m in left]}
             return self.jobs.start(f"Modpack {pack.get('name', '')}", use)
         raise mods.Error(f"unknown {path}")
@@ -689,15 +709,15 @@ def main():
     # one server for a tree: a second start (the app opened again) shows the running one's page
     running = running_server(a.tree)
     if running:
-        note(f"WindowSmash Mods already running (process {running['pid']}): its window opened again")
+        note(f"OpenSmash Ultimate Mods already running (process {running['pid']}): its window opened again")
         print(json.dumps({"url": running["url"]}), flush=True)
         if not a.no_window:
             open_window(running["url"])
         return
-    note(f"WindowSmash Mods started ({sys.platform}, Python {sys.version.split()[0]}, {a.tree})")
+    note(f"OpenSmash Ultimate Mods started ({sys.platform}, Python {sys.version.split()[0]}, {a.tree})")
     key = secrets.token_urlsafe(18)
     app = App(a.tree, key, watch=True)
-    srv = ThreadingHTTPServer(("127.0.0.1", a.port), make_handler(app))
+    srv = Server(("127.0.0.1", a.port), make_handler(app))
     url = f"http://127.0.0.1:{srv.server_address[1]}/?key={key}"
     marker = os.path.join(a.tree, "dump", "mods", "server.json")
     try:
@@ -716,7 +736,7 @@ def main():
                     os.remove(marker)
         except (OSError, ValueError):
             pass
-        note("WindowSmash Mods closed")
+        note("OpenSmash Ultimate Mods closed")
         os._exit(0)   # (nothing is left to wait for: no thread keeps the process, and so the log, alive)
 
     def watchdog():   # (the window closed: it said bye, or nothing pings; jobs still running are let finish)

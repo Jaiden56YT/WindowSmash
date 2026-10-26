@@ -1,5 +1,5 @@
 #!/bin/bash
-# Removes WindowSmash Mods and puts the game back as it was: the game reads its own files again,
+# Removes OpenSmash Ultimate Mods and puts the game back as it was: the game reads its own files again,
 # the modded data is deleted, the mod manager is removed (files it replaced put back); it asks
 # whether to delete your downloaded mods too. (tools/modmanager/install_mods.py --uninstall)
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"

@@ -54,7 +54,7 @@ import install_linux as il  # noqa: E402  (the update, download and folder helpe
 
 # Updates come from this branch (of tools/linux/install_linux.py's repository).
 # SSBU_UPDATE_BRANCH names another, for testing one.
-BRANCH = os.environ.get("SSBU_UPDATE_BRANCH") or "main"
+BRANCH = os.environ.get("SSBU_UPDATE_BRANCH") or "opensmash"
 DEPS = il.DEPS
 VENV = il.VENV
 DOWNLOADS = os.path.join(DEPS, "downloads")
@@ -78,7 +78,7 @@ ICON = os.path.join(ROOT, "docs", "assets", "windowsmash.ico")
 LAUNCHERS = ["Install WindowSmash.command", "Play SSBU.command", "launchers/Play SSBU Offline.command",
              "launchers/Host SSBU Netplay.command", "launchers/Join SSBU Netplay.command",
              "launchers/Unlock All Fighters.command", "launchers/Build WindowSmash.command",
-             "Mods.command", "launchers/WindowSmash Mods.command", "launchers/Uninstall WindowSmash Mods.command",
+             "Mods.command", "launchers/OpenSmash Ultimate Mods.command", "launchers/Uninstall OpenSmash Ultimate Mods.command",
              "launchers/Import Miis.command", "tools/mac/launch.sh"]
 EMULATORS = ("yuzu", "eden", "sudachi", "citron", "suyu", "torzu")   # yuzu and the forks with its layout
 SSBU_TITLES = "01006a800016"   # (Super Smash Bros. Ultimate's title ids: the game's, its update's and DLC's)
@@ -1030,7 +1030,26 @@ def step_build(a, files):
     if subprocess.run(cmd, cwd=ROOT).returncode:
         raise Stop("The build stopped (the message above says why). Fix that, then run Install WindowSmash.command again: "
                    "it carries on where it stopped.")
+    if not a.skip_build:
+        community_plugins(a)
     return not a.skip_build and os.path.isdir(APP)
+
+
+def community_plugins(a):
+    """The community Skyline plugins mods need (ARCropolis, Smashline 2, One Slot Effects, nro_hook, the CSK
+    Collection), from their own releases (tools/std_plugins.py checks each), built into the game; a mod's own
+    plugins (movesets, new characters) are built any time from OpenSmash Ultimate Mods. Install_windowsmash.ps1's too."""
+    tools = os.path.join(ROOT, "tools")
+    if not os.path.exists(os.path.join(tools, "std_plugins.py")):
+        return
+    info("the community plugins: fetched from their releases and built in (tools/std_plugins.py, tools/skyline.py); "
+         "don't start the game until this says Done")
+    if subprocess.run([venv_python(), os.path.join(tools, "std_plugins.py"), "fetch"], cwd=ROOT).returncode:
+        info("the plugins couldn't be fetched (see above): OpenSmash Ultimate Mods' Build plugins into the game gets them later")
+        return
+    cmd = [venv_python(), os.path.join(tools, "skyline.py"), "build"] + (["--jobs", str(a.jobs)] if a.jobs else [])
+    if subprocess.run((["caffeinate", "-i"] if shutil.which("caffeinate") else []) + cmd, cwd=ROOT).returncode:
+        info("building the plugins in stopped (see above); the game itself is built")
 
 
 # ---- step 8: launchers -----------------------------------------------------------------------------------
@@ -1117,6 +1136,11 @@ def step_launchers(a, files):
         make_executable()
     info("in this folder: Play SSBU.command (online); in launchers/: Play SSBU Offline, Host SSBU Netplay, "
          "Join SSBU Netplay, Unlock All Fighters, Build WindowSmash (.command)")
+    mods_app = os.path.join(ROOT, "tools", "mac", "build_mods_app.sh")
+    if os.path.exists(mods_app) and not a.dry_run:   # (the mod manager: Mods.command builds it too, the first time)
+        r = subprocess.run(["bash", mods_app], capture_output=True, text=True)
+        info("OpenSmash Ultimate Mods (the mod manager): " + ("~/Applications/OpenSmash Ultimate Mods.app" if r.returncode == 0
+             else "not built (" + (r.stderr or r.stdout).strip()[-200:] + "); Mods.command opens it in the browser"))
     if not files.get("launcher"):
         info(f"{LAUNCHER_NAME} in ~/Applications: not wanted")
         return None
