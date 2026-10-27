@@ -436,6 +436,7 @@ struct Surface {
     float clear_color[4], clear_depth;
     u32 clear_stencil;
     u64 used;
+    u64 last_drawn, steady_from;           /* colour: the frame (gfx_stat_presented) last drawn to, and since when every frame */
     u64 written;                           /* depth surfaces: draws and clears that changed it so far (snap_written: as copied) */
     id<MTLTexture> snap, snap_srv[2][2];   /* a copy of a depth surface, for the draws that read it while testing against it */
     u64 snap_written;
@@ -3368,6 +3369,32 @@ static int index_data(const u32 *regs, GBuf **buf, u32 *offset, MTLIndexType *ty
 
 static void save_sampled(void);
 
+/* A draw whose shaders are still compiling is skipped, and the frame goes on without it - unless
+ * its target is not drawn every frame: a target drawn once (the game draws a Mii's face and its
+ * portrait once, as the Mii loads) would keep the gap for good, so such a draw waits for its
+ * shaders (SHADER_WAIT_MS at most; SSBU_SHADER_WAIT=<ms>, 0: never). */
+#define SHADER_WAIT_MS 2000
+#define STEADY_FRAMES 60   /* (drawn every frame for this long: a target of every frame) */
+static int steady_target(const u32 *regs) {
+    u32 sel = regs[M_CT_SELECT];
+    if (!(sel & 15)) return 1;   /* (depth only: shadow maps) */
+    u32 ct = (sel >> 4) & 7;
+    u64 g = gpu_va_to_guest((u64)regs[M_CT(ct)] << 32 | regs[M_CT(ct) + 1]);
+    for (u32 i = 0; i < nsurfaces; i++) {
+        Surface *s = &surfaces[i];
+        if (s->tex && !s->depth && s->guest == g && s->width == regs[M_CT(ct) + 2] && s->height == regs[M_CT(ct) + 3])
+            return s->last_drawn + 1 >= gfx_stat_presented && gfx_stat_presented - s->steady_from >= STEADY_FRAMES;
+    }
+    return 0;
+}
+
+static int shader_wait_until(const u32 *regs, u64 *until) {   /* (whether to wait on, now: the first ask decides) */
+    static int ms = -1;
+    if (ms < 0) ms = getenv("SSBU_SHADER_WAIT") ? atoi(getenv("SSBU_SHADER_WAIT")) : SHADER_WAIT_MS;
+    if (!*until) *until = ms && !steady_target(regs) ? GetTickCount64() + (u64)ms : 1;
+    return *until > 1 && GetTickCount64() < *until;
+}
+
 void gfx_draw(const u32 *regs, const CbBinding cb[STAGES][18], int indexed) {
     if (!enter()) return;
     kept_flush();
@@ -3384,6 +3411,8 @@ void gfx_draw(const u32 *regs, const CbBinding cb[STAGES][18], int indexed) {
     u64 ps_g = regs[M_PIPELINE(5)] & 1 ? gpu_va_to_guest(region + regs[M_PIPELINE(5) + 1]) : 0;
     /* the pixel shader is asked for once the vertex shader is translated (its outputs are the
      * pixel shader's inputs), not once it is compiled: both compile at the same time */
+    u64 wait_until = 0;
+again:;
     Shader *vs_e = vs_g ? find_shader_ex(vs_g, SHADER_VERTEX, 0, cb[STAGE_VERTEX], NULL, 0, 0) : NULL;
     Shader *ps_e = vs_e && state_of(&vs_e->state) != 2 && ps_g ? find_shader_ex(ps_g, SHADER_PIXEL, vs_e->info.outputs, cb[STAGE_FRAGMENT], NULL, 0, 0) : NULL;
     /* The fixed-function alpha test (ui2d's alpha compare: the main menu's stencil masks are cut
@@ -3395,6 +3424,8 @@ void gfx_draw(const u32 *regs, const CbBinding cb[STAGES][18], int indexed) {
     Shader *vs = vs_e && state_of(&vs_e->state) == 1 ? vs_e : NULL;
     Shader *ps = pa_e && state_of(&pa_e->state) == 1 ? pa_e : ps_e && state_of(&ps_e->state) == 1 ? ps_e : NULL;
     /* no fragment stage (depth only: shadow maps, depth pre-passes) draws with no pixel shader */
+    int compiling = !vs_e || state_of(&vs_e->state) == 0 || (ps_g && (!ps_e || state_of(&ps_e->state) == 0)) || (pa_e && state_of(&pa_e->state) == 0);
+    if ((!vs || (ps_g && !ps)) && topo && compiling && shader_wait_until(regs, &wait_until)) { Sleep(1); goto again; }
     if (!vs || (ps_g && !ps) || !topo) {
         gfx_stat_skipped++;
         if (!topo) gfx_skip_topology++; else gfx_skip_shader++;
@@ -3420,6 +3451,10 @@ void gfx_draw(const u32 *regs, const CbBinding cb[STAGES][18], int indexed) {
         if (sf) { tg.depth = sf; if (!rt_w) { rt_w = sf->width; rt_h = sf->height; rt_sx = sf->sx; rt_sy = sf->sy; } }
     }
     if (!rt_w) { gfx_stat_skipped++; gfx_skip_target++; leave(); return; }
+    if (tg.color[0] && tg.color[0]->last_drawn != gfx_stat_presented) {   /* (steady_target) */
+        if (tg.color[0]->last_drawn + 1 != gfx_stat_presented) tg.color[0]->steady_from = gfx_stat_presented;
+        tg.color[0]->last_drawn = gfx_stat_presented;
+    }
     tg.scratch_depth = !tg.depth && ps_used && ps_used->info.writes_depth;
 
     /* viewport and the clip-space fix-up */
@@ -3556,6 +3591,7 @@ void gfx_draw(const u32 *regs, const CbBinding cb[STAGES][18], int indexed) {
     } else if (tg.scratch_depth) pk.depth = (u16)MTLPixelFormatDepth32Float;
     float blend_const[4] = {f32_of(regs[M_BLEND_CONST(0)]), f32_of(regs[M_BLEND_CONST(1)]), f32_of(regs[M_BLEND_CONST(2)]), f32_of(regs[M_BLEND_CONST(3)])};
     Pipeline *pipe = get_pipeline(&pk);
+    while (!pipe && shader_wait_until(regs, &wait_until)) { Sleep(1); pipe = get_pipeline(&pk); }
     if (!pipe) {   /* (made by the compiler threads: skipped until then) */
         gfx_stat_skipped++;
         gfx_skip_shader++;
@@ -4114,6 +4150,31 @@ int gfx_metal_read_surface(u64 guest, int depth, void *out, u32 size, u32 *w, u3
     size_t n = (size_t)row * s->hh;
     memcpy(out, buf.contents, n < size ? n : size);
     *w = s->hw; *h = s->hh; *format = (u32)s->storage;
+    leave();
+    return 1;
+}
+
+int gfx_read_target(u64 va, u32 row_bytes, u32 height, void *out) {
+    if (!enter()) return 0;
+    u64 guest = gpu_va_to_guest(va);
+    Surface *s = NULL;
+    for (u32 i = 0; i < nsurfaces; i++)
+        if (surfaces[i].tex && !surfaces[i].depth && surfaces[i].guest == guest && (!s || surfaces[i].used > s->used)) s = &surfaces[i];
+    u32 bpp = s ? pixel_bytes(s->storage) : 0;
+    if (!s || s->width * bpp != row_bytes || s->height != height) { leave(); return 0; }
+    settle(s);
+    u32 row = s->hw * bpp;
+    id<MTLBuffer> buf = [dev newBufferWithLength:(NSUInteger)row * s->hh options:MTLResourceStorageModeShared];
+    [blits() copyFromTexture:s->tex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(s->hw, s->hh, 1)
+                    toBuffer:buf destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:(NSUInteger)row * s->hh];
+    submit(1);
+    const u8 *in = buf.contents;
+    for (u32 y = 0; y < height; y++) {   /* (a scaled target: its nearest host pixels) */
+        const u8 *r = in + (size_t)((u64)y * s->hh / height) * row;
+        u8 *o = (u8 *)out + (size_t)y * row_bytes;
+        if (s->hw == s->width) memcpy(o, r, row_bytes);
+        else for (u32 x = 0; x < s->width; x++) memcpy(o + x * bpp, r + (size_t)((u64)x * s->hw / s->width) * bpp, bpp);
+    }
     leave();
     return 1;
 }

@@ -77,6 +77,7 @@ typedef struct Surface {
     ID3D11ShaderResourceView *srv;
     ID3D11ShaderResourceView *srv_other;  /* 8-bit colour: the other reading of the bytes (sRGB / plain) */
     u64 used;
+    u64 last_drawn, steady_from;          /* colour: the frame (gfx_stat_presented) last drawn to, and since when every frame */
 } Surface;
 
 static Surface surfaces[2048];
@@ -3856,6 +3857,32 @@ static void gpu_times_frame(void) {
     free(t);
 }
 
+/* A draw whose shaders are still compiling is skipped, and the frame goes on without it - unless
+ * its target is not drawn every frame: a target drawn once (the game draws a Mii's face and its
+ * portrait once, as the Mii loads) would keep the gap for good, so such a draw waits for its
+ * shaders (SHADER_WAIT_MS at most; SSBU_SHADER_WAIT=<ms>, 0: never). */
+#define SHADER_WAIT_MS 2000
+#define STEADY_FRAMES 60   /* (drawn every frame for this long: a target of every frame) */
+static int steady_target(const u32 *regs) {
+    u32 sel = regs[M_CT_SELECT];
+    if (!(sel & 15)) return 1;   /* (depth only: shadow maps) */
+    u32 ct = (sel >> 4) & 7;
+    u64 g = gpu_va_to_guest((u64)regs[M_CT(ct)] << 32 | regs[M_CT(ct) + 1]);
+    for (u32 i = 0; i < nsurfaces; i++) {
+        Surface *s = &surfaces[i];
+        if (s->tex && !s->depth && s->guest == g && s->width == regs[M_CT(ct) + 2] && s->height == regs[M_CT(ct) + 3])
+            return s->last_drawn + 1 >= gfx_stat_presented && gfx_stat_presented - s->steady_from >= STEADY_FRAMES;
+    }
+    return 0;
+}
+
+static int shader_wait_until(const u32 *regs, u64 *until) {   /* (whether to wait on, now: the first ask decides) */
+    static int ms = -1;
+    if (ms < 0) ms = getenv("SSBU_SHADER_WAIT") ? atoi(getenv("SSBU_SHADER_WAIT")) : SHADER_WAIT_MS;
+    if (!*until) *until = ms && !steady_target(regs) ? GetTickCount64() + (u64)ms : 1;
+    return *until > 1 && GetTickCount64() < *until;
+}
+
 void gfx_draw(const u32 *regs, const CbBinding cb[STAGES][18], int indexed) {
     if (!enter()) return;
     kept_flush();
@@ -3874,6 +3901,8 @@ void gfx_draw(const u32 *regs, const CbBinding cb[STAGES][18], int indexed) {
     u64 ps_g = regs[M_PIPELINE(5)] & 1 ? gpu_va_to_guest(region + regs[M_PIPELINE(5) + 1]) : 0;
     /* the pixel shader is asked for once the vertex shader is translated (its outputs are the
      * pixel shader's inputs), not once it is compiled: both compile at the same time */
+    u64 wait_until = 0;
+again:;
     Shader *vs_e = vs_g ? find_shader_ex(vs_g, SHADER_VERTEX, 0, cb[STAGE_VERTEX], NULL, 0, 0) : NULL;
     Shader *ps_e = vs_e && vs_e->state != 2 && ps_g ? find_shader_ex(ps_g, SHADER_PIXEL, vs_e->info.outputs, cb[STAGE_FRAGMENT], NULL, 0, 0) : NULL;
     /* The fixed-function alpha test (ui2d's alpha compare: the main menu's stencil masks are cut
@@ -3885,6 +3914,11 @@ void gfx_draw(const u32 *regs, const CbBinding cb[STAGES][18], int indexed) {
     Shader *vs = vs_e && vs_e->state == 1 ? vs_e : NULL;
     Shader *ps = pa_e && pa_e->state == 1 ? pa_e : ps_e && ps_e->state == 1 ? ps_e : NULL;
     /* no fragment stage (depth only: shadow maps, depth pre-passes) draws with no pixel shader */
+    int compiling = !vs_e || vs_e->state == 0 || (ps_g && (!ps_e || ps_e->state == 0)) || (pa_e && pa_e->state == 0);
+    if ((!vs || (ps_g && !ps)) && topo != D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED && compiling && shader_wait_until(regs, &wait_until)) {
+        Sleep(1);
+        goto again;
+    }
     if (!vs || (ps_g && !ps) || topo == D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED) {
         gfx_stat_skipped++;
         if (topo == D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED) gfx_skip_topology++; else gfx_skip_shader++;
@@ -3903,6 +3937,10 @@ void gfx_draw(const u32 *regs, const CbBinding cb[STAGES][18], int indexed) {
         if (!va || !regs[M_CT(ct) + 4]) continue;
         Surface *sf = surface(gpu_va_to_guest(va), regs[M_CT(ct) + 2], regs[M_CT(ct) + 3], regs[M_CT(ct) + 4], 0);
         if (sf) { rtv[i] = sf->rtv; if (!rt_w) { rt_w = sf->width; rt_h = sf->height; rt_sx = sf->sx; rt_sy = sf->sy; } }
+        if (sf && i == 0 && sf->last_drawn != gfx_stat_presented) {   /* (steady_target) */
+            if (sf->last_drawn + 1 != gfx_stat_presented) sf->steady_from = gfx_stat_presented;
+            sf->last_drawn = gfx_stat_presented;
+        }
     }
     if (regs[M_ZT_SELECT] & 1) {
         u64 va = (u64)regs[M_ZT_A] << 32 | regs[M_ZT_A + 1];
@@ -4791,6 +4829,49 @@ static void clear_channels(Surface *s, const float color[4], u32 mask) {
     ID3D11DeviceContext_PSSetShader(ctx, ps, NULL, 0);
     ID3D11DeviceContext_PSSetConstantBuffers(ctx, 2, 1, &cb);
     ID3D11DeviceContext_Draw(ctx, 3, 0);
+}
+
+/* Bytes a pixel of an uncompressed format takes (0: one this doesn't know). */
+static u32 format_bytes(DXGI_FORMAT f) {
+    if (f >= 1 && f <= 4) return 16;
+    if (f >= 9 && f <= 22) return 8;
+    if ((f >= 23 && f <= 47) || (f >= 67 && f <= 69) || (f >= 87 && f <= 93)) return 4;
+    if ((f >= 48 && f <= 59) || f == 85 || f == 86 || f == 115) return 2;
+    if (f >= 60 && f <= 65) return 1;
+    return 0;
+}
+
+int gfx_read_target(u64 va, u32 row_bytes, u32 height, void *out) {
+    if (!enter()) return 0;
+    u64 guest = gpu_va_to_guest(va);
+    Surface *s = NULL;
+    for (u32 i = 0; i < nsurfaces; i++)
+        if (surfaces[i].tex && !surfaces[i].depth && surfaces[i].guest == guest && (!s || surfaces[i].used > s->used)) s = &surfaces[i];
+    u32 bpp = s ? format_bytes(s->storage) : 0;
+    if (!s || !bpp || s->width * bpp != row_bytes || s->height != height) { leave(); return 0; }
+    D3D11_TEXTURE2D_DESC td;
+    ID3D11Texture2D_GetDesc(s->tex, &td);
+    td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ; td.MiscFlags = 0;
+    td.MipLevels = 1; td.ArraySize = 1;
+    ID3D11Texture2D *staging;
+    int ok = 0;
+    if (SUCCEEDED(ID3D11Device_CreateTexture2D(dev, &td, NULL, &staging))) {
+        ID3D11DeviceContext_CopySubresourceRegion(ctx, (ID3D11Resource *)staging, 0, 0, 0, 0, (ID3D11Resource *)s->tex, 0, NULL);
+        D3D11_MAPPED_SUBRESOURCE m;
+        if (SUCCEEDED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &m))) {
+            for (u32 y = 0; y < height; y++) {   /* (a scaled target: its nearest host pixels) */
+                const u8 *r = (const u8 *)m.pData + (size_t)((u64)y * s->hh / height) * m.RowPitch;
+                u8 *o = (u8 *)out + (size_t)y * row_bytes;
+                if (s->hw == s->width) memcpy(o, r, row_bytes);
+                else for (u32 x = 0; x < s->width; x++) memcpy(o + x * bpp, r + (size_t)((u64)x * s->hw / s->width) * bpp, bpp);
+            }
+            ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)staging, 0);
+            ok = 1;
+        }
+        ID3D11Texture2D_Release(staging);
+    }
+    leave();
+    return ok;
 }
 
 u64 gfx_stat_blits;
