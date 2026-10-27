@@ -829,9 +829,9 @@ static BOOL CALLBACK init(PINIT_ONCE o, PVOID p, PVOID *c) {
     if (scale < 0.5f || scale > 4) scale = 1;
     /* A card with little memory of its own (a GT 710: 26 frames a second in a match at 1, 50 at
      * 0.5) draws at display.ini's small_gpu_scale unless a bigger scale was asked for. */
-    float small = display_small_gpu_scale();
-    int small_card = card_memory > 0 && card_memory <= (SIZE_T)2304 << 20 && scale <= 1 && small < scale;
-    if (small_card) scale = small;
+    float small_scale = display_small_gpu_scale();   /* (not "small": rpcndr.h defines it as char) */
+    int small_card = card_memory > 0 && card_memory <= (SIZE_T)2304 << 20 && scale <= 1 && small_scale < scale;
+    if (small_card) scale = small_scale;
     render_scale = scale;
     u32 pw, ph;
     scaled_size(1920, 1080, &pw, &ph);
