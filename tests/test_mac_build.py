@@ -775,7 +775,8 @@ class TestProgramTests(unittest.TestCase):
             subprocess.run([font, os.path.join(tmp, 'overlay_font.h')], capture_output=True, check=True)
             self.build(*self.F, '-mcpu=apple-m1', '-fobjc-arc', '-fno-strict-aliasing', '-ffp-contract=off', '-O1', '-w', *self.INCLUDES,
                        '-I', tmp, 'tools/mac/gfxtest.m', 'runtime/macos/gpu_metal.m', 'runtime/macos/gpu_metal_overlay.m',
-                       'runtime/gpu_shader.c', 'runtime/gpu_texture.c', 'runtime/linux/win32.c', 'runtime/macos/memory.c',
+                       'runtime/gpu_shader.c', 'runtime/gpu_texture.c', 'runtime/gpu_astc.c',
+                       'runtime/linux/win32.c', 'runtime/macos/memory.c',
                        'runtime/macos/platform.c', 'runtime/macos/fiber.c', 'runtime/macos/fiber_arm64.S', '-framework', 'Metal',
                        '-framework', 'QuartzCore', '-framework', 'CoreGraphics', '-framework', 'Foundation', '-o', exe)
             work = os.path.join(tmp, 'work')

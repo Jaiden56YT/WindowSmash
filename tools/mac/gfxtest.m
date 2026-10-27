@@ -39,7 +39,7 @@
  *     -framework CoreText -framework CoreGraphics -framework Foundation -o /tmp/gfxtest/font && /tmp/gfxtest/font /tmp/gfxtest/overlay_font.h
  *   clang -arch arm64 -mmacosx-version-min=14.0 -mcpu=apple-m1 -fobjc-arc -fno-strict-aliasing -ffp-contract=off -O1 -w \
  *     -I runtime/macos/include -I runtime/linux/include -I runtime -I /tmp/gfxtest \
- *     tools/mac/gfxtest.m runtime/macos/gpu_metal.m runtime/macos/gpu_metal_overlay.m runtime/gpu_shader.c runtime/gpu_texture.c \
+ *     tools/mac/gfxtest.m runtime/macos/gpu_metal.m runtime/macos/gpu_metal_overlay.m runtime/gpu_shader.c runtime/gpu_texture.c runtime/gpu_astc.c \
  *     runtime/linux/win32.c runtime/macos/memory.c runtime/macos/platform.c runtime/macos/fiber.c runtime/macos/fiber_arm64.S \
  *     -framework Metal -framework QuartzCore -framework CoreGraphics -framework Foundation -o /tmp/gfxtest/gfxtest
  *   /tmp/gfxtest/gfxtest [-v]          (works in a folder of its own under $TMPDIR: shader cache, screenshot;

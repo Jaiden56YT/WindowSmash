@@ -8,7 +8,9 @@ typedef struct TextureDesc {
     u32 format, type, header_version, swizzle, srgb;
     u32 width, height, depth, levels, pitch;
     u32 block_height, block_depth;
-    u32 bytes, bw, bh;            /* bytes per block, block width/height in texels */
+    u32 bytes, bw, bh;            /* bytes per block, block width/height in texels, as texture_read gives them */
+    u32 gbytes, gbw, gbh;         /* ... as stored in guest memory (an ASTC texture is read as RGBA8) */
+    u32 astc;
     DXGI_FORMAT dxgi;
 } TextureDesc;
 
@@ -20,3 +22,6 @@ u64 texture_layer_size(const TextureDesc *d);
 void texture_read(const TextureDesc *d, u64 guest, u32 layer, u32 level, u8 *out);
 u64 texture_3d_size(const TextureDesc *d);                /* level 0 of a 3D texture, every slice */
 void texture_read_3d(const TextureDesc *d, u64 guest, u8 *out);   /* level 0, slice after slice */
+
+/* ASTC blocks (gpu_astc.c): rows of 16-byte blocks of bw x bh texels to a w x h RGBA8 image. */
+void astc_decode(const u8 *blocks, u32 bw, u32 bh, u32 w, u32 h, int srgb, u8 *out);
