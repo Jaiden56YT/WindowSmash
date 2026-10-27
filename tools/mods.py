@@ -203,7 +203,7 @@ def mod_files(folder):
     """(arc path, file) of every file a mod's folder holds (not its code plugins: plugins())."""
     out = []
     for dp, dirs, files in os.walk(folder):
-        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and not is_junk(d))
         for n in sorted(files):
             if n.startswith(".") or n.lower() in SKIP_FILES:
                 continue
@@ -221,12 +221,49 @@ def is_plugin(path):
     return path.lower().endswith(".nro") and not path.startswith("prebuilt:")
 
 
+# What a zip made on a Mac carries besides the mod: __MACOSX/ (the files' resource forks, each
+# "._<name>" - a friend's mods/Springtrap/__MACOSX/Springtrap/._plugin.nro stopped the plugin build:
+# "not an NSO") and .DS_Store. Never part of a mod: left out wherever a mod's files are looked at,
+# and deleted when a mod is installed or the mods are applied (mac_junk).
+JUNK_DIRS = {"__macosx"}
+
+
+def is_junk(name):
+    return name.lower() in JUNK_DIRS or name.startswith("._") or name == ".DS_Store"
+
+
+def mac_junk(folder):
+    """The __MACOSX folders and ._* / .DS_Store files under `folder`."""
+    out = []
+    for dp, dirs, files in os.walk(folder):
+        out += [os.path.join(dp, d) for d in dirs if d.lower() in JUNK_DIRS]
+        dirs[:] = [d for d in dirs if d.lower() not in JUNK_DIRS]
+        out += [os.path.join(dp, f) for f in files if is_junk(f)]
+    return out
+
+
+def remove_mac_junk(folder):
+    """Deletes mac_junk(folder); how many there were."""
+    junk = mac_junk(folder)
+    for path in junk:
+        if os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    return len(junk)
+
+
 def plugins(folder):
     """The code plugins a mod's folder holds (paths in it)."""
     out = []
     for dp, dirs, files in os.walk(folder):
-        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        dirs[:] = [d for d in dirs if not d.startswith(".") and not is_junk(d)]
         for n in files:
+            if is_junk(n):
+                continue
             rel = os.path.relpath(os.path.join(dp, n), folder)
             if is_plugin(arc_path(rel)):
                 out.append(rel.replace(os.sep, "/"))
@@ -239,6 +276,7 @@ def find_roots(top):
     are mods of their own (install copies each without the others: nested_roots)."""
     roots = []
     for dp, dirs, _files in os.walk(top):
+        dirs[:] = [d for d in dirs if not is_junk(d)]
         if any(d.lower() in ROOTS for d in dirs):
             roots.append(dp)
         dirs[:] = [d for d in dirs if d.lower() not in ROOTS]   # (a mod's own data folders are not other mods)
@@ -301,6 +339,7 @@ def install(tree, archive, name=None, meta=None):
         else:
             os.makedirs(os.path.join(tmp, "x"))
             extract(archive, os.path.join(tmp, "x"))
+        remove_mac_junk(os.path.join(tmp, "x"))
         roots = find_roots(os.path.join(tmp, "x"))
         if not roots and plugins(os.path.join(tmp, "x")):   # (only code: a moveset or gameplay plugin, recompiled into the game)
             roots = [os.path.join(tmp, "x")]
@@ -1557,6 +1596,9 @@ def apply(tree, log=print):
         select_screen_room(tree, on, log)
         characters_mod(tree, log)
         hide_shadowed_sources(tree, on, log)
+        junk = sum(remove_mac_junk(os.path.join(tree.mods, n)) for n in on)
+        if junk:
+            log(f"{junk} macOS zip leftover(s) (__MACOSX, ._ files) deleted from the mods' folders")
         missing_shares(tree, on, log)
         sync_plugins(tree, log)
         shutil.copyfile(tree.vanilla_cfg, tree.cfg)

@@ -192,8 +192,11 @@ def build(tree, pack_ref=None, bundle_all=False, out_dir=None, log=print):
                 if not (bundle_all or m.get("bundled")) or local is None:
                     continue
                 folder = os.path.join(tree.mods, local)
-                for dp, _dirs, files in os.walk(folder):
+                for dp, dirs, files in os.walk(folder):
+                    dirs[:] = [d for d in dirs if not mods.is_junk(d)]   # (no __MACOSX in a pack)
                     for f in files:
+                        if mods.is_junk(f):
+                            continue
                         src = os.path.join(dp, f)
                         file(src, "modpack/mods/" + m["name"] + "/" + os.path.relpath(src, folder).replace(os.sep, "/"))
                 m["bundled"] = True
