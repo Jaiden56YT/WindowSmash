@@ -32,7 +32,8 @@ static int on = -1;
 static int play = 0;   /* SSBU_BENCH_PLAY=1: the player's own pads play the match (the menus stay the bench's) */
 static struct { char name[32]; int kind, costume; } want[2] = {{"", -1, 0}, {"mario", -1, 0}};
 static double seconds = 20, menu_timeout = 180;
-static double menu_delay = 0;   /* SSBU_BENCH_MENU_DELAY: seconds later for the menus and the select screen (a slow PC's boot) */
+static double menu_delay = 0;
+static int stage_first = 0;   /* SSBU_BENCH_STAGE_FIRST=1: the save's rules put the stage select first, which the first try at the select screen gets */   /* SSBU_BENCH_MENU_DELAY: seconds later for the menus and the select screen (a slow PC's boot) */
 static volatile double setup_at = -1, match_at = -1, last_frame = -1;
 static volatile long frames;
 static char seen[8][48];   /* the fighters the match runs ("palutena c120") */
@@ -58,6 +59,7 @@ int bench_on(void) {
     play = getenv("SSBU_BENCH_PLAY") && atoi(getenv("SSBU_BENCH_PLAY"));
     if (getenv("SSBU_BENCH_MENU_TIMEOUT")) menu_timeout = atof(getenv("SSBU_BENCH_MENU_TIMEOUT"));
     if (getenv("SSBU_BENCH_MENU_DELAY")) menu_delay = atof(getenv("SSBU_BENCH_MENU_DELAY"));
+    stage_first = getenv("SSBU_BENCH_STAGE_FIRST") && atoi(getenv("SSBU_BENCH_STAGE_FIRST"));
     fprintf(stderr, "[bench] %s c%02d vs %s c%02d, %.0f s of play\n", want[0].name, want[0].costume, want[1].name, want[1].costume, seconds);
     CloseHandle(CreateThread(NULL, 0, bench_watch, NULL, 0, NULL));
     return 1;
@@ -188,7 +190,7 @@ u64 bench_buttons(i32 *lx, i32 *ly) {
         for (u32 i = 0; i < sizeof CSS / sizeof *CSS; i++) {
             if (into < CSS[i].at || into >= CSS[i].at + CSS[i].hold) continue;
             if (CSS[i].button >= 0) buttons |= 1ull << CSS[i].button;
-            if (CSS[i].dir && attempt == 0) stick(CSS[i].dir, lx, ly);
+            if (CSS[i].dir && attempt <= stage_first) stick(CSS[i].dir, lx, ly);
         }
     }
     return buttons;
