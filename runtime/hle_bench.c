@@ -32,6 +32,7 @@ static int on = -1;
 static int play = 0;   /* SSBU_BENCH_PLAY=1: the player's own pads play the match (the menus stay the bench's) */
 static struct { char name[32]; int kind, costume; } want[2] = {{"", -1, 0}, {"mario", -1, 0}};
 static double seconds = 20, menu_timeout = 180;
+static double menu_delay = 0;   /* SSBU_BENCH_MENU_DELAY: seconds later for the menus and the select screen (a slow PC's boot) */
 static volatile double setup_at = -1, match_at = -1, last_frame = -1;
 static volatile long frames;
 static char seen[8][48];   /* the fighters the match runs ("palutena c120") */
@@ -56,6 +57,7 @@ int bench_on(void) {
     if (getenv("SSBU_BENCH_SECONDS")) seconds = atof(getenv("SSBU_BENCH_SECONDS"));
     play = getenv("SSBU_BENCH_PLAY") && atoi(getenv("SSBU_BENCH_PLAY"));
     if (getenv("SSBU_BENCH_MENU_TIMEOUT")) menu_timeout = atof(getenv("SSBU_BENCH_MENU_TIMEOUT"));
+    if (getenv("SSBU_BENCH_MENU_DELAY")) menu_delay = atof(getenv("SSBU_BENCH_MENU_DELAY"));
     fprintf(stderr, "[bench] %s c%02d vs %s c%02d, %.0f s of play\n", want[0].name, want[0].costume, want[1].name, want[1].costume, seconds);
     CloseHandle(CreateThread(NULL, 0, bench_watch, NULL, 0, NULL));
     return 1;
@@ -76,7 +78,7 @@ static DWORD WINAPI bench_watch(void *unused) {
     for (;;) {
         Sleep(250);
         double t = now_s();
-        if (setup_at < 0 && t > menu_timeout) result("MENUS", "no fighter was set up: the menus weren't got through");
+        if (setup_at < 0 && t > menu_timeout + menu_delay) result("MENUS", "no fighter was set up: the menus weren't got through");
         if (setup_at >= 0 && match_at < 0 && t - setup_at > 90) result("FREEZE-LOAD", "the fighters were set up but the match never ran");
         if (match_at >= 0 && t - last_frame > 10) result("FREEZE-MATCH", "the fighters' frames stopped");
         if (match_at >= 0 && t - match_at >= seconds) result("PASS", "played");
@@ -177,6 +179,7 @@ u64 bench_buttons(i32 *lx, i32 *ly) {
         return buttons;
     }
     if (setup_at >= 0) return 0;   /* (loading) */
+    t -= menu_delay;
     for (u32 i = 0; i < sizeof MENUS / sizeof *MENUS; i++)
         if (t >= MENUS[i].at && t < MENUS[i].at + 0.25) buttons |= 1ull << MENUS[i].button;
     if (t >= CSS_FIRST) {
