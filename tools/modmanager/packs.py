@@ -132,27 +132,32 @@ def delete_pack(tree, pid):
 
 
 def missing(tree, pack):
-    """The pack's mods that aren't installed (by GameBanana id, else by folder name)."""
+    """The pack's mods that aren't installed (local_name)."""
     state = tree.load()
-    by_gb = {int(m["gamebanana"]): n for n, m in state["mods"].items() if m.get("gamebanana")}
-    out = []
-    for m in pack["mods"]:
-        if m.get("gamebanana") and int(m["gamebanana"]) in by_gb:
-            continue
-        if m["name"] in state["mods"]:
-            continue
-        out.append(m)
-    return out
+    return [m for m in pack["mods"] if local_name(tree, m, state) is None]
 
 
-def local_name(tree, entry):
-    """The installed folder of a pack's mod (by GameBanana id first), or None."""
-    state = tree.load()
-    if entry.get("gamebanana"):
-        for n, m in state["mods"].items():
-            if m.get("gamebanana") and int(m["gamebanana"]) == int(entry["gamebanana"]):
+def local_name(tree, entry, state=None):
+    """The installed folder of a pack's mod, or None. Its exact folder name first: one GameBanana
+    download can hold several parts, each a mod of its own ("Shadow The Hedgehog (Moveset) - Moveset_
+    Shadow" and "... - Assist Trophy_ Shadow Android", six Sonic Re-Imagined variants), and a pack names
+    the ones its maker used - matched by the download's id alone, a part stood in for another (a
+    friend's game turned on the wrong ones and every other part as well: characters on each other's
+    slots). Then a folder of the same download with the same part name (installed under another
+    name), then the download's only folder."""
+    state = state or tree.load()
+    if entry["name"] in state["mods"]:
+        return entry["name"]
+    if not entry.get("gamebanana"):
+        return None
+    same = [n for n, m in state["mods"].items() if m.get("gamebanana") and int(m["gamebanana"]) == int(entry["gamebanana"])]
+    part = entry["name"].split(" - ", 1)[1].lower() if " - " in entry["name"] else None
+    if part:
+        for n in same:
+            if " - " in n and n.split(" - ", 1)[1].lower() in (part, ) or n.lower().endswith(" - " + part):
                 return n
-    return entry["name"] if entry["name"] in state["mods"] else None
+        return None
+    return same[0] if len(same) == 1 else None
 
 
 def use_pack(tree, pack, only=True):
@@ -161,8 +166,8 @@ def use_pack(tree, pack, only=True):
     state = tree.load()
     names, left = [], []
     for m in pack["mods"]:
-        n = local_name(tree, m)
-        if n is None:
+        n = local_name(tree, m, state)
+        if n is None or n in names:
             left.append(m)
             continue
         names.append(n)

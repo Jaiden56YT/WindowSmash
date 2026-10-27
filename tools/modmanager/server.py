@@ -520,7 +520,12 @@ class App:
             only = bool(body.get("only", True))
 
             def use(log, progress):
-                need = packs.missing(t, pack)
+                need, seen = [], set()   # (each GameBanana download once: its parts are the pack's other entries)
+                for m in packs.missing(t, pack):
+                    key = (m.get("gamebanana"), m.get("file_id")) if m.get("gamebanana") else ("name", m["name"])
+                    if key not in seen:
+                        seen.add(key)
+                        need.append(m)
                 failed = []   # (one mod that can't be had doesn't stop the rest of the pack)
                 for k, m in enumerate(need):
                     title = m.get("title") or m["name"]
