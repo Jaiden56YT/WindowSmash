@@ -63,6 +63,7 @@ u64 gfx_stat_clears, gfx_stat_presented;
  * scissors, blits, the fragment position) is scaled to match. 1 = the game's own size. Fixed at
  * the device's start (see init). */
 static float render_scale = 1.0f;
+static SIZE_T card_memory;   /* the graphics card's own memory (DXGI DedicatedVideoMemory), for small_gpu_scale */
 
 typedef struct Surface {
     u64 guest;
@@ -722,6 +723,7 @@ static BOOL CALLBACK init(PINIT_ONCE o, PVOID p, PVOID *c) {
     DXGI_ADAPTER_DESC ad;
     memset(&ad, 0, sizeof ad);
     int nvidia = SUCCEEDED(IDXGIAdapter_GetDesc(adapter, &ad)) && ad.VendorId == 0x10DE;
+    card_memory = ad.DedicatedVideoMemory;
     char name[128];
     {
         size_t i = 0;
@@ -825,6 +827,11 @@ static BOOL CALLBACK init(PINIT_ONCE o, PVOID p, PVOID *c) {
         }
     }
     if (scale < 0.5f || scale > 4) scale = 1;
+    /* A card with little memory of its own (a GT 710: 26 frames a second in a match at 1, 50 at
+     * 0.5) draws at display.ini's small_gpu_scale unless a bigger scale was asked for. */
+    float small = display_small_gpu_scale();
+    int small_card = card_memory > 0 && card_memory <= (SIZE_T)2304 << 20 && scale <= 1 && small < scale;
+    if (small_card) scale = small;
     render_scale = scale;
     u32 pw, ph;
     scaled_size(1920, 1080, &pw, &ph);
@@ -834,7 +841,8 @@ static BOOL CALLBACK init(PINIT_ONCE o, PVOID p, PVOID *c) {
     }
     if (render_scale != 1.0f)
         fprintf(stderr, "[gfx] render scale %.3g%s: the game's 1920x1080 drawn at %ux%u\n", render_scale,
-                display_render_scale() == 0 ? " (auto)" : "", pw, ph);
+                small_card ? " (small_gpu_scale: a graphics card with 2 GB or less; display.ini small_gpu_scale = off for full)"
+                : display_render_scale() == 0 ? " (auto)" : "", pw, ph);
     start_compilers();
     if (warm_mode) warm_start();
     /* The prewarm is for a driver that compiles a shader when it is created (NVIDIA's Direct3D:

@@ -34,6 +34,9 @@ const char *display_gpu(void);          /* the graphics card to use: "auto", or 
  * (0.5-4; SSBU_RENDER_SCALE). 0 = auto: as many as the picture has pixels in the window at the
  * start (1440p: 1.33), at least 1. */
 float display_render_scale(void);
+/* small_gpu_scale: the render scale instead of 1 or auto on a card with 2 GB of its own memory or
+ * less (0.5-1; 1: off, as when SSBU_RENDER_SCALE is given). */
+float display_small_gpu_scale(void);
 /* The renderer says whether the swap chain can tear (for VRR); the flags each Present gets. */
 void display_set_tearing(int supported);
 unsigned display_present_flags(void);
