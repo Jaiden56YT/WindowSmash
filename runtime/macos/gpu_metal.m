@@ -3568,16 +3568,18 @@ again:;
         if (!ps_used || !(ps_used->info.color_mask >> i & 1)) rgba = 0;   /* (a target the program does not write is left as it is) */
         pk.mask[i] = (u8)write_mask(rgba);
         if (!(regs[M_BLEND_ENABLE(i)] & 1) || (gfx_debug() & 8) || s->kind) continue;   /* (integer targets do not blend) */
+        /* The alpha op and factors apply as written, whatever the "separate for alpha" flag says (as
+         * gpu_d3d11.c's, and yuzu/Eden): the game never sets that flag. Copying the colour ones into alpha
+         * made a Mii's face mask opaque - its alpha pass begins with a full-target quad whose alpha factors
+         * are ZERO/ZERO (its colour ones ONE/ZERO): the face came out as a black box. */
         u32 base = regs[M_BLEND_STATE_PER_TARGET] & 1 ? M_BLEND_PER_TARGET(i) + 1 : 0;
         u32 cop, csrc, cdst, aop, asrc, adst;
         if (base) {
             cop = regs[base]; csrc = regs[base + 1]; cdst = regs[base + 2]; aop = regs[base + 3]; asrc = regs[base + 4]; adst = regs[base + 5];
-            if (!(regs[base - 1] & 1)) { aop = cop; asrc = csrc; adst = cdst; }   /* the target's own "separate alpha" */
         }
         else {
             cop = regs[M_BLEND_COLOR_OP]; csrc = regs[M_BLEND_COLOR_SRC]; cdst = regs[M_BLEND_COLOR_DST];
             aop = regs[M_BLEND_ALPHA_OP]; asrc = regs[M_BLEND_ALPHA_SRC]; adst = regs[M_BLEND_ALPHA_DST];
-            if (!(regs[M_BLEND_SEPARATE_ALPHA] & 1)) { aop = cop; asrc = csrc; adst = cdst; }
         }
         u8 *bl = pk.blend[i];
         bl[0] = 1;
