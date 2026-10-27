@@ -455,8 +455,9 @@ def build(tree, jobs, log=print, again=True):
 
 
 # What isn't part of the game's program: an update that changes only these needs no build (the Mods
-# app's files are read as it runs; the tools here run as they are)
-NOT_BUILT = ("tools/modmanager/", "tools/dev/", "tools/mods.py", "tools/std_plugins.py", "tools/csk.py", "tools/miis.py",
+# app's files are read as it runs; the tools here run as they are; source_version.txt is the commit an
+# update's ZIP names, rewritten by every update)
+NOT_BUILT = ("tools/source_version.txt", "tools/modmanager/", "tools/dev/", "tools/mods.py", "tools/std_plugins.py", "tools/csk.py", "tools/miis.py",
              "tools/unlock_all.py", "tools/install_windowsmash.ps1", "tools/update.py", "tools/arc.py", "tools/prc.py",
              "tools/msbt.py", "tools/ssbu_online_lobby.py", "tools/ssbu_relay.py", "tools/skyline.py")
 
