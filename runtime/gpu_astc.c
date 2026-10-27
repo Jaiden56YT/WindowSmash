@@ -214,8 +214,8 @@ static u32 hash52(u32 p) {
     return p;
 }
 
-static u32 select_partition(u32 seed, u32 x, u32 y, u32 count, int small) {
-    if (small) { x <<= 1; y <<= 1; }
+static u32 select_partition(u32 seed, u32 x, u32 y, u32 count, int small_block) {
+    if (small_block) { x <<= 1; y <<= 1; }
     seed += (count - 1) * 1024;
     u32 r = hash52(seed);
     u8 s[12];
@@ -349,7 +349,7 @@ void astc_decode_block(const u8 *blk, u32 bw, u32 bh, int srgb, u8 *out, u32 str
     /* texels: weights infilled from the grid, then interpolated */
     u32 ds = (1024 + bw / 2) / (bw - 1), dt = bh > 1 ? (1024 + bh / 2) / (bh - 1) : 0;
     u32 seed = partitions > 1 ? bits_at(blk, 13, 10) : 0;
-    int small = bw * bh < 31, planes = (int)dual + 1;
+    int small_block = bw * bh < 31, planes = (int)dual + 1;
     for (u32 y = 0; y < h; y++)
         for (u32 x = 0; x < w; x++) {
             u32 gs = (ds * x * (gw - 1) + 32) >> 6, gt = (dt * y * (gh - 1) + 32) >> 6;
@@ -362,7 +362,7 @@ void astc_decode_block(const u8 *blk, u32 bw, u32 bh, int srgb, u8 *out, u32 str
                 u32 p10 = w10 ? g[(v0 + gw) * planes] : 0, p11 = w11 ? g[(v0 + gw + 1) * planes] : 0;
                 wt[p] = (p00 * w00 + p01 * w01 + p10 * w10 + p11 * w11 + 8) >> 4;
             }
-            u32 part = partitions > 1 ? select_partition(seed, x, y, partitions, small) : 0;
+            u32 part = partitions > 1 ? select_partition(seed, x, y, partitions, small_block) : 0;
             u8 *o = out + (size_t)y * stride + x * 4;
             for (u32 c = 0; c < 4; c++) {
                 u32 wc = dual && c == ccs ? wt[1] : wt[0];
