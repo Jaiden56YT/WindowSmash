@@ -1305,7 +1305,8 @@ function Read-Answers {
     <# The same questions in this window, for -NoWizard. #>
     param([hashtable]$Detected, [string]$DefaultName)
     $answers = @{}
-    foreach ($spec in @(@{ Key = 'Game'; Q = 'Folder with your game files' }, @{ Key = 'Keys'; Q = 'Folder with prod.keys and title.keys' }, @{ Key = 'Firmware'; Q = "Folder with your firmware's .nca files (optional; none: the open fonts)" })) {
+    # (the keys first: the game folder is checked by reading its files with them)
+    foreach ($spec in @(@{ Key = 'Keys'; Q = 'Folder with prod.keys and title.keys' }, @{ Key = 'Game'; Q = 'Folder with your game files' }, @{ Key = 'Firmware'; Q = "Folder with your firmware's .nca files (optional; none: the open fonts)" })) {
         $default = [string]$Detected[$spec.Key]
         if ($spec.Key -eq 'Firmware') {
             Write-Host "The firmware is optional: the game takes your console's own fonts from it, with Chinese, Japanese and Korean text. Without it the game uses the open fonts of third_party\fonts_open: Latin text in Open Sans, the button icons from yuzu's icon font, no Chinese, Japanese or Korean text. Fights are the same."
@@ -1313,20 +1314,22 @@ function Read-Answers {
         while ($true) {
             $prompt = $spec.Q
             if ($default) { $prompt += " [$default]" } elseif ($spec.Key -eq 'Firmware') { $prompt += ' [none]' }
-            $a = (Read-Host $prompt).Trim().Trim('"')
+            $typed = Read-Host $prompt
+            $a = ([string]$typed).Trim().Trim('"')
             if (-not $a) { $a = $default }
             if ($spec.Key -eq 'Firmware' -and $a -eq 'none') { $a = '' }
             $r = switch ($spec.Key) { 'Keys' { Test-KeysFolder $a } 'Firmware' { Test-FirmwareFolder $a } default { Test-GameFolder $a $answers['Keys'] } }
             Write-Host "  $($r.Text)"
             if ($r.Ok) { $answers[$spec.Key] = $a; break }
+            if ($null -eq $typed) { throw "No answer could be read for: $($spec.Q). Run Install WindowSmash.bat in a window, or give -$($spec.Key)." }
         }
     }
-    $n = (Read-Host "Your online name [$DefaultName]").Trim()
+    $n = ([string](Read-Host "Your online name [$DefaultName]")).Trim()
     if (-not $n) { $n = $DefaultName }
     $answers['OnlineName'] = $n
-    $answers['Shortcut'] = ((Read-Host 'Put a shortcut on the desktop? [Y/n]').Trim() -notmatch '^n')
-    $answers['Firewall'] = ((Read-Host 'Allow the game through Windows Firewall (asks for administrator rights)? [Y/n]').Trim() -notmatch '^n')
-    $answers['Shaders'] = ((Read-Host 'Prepare the shaders after the build (minutes to two hours, low priority)? [Y/n]').Trim() -notmatch '^n')
+    $answers['Shortcut'] = (([string](Read-Host 'Put a shortcut on the desktop? [Y/n]')).Trim() -notmatch '^n')
+    $answers['Firewall'] = (([string](Read-Host 'Allow the game through Windows Firewall (asks for administrator rights)? [Y/n]')).Trim() -notmatch '^n')
+    $answers['Shaders'] = (([string](Read-Host 'Prepare the shaders after the build (minutes to two hours, low priority)? [Y/n]')).Trim() -notmatch '^n')
     return $answers
 }
 
@@ -1439,13 +1442,13 @@ function Step-Build {
     # from their own releases (tools\std_plugins.py checks each), then built into the game with the mods' own
     Write-Info 'the standard Skyline plugins: fetched from their releases and built in (tools\std_plugins.py, tools\skyline.py)'
     Write-Warn 'building the plugins into the game can take a while: do not start the game until this window says Done'
+    # (the ones fetched are built in even when another failed: a busy GameBanana costs that one, not all of them)
     if ((Invoke-Python @((Join-Path $Root 'tools\std_plugins.py'), 'fetch')) -ne 0) {
-        Write-Warn 'the plugins could not be fetched (see above): mods that need them will not work until this runs again'
-    } else {
-        $sky = @((Join-Path $Root 'tools\skyline.py'), 'build')
-        if ($Jobs) { $sky += @('--jobs', "$Jobs") }
-        if ((Invoke-Python $sky) -ne 0) { Write-Warn 'building the plugins in stopped (see above); the game itself is built' }
+        Write-Warn 'some plugins could not be fetched (the lines above say which and why): mods that need them will not work until Install WindowSmash.bat runs again'
     }
+    $sky = @((Join-Path $Root 'tools\skyline.py'), 'build')
+    if ($Jobs) { $sky += @('--jobs', "$Jobs") }
+    if ((Invoke-Python $sky) -ne 0) { Write-Warn 'building the plugins in stopped (see above); the game itself is built' }
     return $true
 }
 
