@@ -1048,9 +1048,10 @@ def image(path, out):
     print(f"wrote {out}: {len(img):,} bytes, {n:,} base relocations applied for {base:#x}")
 
 
-def module_table(mod, name, base, funcs, missing, hooks=()):
+def module_table(mod, name, base, funcs, missing, hooks=(), wrapped_hooks=()):
     """C source for a module's loader tables: functions, exports, and symbol relocations; a
-    Skyline hook target's function under the name its dispatcher calls (`_orig`)."""
+    Skyline hook target's function under the name its dispatcher calls (`_orig`, or `_wrapped`
+    for one the runtime wraps too: the wrapper)."""
     imports, relocs = {}, []
     for off, typ, sym, addend in mod.relocs:
         if typ == 1027:
@@ -1059,13 +1060,15 @@ def module_table(mod, name, base, funcs, missing, hooks=()):
         index = imports.setdefault(sname, (len(imports), info >> 4 == 2))[0]
         relocs.append((off, addend, index))
     defined = [a for a, _ in funcs]
-    hooks = set(hooks)
+    hooks, wrapped_hooks = set(hooks), set(wrapped_hooks)
+    def fn(a):
+        return f"f_{base + a:x}" + ("_orig" if a in hooks else "_wrapped" if a in wrapped_hooks else "")
     out = ['#include "module.h"\n\n']
-    out += [f"GuestFn f_{base + a:x}{'_orig' if a in hooks else ''};\n" for a in defined]
+    out += [f"GuestFn {fn(a)};\n" for a in defined]
     out += [f'void f_{base + a:x}(Cpu *c) {{ rt_trap(c, 0x{base + a:X}ull, "no code at call target"); }}\n'
             for a in sorted(missing)]
     out.append("\nstatic const RtFunc funcs[] = {\n")
-    out += [f"    {{0x{base + a:X}ull, f_{base + a:x}{'_orig' if a in hooks else ''}}},\n" for a in defined]
+    out += [f"    {{0x{base + a:X}ull, {fn(a)}}},\n" for a in defined]
     out.append("};\nstatic const RtSym exports[] = {\n")
     out += [f'    {{"{n}", 0x{base + v:X}ull}},\n' for n, v, _s, _i, _x in mod.exports]
     out.append("};\nstatic const char *const imports[] = {\n")
@@ -1156,6 +1159,13 @@ def _build(mod, found, funcs, path, outdir, jobs, per_file, imports=None):
     sizes = dict(funcs)
     hooks = [off for off in plugin_hooks(name) if off in sizes and off not in forward and off not in hookable]
     forward.update({off: ("hook", None) for off in hooks})
+    # a plugin's hook target the runtime wraps too (HLE_WRAP: the CSK Collection's hook on the select
+    # screens' record builder, 71017880c0): its callers go through the dispatch table as well, which
+    # holds the wrapper (f_<address>_wrapped) or the plugin's hook in its place - the wrapper alone
+    # took every direct call, and the hook never saw a pick (custom characters loaded as their base)
+    wrapped_hooks = [off for off in plugin_hooks(name) if off in sizes and isinstance(forward.get(off), tuple)
+                     and forward[off][0] == "wrap"]
+    forward.update({off: (*forward[off], "hooked") for off in wrapped_hooks})
     exact_callees, exact_callers = resolve_hooks(mod, base, dict(funcs), name, set(found), imports, native_only(forward))
     from eh import landing_pads
     pads = landing_pads(mod)
@@ -1189,7 +1199,7 @@ def _build(mod, found, funcs, path, outdir, jobs, per_file, imports=None):
     if problems:   # (the stamp stays cleared: the next build generates the C again)
         raise SystemExit(f"{name}: a hookable function is reached other than through its slot (tools/hook_inline_check.py): "
                          + "; ".join(sorted(problems)[:5]))
-    table, imports, relocs = module_table(mod, name, base, funcs, missing, hooks)
+    table, imports, relocs = module_table(mod, name, base, funcs, missing, hooks, wrapped_hooks)
     write_if_changed(os.path.join(outdir, "g_module.c"), table)
     keep = {n for n, _i, _b in manifest} | {"g_module.c"}
     for old in os.listdir(outdir):   # drop files left over from a different partitioning

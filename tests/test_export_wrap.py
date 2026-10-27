@@ -211,6 +211,26 @@ class Resolving(unittest.TestCase):
         self.assertIn('{0x7100000040ull, f_7100000040},', table)
         self.assertNotIn('_orig', table)
 
+    def test_lifted_wrapped_and_a_plugins_hook_target(self):
+        # (callers go through the dispatch table, which holds the wrapper's entry or a plugin's hook
+        # in its place: recomp.py wrapped_hooks; the CSK Collection hooks a function the runtime wraps)
+        forward = {0x40: ('wrap', 'hle_wrap_7100000040', 'hooked')}
+        lifter = lift.Lifter(fake_module(M1_FUNCS, []).image, set(M1_FUNCS), forward=forward)
+        text = lifter.lift_function(0x40, 8)[0]
+        self.assertIn('GuestFn hle_wrap_7100000040;\nvoid f_7100000040_wrapped(Cpu *c) { hle_wrap_7100000040(c); }\n'
+                      'void f_7100000040(Cpu *c) { rt_lookup(0x7100000040ull)(c); }\n', text)
+        self.assertIn('void f_7100000040_orig(Cpu *c)', text)
+        self.assertIn('f_7100000040(c);', lifter.lift_function(0, 20)[0])
+        mod = fake_module(M1_FUNCS, [])
+        mod.path, mod.mem_end, mod.build_id = 'm1.nso', 0x1000, ''
+        mod.text, mod.dyn = types.SimpleNamespace(end=0x1000), {}
+        table = recomp.module_table(mod, 'm1', M1, sorted(sizes(M1_FUNCS).items()), set(), wrapped_hooks=[0x40])[0]
+        self.assertIn('{0x7100000040ull, f_7100000040_wrapped},', table)
+        forward = {0x40: ('wrap', f'hle_wrap_{NAME}', 'export', 'hooked')}
+        text = lift.Lifter(fake_module(M1_FUNCS, []).image, set(M1_FUNCS), forward=forward).lift_function(0x40, 8)[0]
+        self.assertIn(f'void f_7100000040_wrapped(Cpu *c) {{ hle_wrap_{NAME}(c, f_7100000040_orig); }}\n'
+                      'void f_7100000040(Cpu *c) { rt_lookup(0x7100000040ull)(c); }\n', text)
+
     def test_lifted_several_wrappers_one_inside_the_other(self):
         forward = {0x40: ('wrap', 'hle_wrap_nn_a', 'export', 'hle_wrap_nn_b', 'hle_wrap_nn_c')}
         text = lift.Lifter(fake_module(M1_FUNCS, []).image, set(M1_FUNCS), forward=forward).lift_function(0x40, 8)[0]

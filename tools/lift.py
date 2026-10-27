@@ -200,6 +200,9 @@ class Lifter(SimdMixin):
             return (f"GuestFn {native};\n{self.entry(start)} {{ {native}(c); }}",
                     Counter(), set())
         name, wrapper = f"f_{self.base + start:x}", ""
+        hooked = isinstance(native, tuple) and native[-1] == "hooked"   # (wrapped, and a plugin's hook target: recomp.py)
+        if hooked:
+            native = native[:-1]
         if isinstance(native, tuple) and native[0] == "hook":
             # a Skyline plugin's hook target (recomp.py hookable): direct callers go through the
             # dispatch table, as indirect ones do, which has this function's body - or the hook
@@ -216,6 +219,12 @@ class Lifter(SimdMixin):
         elif isinstance(native, tuple):   # wrapped natively: callers reach the wrapper, which may call this one
             wrapper = f"GuestFn {native[1]};\n{self.entry(start)} {{ {native[1]}(c); }}\n"
             name += "_orig"
+        if hooked:   # callers through the dispatch table: the wrapper's entry (f_<address>_wrapped), or a hook in its place
+            head = self.entry(start)
+            if head != f"void f_{self.base + start:x}(Cpu *c)":
+                raise ValueError(f"{self.base + start:x}: a hookable function is wrapped and a plugin's hook target")
+            wrapper = (wrapper.replace(head, f"void f_{self.base + start:x}_wrapped(Cpu *c)", 1)
+                       + f"{head} {{ rt_lookup(0x{self.base + start:X}ull)(c); }}\n")
         self.words = struct.unpack_from(f"<{size // 4}I", self.img, start)
         here = {off: ws for off, ws in self.patches.items() if start <= off < self.fend}
         if here:   # (the last word in the instruction's place, so the jump table analysis sees it)
