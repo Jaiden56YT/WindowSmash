@@ -214,6 +214,10 @@ def characters():
         for fighter, cs in sorted(slots.items()):
             if fighter in ("nana", "ptrainer_low", "element", "kirby") and len(slots) > 1:   # (parts of another's, copies)
                 continue
+            if fighter in ("miifighter", "miiswordsman", "miigunner") and len(slots) > 1:   # (a Mii set up without a Mii crashes)
+                continue
+            if fighter.endswith("_cutin"):   # (a final smash's cut-in pictures, not a fighter)
+                continue
             found.append((name, fighter, sorted(cs)))
     return found
 
