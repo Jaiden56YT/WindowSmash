@@ -172,6 +172,9 @@ int main(int argc, char **argv) {
     part = (u32)atoi(argv[3]);
     parts = (u32)atoi(argv[4]);
     if (!parts || part >= parts) { fprintf(stderr, "bad part %u of %u\n", part, parts); return 2; }
+#ifdef _WIN32
+    SetPriorityClass(GetCurrentProcess(), PROCESS_MODE_BACKGROUND_BEGIN);   /* (the disk too below the game's: shader_aot.py background_io) */
+#endif
     int dry = 0;
     for (int a = 5; a < argc; a++) {
         if (!strcmp(argv[a], "--dry")) dry = 1;

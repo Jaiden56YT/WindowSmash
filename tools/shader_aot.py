@@ -249,11 +249,22 @@ def low_priority():
     return {"creationflags": getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)}
 
 
+def background_io():
+    """Windows: this process's disk reads below the game's (background mode: low I/O and memory
+    priority too, not only CPU). Started together with the game, the scan of data.arc otherwise
+    starved ARCropolis' walk of the mods folder: no first frame in 10 minutes on a slow PC."""
+    if not LINUX:
+        import ctypes
+        k = ctypes.windll.kernel32
+        k.SetPriorityClass(k.GetCurrentProcess(), 0x00100000)   # PROCESS_MODE_BACKGROUND_BEGIN
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--jobs", type=int, default=default_jobs())
     ap.add_argument("--dry", action="store_true")
     a = ap.parse_args()
+    background_io()
     tree = ROOT
     t0 = time.time()
     arc = A.Arc(os.path.join(tree, "dump", "modules", "romfs.cfg"))
