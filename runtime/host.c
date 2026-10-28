@@ -69,6 +69,7 @@ extern u64 gpu_stat_batches, gpu_stat_lists, gpu_stat_draws, gpu_stat_dispatches
 u64 present_frames(void);
 void movie_test_start(void);   /* (hle_movie_skip.c) SSBU_SKIP_MOVIES, SSBU_SEQ's mark movie */
 void test_fight_start(void);   /* (hle_fight_test.c) SSBU_FIGHT_HASH, SSBU_DETERMINISTIC, SSBU_DEBUG_MATCH... */
+void watchdog_start(void);     /* (debug_watchdog.c) */
 void gfx_report_compiles(void (*line)(const char *text));
 void gfx_status_lines(void);
 #ifdef _WIN32
@@ -1423,6 +1424,7 @@ int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     fprintf(stderr, "[mem] write watch: %s\n", rt_ww_mode());
 #endif
+    watchdog_start();   /* (a boot that never shows a frame is reported too) */
     if (getenv("SSBU_CRASH_TEST")) CloseHandle(CreateThread(NULL, 0, crash_test, (void *)(uintptr_t)atoi(getenv("SSBU_CRASH_TEST")), 0, NULL));
     rt_data_dir = dir;
     kernel_init();
