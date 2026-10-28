@@ -59,6 +59,14 @@ void kernel_dump_threads(void);
 _Noreturn void rt_fatal(const char *fmt, ...);         /* message + guest backtrace, then exit */
 extern int rt_trace;
 extern const char *rt_data_dir;                        /* where the module images (and romfs.cfg) live */
+/* The game's three boot modules. The game's C defines them const; a --game-dll build
+ * (SSBU_GAME_DLL) has them in a library of its own, and host.c holds copies of its tables,
+ * filled in at load. */
+#ifdef SSBU_GAME_DLL
+extern RtModule rt_module_main, rt_module_subsdk0, rt_module_sdk;
+#else
+extern const RtModule rt_module_main, rt_module_subsdk0, rt_module_sdk;
+#endif
 u64 rt_load_nro(Cpu *c, u64 image);                     /* load the recompiled NRO; 0 if none matches */
 u64 rt_load_nro_named(Cpu *c, const char *name);        /* the same by module name (Skyline plugins) */
 u64 rt_module_export(u64 base, const char *symbol);     /* a loaded module's own export, or 0 */

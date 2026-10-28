@@ -41,8 +41,6 @@ static const RtModule *const *game_nros;
 static u32 game_nro_count;
 #define rt_nro_modules game_nros
 #define rt_nro_count game_nro_count
-#else
-extern const RtModule rt_module_main, rt_module_subsdk0, rt_module_sdk;
 #endif
 #define BOOT_MODULES 3
 #define MAX_MODULES 1024
