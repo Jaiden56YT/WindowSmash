@@ -47,6 +47,12 @@ NATIVE_HOOKS = ("main 66dcf0", "main 3238a70", "main 64b730", "main 6079d0") + t
 # (provided natively by runtime/hle_skyline.c, or linked into the plugins that use them)
 NATIVE = {"libsmashline_plugin.nro", "libsmashline_hook.nro", "libparam_config.nro", "libarcropolis.nro",
           "libnro_hook.nro", "libthe_csk_collection.nro", "libskyline.nro"}
+# Smashline's own API: a mod's plugin that defines these (not only calls them) is a copy of Smashline
+# itself, whatever its file is called. "!Terry 46-53 Invincible Slotted edited" ships one as plugin.nro,
+# built for an older game: its hooks land mid-function on 13.0.5 and the boot stopped (an indirect
+# call to 0x1 in smashline+0x1e6bc). It is left out, as the game's own Smashline is (NATIVE).
+SMASHLINE_API = ("smashline_install_acmd_script", "smashline_install_status_script")
+_copies = {}   # (path, size, mtime) -> whether it is a copy of Smashline
 
 
 def arg(name, default=None):
@@ -83,9 +89,27 @@ def standard(tree):
     return [("(standard) " + n, os.path.join(folder, n)) for n in names]
 
 
+def smashline_copy(path):
+    """Whether the NRO at `path` is a copy of Smashline (it defines Smashline's API) rather than a
+    plugin that uses it (SMASHLINE_API)."""
+    from nso import Module
+    try:
+        key = (path, os.path.getsize(path), os.path.getmtime(path))
+    except OSError:
+        return False
+    if key not in _copies:
+        try:
+            names = {s[0] for s in Module(path).exports}
+        except Exception:   # (not an NRO the recompiler reads)
+            names = set()
+        _copies[key] = all(n in names for n in SMASHLINE_API)
+    return _copies[key]
+
+
 def turned_on(tree):
     """[(mod name, plugin file)]: the standard plugins, then the turned-on mods' in their order. A
-    mod's own copy of a standard plugin (or of one the runtime provides) is left out."""
+    mod's own copy of a standard plugin (or of one the runtime provides, or of Smashline under another
+    name: smashline_copy) is left out."""
     import mods
     t = mods.Tree(tree)
     state = t.load()
@@ -95,7 +119,7 @@ def turned_on(tree):
         if not state["mods"].get(name, {}).get("enabled"):
             continue
         for rel in mods.plugins(os.path.join(t.mods, name)):
-            if os.path.basename(rel).lower() in NATIVE | have:
+            if os.path.basename(rel).lower() in NATIVE | have or smashline_copy(os.path.join(t.mods, name, rel)):
                 continue
             out.append((name, os.path.join(t.mods, name, rel)))
     return out
@@ -267,7 +291,7 @@ def plugin_state(tree, mod, rels):
     record = load_record(Paths(tree))
     out = []
     for rel in rels:
-        if os.path.basename(rel).lower() in NATIVE:
+        if os.path.basename(rel).lower() in NATIVE or smashline_copy(os.path.join(tree, "mods", mod, rel)):
             continue
         try:
             entry = record.get(Module(os.path.join(tree, "mods", mod, rel)).build_id)

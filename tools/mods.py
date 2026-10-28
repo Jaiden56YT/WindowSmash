@@ -1596,6 +1596,7 @@ def apply(tree, log=print):
         select_screen_room(tree, on, log)
         characters_mod(tree, log)
         hide_shadowed_sources(tree, on, log)
+        hide_smashline_copies(tree, on, log)
         junk = sum(remove_mac_junk(os.path.join(tree.mods, n)) for n in on)
         if junk:
             log(f"{junk} macOS zip leftover(s) (__MACOSX, ._ files) deleted from the mods' folders")
@@ -1742,6 +1743,22 @@ def hide_shadowed_sources(tree, on, log):
         f.writelines(h + "\n" for h in shadowed)
     log(f"{len(shadowed)} text source(s) left to the whole file beside them (ARCropolis would build that "
         "file from the text): " + ", ".join(shadowed[:5]) + (" ..." if len(shadowed) > 5 else ""))
+
+
+def hide_smashline_copies(tree, on, log):
+    """A mod's plugin that is a copy of Smashline itself (tools/skyline.py smashline_copy: one built for
+    an older game patched the middle of 13.0.5's functions, and the boot stopped) is left out: added to
+    dump/skyline/hidden.txt, as ARCropolis would chainload it from the mod's folder (runtime/hle_fs.c
+    hides it). The game's own Smashline runs the mods' movesets."""
+    import skyline
+    copies = [f"{name}/{rel}" for name in on for rel in plugins(os.path.join(tree.mods, name))
+              if skyline.smashline_copy(os.path.join(tree.mods, name, rel))]
+    if not copies:
+        return
+    with open(os.path.join(tree.root, "dump", "skyline", "hidden.txt"), "a", encoding="utf-8", newline="\n") as f:
+        f.writelines(c + "\n" for c in copies)
+    log("left out, a copy of Smashline itself (the game's own Smashline is used; one made for another "
+        "game version stops the game at start): " + ", ".join(copies))
 
 
 ARRANGEMENT = ("ui", "param", "menu", "chara_icon_arrangement.prc")
