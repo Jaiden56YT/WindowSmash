@@ -2957,7 +2957,7 @@ static struct {
     __unsafe_unretained id pso, ds;
     MTLViewport vp;
     MTLScissorRect scissor;
-    int cull, winding, fill, known;
+    int cull, winding, fill, clip, known;
     u32 stencil_ref[2];
     float blend[4];
     int bytes_known[2];      /* params and binds below are what each stage (vertex, pixel) has */
@@ -3513,6 +3513,11 @@ again:;
     if (gfx_debug() & 4) cull = MTLCullModeNone;
     int front_ccw = (regs[M_FRONT_FACE] == 0x901) != flipped;
     MTLTriangleFillMode fill = regs[M_FILL_MODE] == 0x1B01 ? MTLTriangleFillModeLines : MTLTriangleFillModeFill;
+    /* Depth outside the near and far planes is clamped, not clipped, unless VIEWPORT_CLIP_CONTROL's
+     * geometry clip (bits 11-13) is PASSTHRU, FRUSTUM_XYZ or FRUSTUM_Z (as yuzu reads it): Duck Hunt's
+     * sky reaches past the far plane, and clipped it left a dark slab at the screen's right edge. */
+    u32 gclip = regs[M_VIEWPORT_CLIP_CONTROL] >> 11 & 7;
+    MTLDepthClipMode clip = gclip == 1 || gclip == 3 || gclip == 5 ? MTLDepthClipModeClip : MTLDepthClipModeClamp;
 
     /* Two-sided stencil: Metal has a reference and masks for each face. Which face is which
      * differs from culling: WINDOW_ORIGIN.FLIP_Y swaps the front face for culling (see the facing
@@ -3724,7 +3729,7 @@ again:;
         }
         cur.vp.width = -1;
         cur.scissor.width = (NSUInteger)-1;
-        cur.cull = cur.winding = cur.fill = -1;
+        cur.cull = cur.winding = cur.fill = cur.clip = -1;
         cur.stencil_ref[0] = cur.stencil_ref[1] = ~0u;
         cur.blend[0] = NAN;
         cur.bytes_known[0] = cur.bytes_known[1] = 0;
@@ -3740,6 +3745,7 @@ again:;
     if (cur.cull != (int)cull) { [e setCullMode:cull]; cur.cull = (int)cull; }
     if (cur.winding != front_ccw) { [e setFrontFacingWinding:front_ccw ? MTLWindingCounterClockwise : MTLWindingClockwise]; cur.winding = front_ccw; }
     if (cur.fill != (int)fill) { [e setTriangleFillMode:fill]; cur.fill = (int)fill; }
+    if (cur.clip != (int)clip) { [e setDepthClipMode:clip]; cur.clip = (int)clip; }
     if (memcmp(&cur.vp, &vp, sizeof vp)) { [e setViewport:vp]; cur.vp = vp; }
     /* (Metal wants the scissor inside the targets) */
     i32 l = sc[0] < 0 ? 0 : sc[0], t = sc[1] < 0 ? 0 : sc[1], r = sc[2] > (i32)pass.w ? (i32)pass.w : sc[2], b = sc[3] > (i32)pass.h ? (i32)pass.h : sc[3];

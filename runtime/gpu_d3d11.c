@@ -4019,7 +4019,10 @@ again:;
         rd.CullMode = face == 0x404 ? D3D11_CULL_FRONT : face == 0x405 ? D3D11_CULL_BACK : D3D11_CULL_NONE;
     }
     rd.FrontCounterClockwise = (regs[M_FRONT_FACE] == 0x901) != flipped;
-    rd.DepthClipEnable = TRUE;
+    /* depth outside the near and far planes clamped, not clipped, unless VIEWPORT_CLIP_CONTROL's
+     * geometry clip (bits 11-13) is PASSTHRU, FRUSTUM_XYZ or FRUSTUM_Z (as gpu_metal.m's: Duck Hunt's sky) */
+    u32 gclip = regs[M_VIEWPORT_CLIP_CONTROL] >> 11 & 7;
+    rd.DepthClipEnable = gclip == 1 || gclip == 3 || gclip == 5;
     rd.ScissorEnable = TRUE;
     if (gfx_debug() & 4) rd.CullMode = D3D11_CULL_NONE;
     ID3D11RasterizerState *rs = raster_state(&rd);
