@@ -382,9 +382,15 @@ def gamebanana_install(tree, mod_id, file_id=None, progress=None, log=None):
     files = data.get("_aFiles") or []
     if not files:
         raise Error("this mod has no files to download on GameBanana")
-    f = next((x for x in files if str(x.get("_idRow")) == str(file_id)), None) if file_id else files[0]
+    # (no file named - a pasted link: the one most people downloaded, not the first listed, which is
+    # often an add-on: Dixie Kong's page lists its extra effects before the model)
+    f = next((x for x in files if str(x.get("_idRow")) == str(file_id)), None) if file_id else \
+        max(files, key=lambda x: (x.get("_nDownloadCount") or 0, x.get("_nFilesize") or 0))
     if not f:
         raise Error(f"the mod has no file {file_id}")
+    if not file_id and len(files) > 1 and log:
+        log(f"  {len(files)} files on its page: {f.get('_sFile')} (the most downloaded); the others: "
+            + ", ".join(x.get("_sFile", "?") for x in files if x is not f))
     if f.get("_sAvResult") not in (None, "", "clean"):
         raise Error(f"GameBanana's virus scan of {f.get('_sFile')} says: {f.get('_sAvResult')}. Not installed.")
     images = (data.get("_aPreviewMedia") or {}).get("_aImages") or []

@@ -258,7 +258,7 @@ def download(url, progress, log):
 def install_url(tree, url, log, progress, meta=None):
     m = GB_LINK.search(url)
     if m:
-        return mods.gamebanana_install(tree, int(m.group(1)), None, progress)
+        return mods.gamebanana_install(tree, int(m.group(1)), None, progress, log)
     path, tmp = download(url, progress, log)
     try:
         return mods.install(tree, path, None, dict(meta or {}, url=url))
