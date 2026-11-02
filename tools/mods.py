@@ -120,6 +120,12 @@ ROOTS = TOP | PLUGIN_DATA
 # ARCropolis' patch files: merged into the game's file of the same name (or a mod's whole one) when
 # mods are applied - .xmsbt into an .msbt (text), .prcx and .prcxml into a .prc (params)
 PATCHES = {".xmsbt": ".msbt", ".prcx": ".prc", ".prcxml": ".prc"}
+# ARCropolis' region files: msg_name+us_en.xmsbt is msg_name.xmsbt for the game in that region only. The
+# game here runs in American English (runtime/hle_env.c): +us_en is its file (over the mod's one with no
+# region), the other regions' are left out
+REGION = "us_en"
+REGION_SUFFIX = re.compile(r"\+(jp_ja|us_en|us_fr|us_es|eu_en|eu_fr|eu_es|eu_de|eu_nl|eu_it|eu_ru|kr_ko|zh_cn|zh_tw)"
+                           r"(?=\.[^./]+$)", re.I)
 SKIP_FILES = {"info.toml", "config.json", "preview.webp", "preview.png", "preview.jpg", "readme.txt", "readme.md"}
 GAMEBANANA = "https://gamebanana.com/apiv11"
 
@@ -1913,7 +1919,13 @@ def _apply(tree, image, lines, state, on, log):
         for plugin in plugins(os.path.join(tree.mods, name)):
             log(f"{name}: {plugin} is a Skyline code plugin (a moveset, a new character...): recompiled into the game "
                 "(tools/skyline.py)")
-        for path, src in mod_files(os.path.join(tree.mods, name)):
+        # (a region's file after the mod's others, so it wins over the one with no region)
+        for path, src in sorted(mod_files(os.path.join(tree.mods, name)), key=lambda f: bool(REGION_SUFFIX.search(f[0]))):
+            m = REGION_SUFFIX.search(path)
+            if m:
+                if m.group(1).lower() != REGION:
+                    continue
+                path = path[:m.start()] + path[m.end():]
             stem, ext = os.path.splitext(path)
             if ext.lower() in PATCHES:
                 patches.setdefault((stem + PATCHES[ext.lower()]).lower(), []).append((path, src, name))
