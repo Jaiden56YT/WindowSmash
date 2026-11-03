@@ -18,7 +18,7 @@
  *     does not answer at all given up on in seconds, not TCP's 75;
  *   - the profiler: every thread's stack (named from ssbu.syms beside the program), a sampling
  *     report, the hitch log.
- * Built with -DSHIMTEST_HOST and the loader and kernel (runtime/host.c, kernel.c, linux/upnp.c),
+ * Built with -DSHIMTEST_HOST and the loader and kernel (runtime/host.c, kernel.c, hle_hooks.c, linux/upnp.c),
  * it also starts a made-up game in a child process the way the game starts (guest window,
  * modules mapped at guest addresses, kernel areas, the guest main thread), checks its memory
  * and system calls, and lets it crash on purpose: the crash report must name the guest
@@ -31,8 +31,8 @@
  *      runtime/macos/platform.c runtime/macos/profile.c"
  *   mkdir -p build-mac/shimtest
  *   clang $F -Dmain=rt_host_main -c runtime/host.c -o build-mac/shimtest/host.o
- *   clang $F -DSHIMTEST_HOST tools/mac/shimtest.c build-mac/shimtest/host.o runtime/kernel.c runtime/linux/upnp.c $S \
- *       -o build-mac/shimtest/shimtest
+ *   clang $F -DSHIMTEST_HOST tools/mac/shimtest.c build-mac/shimtest/host.o runtime/kernel.c runtime/hle_hooks.c \
+ *       runtime/linux/upnp.c $S -o build-mac/shimtest/shimtest
  *   nm -n --defined-only build-mac/shimtest/shimtest > build-mac/shimtest/ssbu.syms   (the profiler's names)
  *   (cd build-mac/shimtest && ./shimtest)
  * or without the loader and kernel: clang $F tools/mac/shimtest.c $S -o build-mac/shimtest/shimtest. Exit
@@ -886,11 +886,23 @@ static void test_files(void) {
     CHECK(c100 <= w100 && now100 - w100 < 600000000ull && now100 - c100 < 600000000ull, "file times: created %llu written %llu now %llu", c100, w100, now100);
     FILETIME set = {(DWORD)(c100 - 864000000000ull), (DWORD)((c100 - 864000000000ull) >> 32)};   /* (a day before) */
     CHECK(SetFileTime(h, NULL, NULL, &set) && GetFileTime(h, NULL, NULL, &w) && w.dwLowDateTime / 10 == set.dwLowDateTime / 10, "SetFileTime");
-    CloseHandle(h);
-    CHECK(rt_fd_of(h) == -1, "a closed handle's descriptor");
+    int closed_fd = rt_fd_of(h);
+    CHECK(closed_fd >= 0, "an open file handle's descriptor");
+    CloseHandle(h);   /* (h is freed: not read again) */
+    CHECK(fcntl(closed_fd, F_GETFD) == -1 && errno == EBADF, "CloseHandle closed the descriptor (%d)", closed_fd);
+    CHECK(rt_fd_of(INVALID_HANDLE_VALUE) == -1 && rt_fd_of(NULL) == -1, "no descriptor behind an invalid handle");
     snprintf(other, sizeof other, "%s\\sub", dir);
     CHECK(CreateDirectoryA(other, NULL) && GetFileAttributesA(other) == FILE_ATTRIBUTE_DIRECTORY, "CreateDirectoryA with backslashes");
     CHECK(MoveFileExA(path, win, 0) && GetFileAttributesA(win) == FILE_ATTRIBUTE_NORMAL && GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES, "MoveFileExA");
+    h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_NEW, 0, NULL);
+    CHECK(h != INVALID_HANDLE_VALUE && WriteFile(h, "new", 3, &n, NULL) && FlushFileBuffers(h), "a second file");
+    CloseHandle(h);
+    CHECK(MoveFileExA(path, win, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) && GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES,
+          "MoveFileExA over a file, written through");
+    h = CreateFileA(win, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
+    memset(buf, 0, sizeof buf);
+    CHECK(h != INVALID_HANDLE_VALUE && ReadFile(h, buf, sizeof buf, &n, NULL) && n == 3 && !memcmp(buf, "new", 3), "the moved file replaced the other");
+    CloseHandle(h);
     for (int i = 0; i < 3; i++) {
         snprintf(path, sizeof path, "%s/sub/%c.dat", dir, 'x' + i);
         HANDLE f = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
@@ -1228,6 +1240,7 @@ static void test_profiler(void) {
 /* ---- the loader and kernel, on a made-up game (-DSHIMTEST_HOST) -------------------------- */
 #ifdef SHIMTEST_HOST
 #include "host.h"
+#include "fight_test.h"   /* (SSBU_FIXED_SEED's entropy) */
 
 int rt_host_main(int argc, char **argv);   /* (runtime/host.c's main, renamed) */
 u64 rt_guest_copy(const void *data, size_t size);
@@ -1240,7 +1253,13 @@ u64 gpu_stat_batches, gpu_stat_lists, gpu_stat_draws, gpu_stat_dispatches, gfx_s
 u64 present_frames(void) { return 0; }
 void gpu_memory_unmapping(u64 addr, u64 size) { (void)addr; (void)size; }   /* (hle_nv.c's: no GPU here) */
 void gfx_report_compiles(void (*line)(const char *text)) { line("(shimtest: no shaders)\n"); }
+void gfx_status_lines(void) {}   /* (the renderer's [status] lines: none here) */
+void settings_args(int argc, char **argv) { (void)argc; (void)argv; }   /* (hle_settings.c's --online: no netplay here) */
 void display_dpi_aware(void) {}
+int input_seq_on(void) { return 0; }   /* (hle_hid.c's SSBU_SEQ, and hle_movie_skip.c's movies: none here) */
+void input_seq_mark(const char *what) { (void)what; }
+void movie_test_start(void) {}
+void test_fight_start(void) {}   /* (hle_fight_test.c's switches: none here) */
 void fiber_counts(u32 *slots, u32 *finalized, u64 *made) { *slots = *finalized = 0; *made = 0; }
 void *ipc_connect(const char *port) { return !strcmp(port, "sm:") ? (void *)&checks : NULL; }
 u32 ipc_request(Cpu *c, void *session, u64 message, u64 size) { (void)c; (void)session; (void)message; (void)size; return 0; }
@@ -1301,7 +1320,7 @@ static void g_start(Cpu *c) {   /* nn::init::Start, standing in for the game */
     memcpy(G2H(HEAP_BASE + 0x3000), "sm:", 4);
     c->x[1] = HEAP_BASE + 0x3000;
     rt_svc(c, 0x1F);
-    say(c->x[0] == 0 && c->x[1] >= 0xA000, "svcConnectToNamedPort with the name in guest memory");
+    say(c->x[0] == 0 && c->x[1] && c->x[1] < 0x40000000, "svcConnectToNamedPort with the name in guest memory");   /* (either handle layout: kernel.c) */
     u64 dst = STACK_BASE + 0x100000;
     c->x[0] = dst; c->x[1] = HEAP_BASE; c->x[2] = 0x10000;
     rt_svc(c, 0x04);
@@ -1314,6 +1333,19 @@ static void g_start(Cpu *c) {   /* nn::init::Start, standing in for the game */
     c->x[0] = HEAP_BASE + 0x4000; c->x[2] = HEAP_BASE + 0x10;
     rt_svc(c, 0x06);
     say(ld64(HEAP_BASE + 0x4000) == HEAP_BASE && ld32(HEAP_BASE + 0x4010) == 5, "svcQueryMemory");
+    /* svcGetInfo 11, the random entropy (sub-ids 0 and 3): the clock's, unless SSBU_FIXED_SEED (test_host's SSBU_CWD run) */
+    u64 entropy[2], seed, ok = 1;
+    for (int i = 0; i < 2; i++) {
+        c->x[1] = 11; c->x[2] = 0; c->x[3] = i ? 3 : 0;
+        rt_svc(c, 0x29);
+        ok &= c->x[0] == 0;
+        entropy[i] = c->x[1];
+    }
+    if (fixed_seed_parse(getenv("SSBU_FIXED_SEED"), &seed))
+        say(ok && entropy[0] == fixed_entropy(seed, 0) && entropy[1] == fixed_entropy(seed, 3), "svcGetInfo 11 with SSBU_FIXED_SEED: the seed's");
+    else   /* (golden * (sub + 1) ^ the clock's ns, which had not gone on by a second since) */
+        say(ok && rt_clock_ns() - (entropy[0] ^ FIXED_GOLDEN) < 1000000000ull && rt_clock_ns() - (entropy[1] ^ FIXED_GOLDEN * 4) < 1000000000ull,
+            "svcGetInfo 11: the clock's");
     c->x[0] = ALIAS_BASE + 0x100000; c->x[1] = 0x20000;
     rt_svc(c, 0x2C);
     st32(ALIAS_BASE + 0x105000, 1);   /* (a write the write watch takes, in host.c's handler) */
@@ -1370,7 +1402,9 @@ static const RtFunc main_funcs[] = {{MAIN + 0x100, g_init}, {MAIN + 0x200, g_wai
 static const char *const main_imports[] = {"sdk_value", "hle_test_native"};
 static const u8 main_weak[] = {0, 0};
 static const RtReloc main_relocs[] = {{0x9000, 8, 0}, {0x9008, 0, 1}};
-const RtModule rt_module_main = {"main", MAIN, 0x20000, 0x8000, MAIN + 0x100, main_funcs, 6, NULL, 0, main_imports, main_weak, 2, main_relocs, 2, ""};
+/* (build id: 13.0.5's, which host.c requires of the main module before it starts the game) */
+const RtModule rt_module_main = {"main", MAIN, 0x20000, 0x8000, MAIN + 0x100, main_funcs, 6, NULL, 0, main_imports, main_weak, 2, main_relocs, 2,
+                                 "21450C647B8C5940ED5B68218EA128FD3C5D597D"};
 static const RtFunc subsdk_funcs[] = {{SUBSDK + 0x100, g_init}};
 const RtModule rt_module_subsdk0 = {"subsdk0", SUBSDK, 0x20000, 0x8000, SUBSDK + 0x100, subsdk_funcs, 1, NULL, 0, NULL, NULL, 0, NULL, 0, ""};
 static const RtFunc sdk_funcs[] = {{SDK + 0x100, g_init}, {SDK + 0x200, g_start}};
@@ -1446,6 +1480,7 @@ static void test_host(void) {
     snprintf(path, sizeof path, "%s/modules", dir);
     write_images(path);
     static char out[1 << 17];
+    unsetenv("SSBU_FIXED_SEED");   /* (set only for the SSBU_CWD run, below) */
     int status = run_game(dir, "crash", out, sizeof out);
     if (getenv("SHIMTEST_VERBOSE")) printf("%s", out);
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 5, "the game's exit status %#x (want 5: a crash report)", status);
@@ -1454,7 +1489,7 @@ static void test_host(void) {
     CHECK(strstr(out, "[mem] write watch: page protection"), "the write watch's line");
     int oks = 0;
     for (const char *at = out; (at = strstr(at, ": ok\n")); at++) oks++;
-    CHECK(oks == 18 && !strstr(out, ": FAIL"), "the game's own checks: %d ok\n%s", oks, out);
+    CHECK(oks == 19 && !strstr(out, ": FAIL") && strstr(out, "svcGetInfo 11: the clock's: ok"), "the game's own checks: %d ok\n%s", oks, out);
     const char *d0 = strstr(out, "the thread dump:\n"), *d1 = strstr(out, "the thread dump's end");
     const char *t3 = d0 ? strstr(d0, "  thread 3 (priority 45): running or in a system call\n      main+0x200\n") : NULL;
     CHECK(t3 && t3 < d1 && strstr(d0, "  thread 1 (priority 44)"), "the thread dump (each guest thread stopped, its stack read):\n%.*s", d0 && d1 ? (int)(d1 - d0) : 0, d0 ? d0 : "");
@@ -1472,8 +1507,9 @@ static void test_host(void) {
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 5 && strstr(out, "*** host exception (signal 5: trap) during SDK initialisation") &&
           strstr(out, "guest backtrace (innermost first):\n  main+0x500\n"), "a trap's report (status %#x):\n%s", status, out);
     status = run_game(dir, "abort", out, sizeof out);
-    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 5 && strstr(out, "*** host exception (signal 6: abort) during SDK initialisation") &&
-          strstr(out, "main+0x600"), "an abort's report (status %#x):\n%s", status, out);
+    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 5 && strstr(out, "*** host exception (signal 6: abort) during SDK initialisation"),
+          "an abort's report (status %#x):\n%s", status, out);
+    CHECK(strstr(out, "main+0x600"), "an abort's guest backtrace (want main+0x600):\n%s", out);
 
     /* started as `open` starts the app: from /, output to SSBU_LOG, no directory given - the
      * tree's modules (<tree>/build-mac/WindowSmash.app/Contents/MacOS/ssbu), the root (the
@@ -1495,15 +1531,18 @@ static void test_host(void) {
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 5 && strstr(out, "loaded 3 modules") && strstr(out, "/root/v13/build-mac/WindowSmash.app/Contents/MacOS/ssbu, built"),
           "the app, started from / (status %#x), its SSBU_LOG:\n%s", status, out);
     CHECK(newest_report(root, want, sizeof want), "the app's crash report not in the root's reports/: %s", root);
-    /* SSBU_CWD: the working folder given */
+    /* SSBU_CWD: the working folder given (and SSBU_FIXED_SEED: the kernel's entropy the seed's) */
     snprintf(path, sizeof path, "%s/cwd", dir);
     mkdir(path, 0755);
     snprintf(want, sizeof want, "%s/out_cwd.txt", dir);
     char modules[600];
     snprintf(modules, sizeof modules, "%s/modules", dir);
     char *cwd_args[] = {(char *)rt_exe_path(), "--host", modules, "--status", "0", NULL};
+    setenv("SSBU_FIXED_SEED", "42", 1);
     status = spawn_game(rt_exe_path(), cwd_args, "/", "crash", want, 0, path, out, sizeof out);
+    unsetenv("SSBU_FIXED_SEED");
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 5 && newest_report(path, want, sizeof want), "SSBU_CWD: no report in %s (status %#x)", path, status);
+    CHECK(strstr(out, "svcGetInfo 11 with SSBU_FIXED_SEED: the seed's: ok") != NULL, "SSBU_FIXED_SEED=42: svcGetInfo 11's entropy\n%s", out);
     snprintf(cmd, sizeof cmd, "rm -rf '%s'", dir);
     if (!getenv("SHIMTEST_KEEP")) system(cmd);
 }

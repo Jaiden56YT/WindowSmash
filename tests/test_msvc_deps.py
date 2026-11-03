@@ -5,6 +5,7 @@ like Microsoft's; no downloads, no compiler."""
 from pathlib import Path
 import io
 import json
+import ntpath
 import os
 import shutil
 import sys
@@ -154,7 +155,7 @@ class ManifestTests(unittest.TestCase):
         sdk, version = msvc_deps.sdk_package(packages)
         self.assertEqual((sdk['id'], version), ('Win11SDK_10.0.26100', '10.0.26100'))   # the recommended one
         msis = msvc_deps.sdk_payloads(sdk)
-        self.assertEqual([os.path.basename(msvc_deps.payload_name(p)) for p in msis], list(msvc_deps.SDK_MSIS))
+        self.assertEqual([ntpath.basename(msvc_deps.payload_name(p)) for p in msis], list(msvc_deps.SDK_MSIS))
         no_workload = msvc_deps.index_packages({'packages': [p for p in VSMAN['packages'] if 'Workload' not in p['id']]})
         sdk, version = msvc_deps.sdk_package(no_workload)
         self.assertEqual(version, '10.0.28000')   # the newest

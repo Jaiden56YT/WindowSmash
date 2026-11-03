@@ -39,7 +39,7 @@
  *     -framework CoreText -framework CoreGraphics -framework Foundation -o /tmp/gfxtest/font && /tmp/gfxtest/font /tmp/gfxtest/overlay_font.h
  *   clang -arch arm64 -mmacosx-version-min=14.0 -mcpu=apple-m1 -fobjc-arc -fno-strict-aliasing -ffp-contract=off -O1 -w \
  *     -I runtime/macos/include -I runtime/linux/include -I runtime -I /tmp/gfxtest \
- *     tools/mac/gfxtest.m runtime/macos/gpu_metal.m runtime/macos/gpu_metal_overlay.m runtime/gpu_shader.c runtime/gpu_texture.c \
+ *     tools/mac/gfxtest.m runtime/macos/gpu_metal.m runtime/macos/gpu_metal_overlay.m runtime/gpu_shader.c runtime/gpu_texture.c runtime/gpu_astc.c \
  *     runtime/linux/win32.c runtime/macos/memory.c runtime/macos/platform.c runtime/macos/fiber.c runtime/macos/fiber_arm64.S \
  *     -framework Metal -framework QuartzCore -framework CoreGraphics -framework Foundation -o /tmp/gfxtest/gfxtest
  *   /tmp/gfxtest/gfxtest [-v]          (works in a folder of its own under $TMPDIR: shader cache, screenshot;
@@ -92,6 +92,11 @@ void display_fit(unsigned w, unsigned h, unsigned *x, unsigned *y, unsigned *fw,
     *y = (h - *fh) / 2;
 }
 int display_latency(void) { return 2; }
+int kernel_watch_shared;   /* (kernel.c's: the write watch the system's own, as without SSBU_ROLLBACK_RING) */
+UINT kernel_watch_query(int who, DWORD flags, PVOID base, SIZE_T size, PVOID *addresses, ULONG_PTR *count, ULONG *granularity) {
+    (void)who;
+    return GetWriteWatch(flags, base, size, addresses, count, granularity);
+}
 float display_render_scale(void) { return 1.0f; }   /* (test_scale changes the renderer's: gfx_metal_set_render_scale) */
 float display_overlay_scale(void) { return 1.0f; }   /* (display.ini's overlay_scale: the overlay at its own size) */
 int display_window_mode(void) { return DISPLAY_WINDOWED; }

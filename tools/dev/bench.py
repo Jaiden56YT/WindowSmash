@@ -35,7 +35,7 @@ def arg(name, default=None):
 
 
 def game_pids():
-    r = subprocess.run(["pgrep", "-f", "MacOS/ssbu"], capture_output=True, text=True)
+    r = subprocess.run(["pgrep", "-x", "ssbu"], capture_output=True, text=True)
     return [int(p) for p in r.stdout.split()]
 
 
@@ -213,6 +213,10 @@ def characters():
                 slots.setdefault(m.group(1), set()).add(int(m.group(2)))
         for fighter, cs in sorted(slots.items()):
             if fighter in ("nana", "ptrainer_low", "element", "kirby") and len(slots) > 1:   # (parts of another's, copies)
+                continue
+            if fighter in ("miifighter", "miiswordsman", "miigunner") and len(slots) > 1:   # (a Mii set up without a Mii crashes)
+                continue
+            if fighter.endswith("_cutin"):   # (a final smash's cut-in pictures, not a fighter)
                 continue
             found.append((name, fighter, sorted(cs)))
     return found

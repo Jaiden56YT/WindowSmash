@@ -1,7 +1,7 @@
-// WindowSmash Mods: the mod manager for the macOS build - GameBanana's Smash Ultimate mods found,
+// OpenSmash Ultimate Mods: the mod manager for the macOS build - GameBanana's Smash Ultimate mods found,
 // installed, turned on and off. tools/mods.py does the work (installing, and making the game read
 // the mods: see its header); this app shows it, and talks to GameBanana's API for browsing.
-// Built by tools/mac/build_mods_app.sh into build-mac/WindowSmash Mods.app.
+// Built by tools/mac/build_mods_app.sh into build-mac/OpenSmash Ultimate Mods.app.
 import AppKit
 import SwiftUI
 
@@ -612,7 +612,7 @@ struct ModSheet: View {
 struct ModsApp: App {
     @StateObject private var model = Model()
     var body: some Scene {
-        WindowGroup("WindowSmash Mods") {
+        WindowGroup("OpenSmash Ultimate Mods") {
             ContentView().environmentObject(model).frame(minWidth: 960, minHeight: 620)
         }
         .windowToolbarStyle(.unified)

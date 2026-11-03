@@ -1,6 +1,5 @@
-/* Display options: display.ini (SSBU_DISPLAY=<file>, else in the current directory: the port
- * root, where every launcher starts the game), written with the defaults and their documentation
- * when it does not exist.
+/* Display options: display.ini (SSBU_DISPLAY=<file>, else config/display.ini: config_folder.h), written
+ * with the defaults and their documentation when it does not exist.
  *
  * The window: windowed (resizable, kept 16:9 while dragged), borderless over its monitor, or
  * "fullscreen" (borderless and topmost: no display mode change). F11 or Alt+Enter switches
@@ -36,8 +35,10 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include <stdio.h>
 
+#include "config_folder.h"
 #include "display.h"
 #include "host.h"
+#include "testrun.h"
 #ifndef __APPLE__
 #include <dxgi.h>
 #endif
@@ -50,7 +51,10 @@ static struct {
     int loaded;
     char gpu[64];
     float render_scale;   /* 0: auto */
-} cfg = {MODE_WINDOWED, 1280, 720, 3, 1, 1, PACING_CLOCK, 0, "auto", 1.0f};
+    float small_gpu_scale;   /* the render scale on a card with little memory of its own (1: off) */
+    int scale_from_env;   /* SSBU_RENDER_SCALE given: kept as it is */
+    double speed;         /* SSBU_SPEED (test runs): 1 normal */
+} cfg = {MODE_WINDOWED, 1280, 720, 3, 1, 1, PACING_CLOCK, 0, "auto", 1.0f, 0.5f, 0, 1.0};
 
 static const char DEFAULT_INI[] =
     "; display.ini: the game's window and the pacing of its frames. Read when the game starts; the\n"
@@ -130,6 +134,13 @@ static const char DEFAULT_INI[] =
     ";   monitor with window = borderless), at least 1. A bigger picture than the window is shrunk to fit.\n"
 #endif
     "render_scale = 1\n"
+#ifndef __APPLE__
+    "; small_gpu_scale = 0.5 | off | a number from 0.5 to 1\n"
+    ";   On a graphics card with 2 GB of its own memory or less (a GT 710, a processor's own graphics),\n"
+    ";   render_scale 1 or auto draws at this instead: at 0.5 a quarter of the pixels, about twice the\n"
+    ";   frame rate on such a card. off: render_scale as it is.\n"
+    "small_gpu_scale = 0.5\n"
+#endif
 #ifdef _WIN32
     "\n"
     "; gpu = auto, or part of a graphics card's name (e.g. nvidia, radeon, intel)\n"
@@ -162,6 +173,15 @@ static void parse_render_scale(const char *v) {
     else { fprintf(stderr, "[display] render_scale is auto or a number from 0.5 to 4, not '%s': 1 it is\n", v); cfg.render_scale = 1; }
 }
 
+/* small_gpu_scale = off, or a number from 0.5 to 1 */
+static void parse_small_gpu_scale(const char *v) {
+    char *end;
+    double x = strtod(v, &end);
+    if (!_stricmp(v, "off")) cfg.small_gpu_scale = 1;
+    else if (end != v && x >= 0.5 && x <= 1) cfg.small_gpu_scale = (float)x;
+    else fprintf(stderr, "[display] small_gpu_scale is off or a number from 0.5 to 1, not '%s'\n", v);
+}
+
 static float overlay_scale = 1;   /* overlay_scale = 0.25-2 */
 static void parse_overlay_scale(const char *v) {
     char *end;
@@ -179,8 +199,10 @@ static char *trim(char *s) {
 
 const char *display_ini_path(void) {
     const char *env = getenv("SSBU_DISPLAY");
-    return env && *env ? env : "display.ini";
+    return env && *env ? env : config_path(CONFIG_DISPLAY);
 }
+
+const char *display_default_ini(void) { return DEFAULT_INI; }
 
 static BOOL CALLBACK load_once(PINIT_ONCE once, PVOID param, PVOID *ctx) {
     (void)once; (void)param; (void)ctx;
@@ -208,6 +230,7 @@ static BOOL CALLBACK load_once(PINIT_ONCE once, PVOID param, PVOID *ctx) {
         else if (!_stricmp(key, "overlay_scale")) parse_overlay_scale(value);
         else if (!_stricmp(key, "gpu")) snprintf(cfg.gpu, sizeof cfg.gpu, "%s", value);
         else if (!_stricmp(key, "render_scale")) parse_render_scale(value);
+        else if (!_stricmp(key, "small_gpu_scale")) parse_small_gpu_scale(value);
         else fprintf(stderr, "[display] %s: unknown setting '%s'\n", path, key);
     }
     if (f) fclose(f);
@@ -215,7 +238,9 @@ static BOOL CALLBACK load_once(PINIT_ONCE once, PVOID param, PVOID *ctx) {
     if ((env = getenv("SSBU_WINDOW")) && *env) parse_window(env);
     if ((env = getenv("SSBU_PACING")) && *env) parse_pacing(env);
     if ((env = getenv("SSBU_WINDOW_SIZE")) && *env) sscanf(env, "%dx%d", &cfg.width, &cfg.height);
-    if ((env = getenv("SSBU_RENDER_SCALE")) && *env) parse_render_scale(env);
+    if ((env = getenv("SSBU_RENDER_SCALE")) && *env) { parse_render_scale(env); cfg.scale_from_env = 1; }
+    if (!speed_parse(env = getenv("SSBU_SPEED"), &cfg.speed))
+        fprintf(stderr, "[display] SSBU_SPEED is a number of times 60 frames a second, up to %g (0: uncapped), not '%s': normal speed\n", SPEED_MAX, env);
     if (cfg.width < 320) cfg.width = 320;
     if (cfg.height < 180) cfg.height = 180;
     if (cfg.latency < 1) cfg.latency = 1;
@@ -233,6 +258,7 @@ int display_latency(void) { load(); return cfg.latency; }
 Pacing display_pacing(void) { load(); return cfg.pacing; }
 const char *display_gpu(void) { load(); return cfg.gpu; }
 float display_render_scale(void) { load(); return cfg.render_scale; }
+float display_small_gpu_scale(void) { load(); return cfg.scale_from_env ? 1 : cfg.small_gpu_scale; }
 
 /* (the settings menu) the render scale it saved: shown from now on, the renderer's own counts
  * only at the next start */
@@ -494,7 +520,8 @@ void display_set_tearing(int supported) { tearing = supported; }
 
 unsigned display_present_flags(void) {
     load();
-    return cfg.pacing == PACING_VRR && tearing ? 0x200u /* DXGI_PRESENT_ALLOW_TEARING */ : 0;
+    /* (SSBU_SPEED too: a frame is shown at once, not held to the monitor's refresh rate) */
+    return (cfg.pacing == PACING_VRR || cfg.speed != 1) && tearing ? 0x200u /* DXGI_PRESENT_ALLOW_TEARING */ : 0;
 }
 
 void *gfx_display_output(void);   /* gpu_d3d11.c: the swap chain's output (IDXGIOutput, referenced), or NULL */
@@ -613,5 +640,27 @@ void display_wait_tick(void) {
             if (SetWaitableTimer(timer, &wait, 0, NULL, NULL, FALSE)) { WaitForSingleObject(timer, 100); continue; }
         }
         YieldProcessor();
+    }
+}
+
+/* ---- SSBU_SPEED (test runs: docs/TESTING-RUNS.md) ---------------------------------------- */
+double display_speed(void) { load(); return cfg.speed; }
+
+void display_speed_tick(void) {
+    static LARGE_INTEGER freq;
+    static long long due;
+    load();
+    if (cfg.speed <= 0) return;   /* uncapped */
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    long long step = (long long)((double)freq.QuadPart / (60.0 * cfg.speed));
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    due = speed_due(due, now.QuadPart, step);
+    for (;;) {
+        QueryPerformanceCounter(&now);
+        long long left = due - now.QuadPart;
+        if (left <= 0) break;
+        if (left * 1000 > 2 * freq.QuadPart) Sleep(1);
+        else YieldProcessor();
     }
 }

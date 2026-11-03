@@ -15,11 +15,14 @@ import hashlib
 import io
 import os
 import sys
+import time
+import urllib.error
 import urllib.request
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
+sys.path.insert(0, HERE)   # (for port_plugin, also under the embeddable Python, whose ._pth leaves this folder out)
 
 # name: (version, url, file in the zip (None: the url is the .nro), sha256 of the .nro, source, status here)
 # status: "runs" (tools/skyline.py runs it; the CSK Collection ported to 13.0.5 first, PORTS), "native" (the runtime
@@ -62,15 +65,29 @@ def folder(tree):
     return os.path.join(tree, "skyline", "plugins")
 
 
-def download(url):
+def download(url, tries=4, log=print):
+    """The file at url, tried again after a pause when the server or the connection fails (GameBanana
+    answers a busy moment with a 429 or 5xx: a friend's install lost every plugin after the CSK Collection)."""
     req = urllib.request.Request(url, headers={"User-Agent": "WindowSmash"})
-    with urllib.request.urlopen(req, timeout=120) as r:
-        return r.read()
+    for attempt in range(1, tries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                return r.read()
+        except urllib.error.HTTPError as e:
+            if attempt == tries or not (e.code == 429 or e.code >= 500):
+                raise
+            why = f"HTTP {e.code}"
+        except (urllib.error.URLError, OSError) as e:   # (timeouts, resets, DNS)
+            if attempt == tries:
+                raise
+            why = str(getattr(e, "reason", e))
+        log(f"  {url}: {why}, trying again in {5 * attempt} s")
+        time.sleep(5 * attempt)
 
 
 def fetch(tree, name, log=print):
     version, url, member, sha, _source, _status = PLUGINS[name]
-    data = raw = download(url)
+    data = raw = download(url, log=log)
     if member:
         with zipfile.ZipFile(io.BytesIO(raw)) as z:
             data = z.read(member)
@@ -109,11 +126,19 @@ def main():
     elif cmd == "fetch":
         named = [a for a in sys.argv[2:] if not a.startswith("--") and a != tree and a in PLUGINS]
         names = named or [n for n, p in PLUGINS.items() if p[5] == "runs"]
-        for n in names:
-            fetch(tree, n)
+        failed = []
+        for n in names:   # (one that fails doesn't stop the rest; its reason goes to stdout, which the installer's log keeps)
+            try:
+                fetch(tree, n)
+            except (SystemExit, Exception) as e:
+                print(f"{n}: not fetched: {e if isinstance(e, SystemExit) else f'{type(e).__name__}: {e}'}", flush=True)
+                failed.append(n)
         for n in set(os.listdir(folder(tree)) if os.path.isdir(folder(tree)) else []) - set(names):
             if n in PLUGINS and not named and "--keep" not in sys.argv:   # (the set that runs: one no longer listed as running goes)
                 os.remove(os.path.join(folder(tree), n))
+        if failed:
+            print(f"not fetched: {', '.join(failed)}: run this again to retry them", flush=True)
+            sys.exit(1)
     else:
         raise SystemExit(__doc__)
 

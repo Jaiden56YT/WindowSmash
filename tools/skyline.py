@@ -31,6 +31,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RECOMPILER = ("recomp.py", "lift.py", "lift_simd.py", "regcache.py", "plugin_eh.py", "eh.py")   # (what makes a plugin's C)
@@ -46,6 +47,12 @@ NATIVE_HOOKS = ("main 66dcf0", "main 3238a70", "main 64b730", "main 6079d0") + t
 # (provided natively by runtime/hle_skyline.c, or linked into the plugins that use them)
 NATIVE = {"libsmashline_plugin.nro", "libsmashline_hook.nro", "libparam_config.nro", "libarcropolis.nro",
           "libnro_hook.nro", "libthe_csk_collection.nro", "libskyline.nro"}
+# Smashline's own API: a mod's plugin that defines these (not only calls them) is a copy of Smashline
+# itself, whatever its file is called. "!Terry 46-53 Invincible Slotted edited" ships one as plugin.nro,
+# built for an older game: its hooks land mid-function on 13.0.5 and the boot stopped (an indirect
+# call to 0x1 in smashline+0x1e6bc). It is left out, as the game's own Smashline is (NATIVE).
+SMASHLINE_API = ("smashline_install_acmd_script", "smashline_install_status_script")
+_copies = {}   # (path, size, mtime) -> whether it is a copy of Smashline
 
 
 def arg(name, default=None):
@@ -82,9 +89,27 @@ def standard(tree):
     return [("(standard) " + n, os.path.join(folder, n)) for n in names]
 
 
+def smashline_copy(path):
+    """Whether the NRO at `path` is a copy of Smashline (it defines Smashline's API) rather than a
+    plugin that uses it (SMASHLINE_API)."""
+    from nso import Module
+    try:
+        key = (path, os.path.getsize(path), os.path.getmtime(path))
+    except OSError:
+        return False
+    if key not in _copies:
+        try:
+            names = {s[0] for s in Module(path).exports}
+        except Exception:   # (not an NRO the recompiler reads)
+            names = set()
+        _copies[key] = all(n in names for n in SMASHLINE_API)
+    return _copies[key]
+
+
 def turned_on(tree):
     """[(mod name, plugin file)]: the standard plugins, then the turned-on mods' in their order. A
-    mod's own copy of a standard plugin (or of one the runtime provides) is left out."""
+    mod's own copy of a standard plugin (or of one the runtime provides, or of Smashline under another
+    name: smashline_copy) is left out."""
     import mods
     t = mods.Tree(tree)
     state = t.load()
@@ -94,7 +119,7 @@ def turned_on(tree):
         if not state["mods"].get(name, {}).get("enabled"):
             continue
         for rel in mods.plugins(os.path.join(t.mods, name)):
-            if os.path.basename(rel).lower() in NATIVE | have:
+            if os.path.basename(rel).lower() in NATIVE | have or smashline_copy(os.path.join(t.mods, name, rel)):
                 continue
             out.append((name, os.path.join(t.mods, name, rel)))
     return out
@@ -177,6 +202,34 @@ def seed_lists(p):
                 f.writelines(l + "\n" for l in new)
 
 
+def prune_patches(p, live, log=print):
+    """Drop from dump/skyline/patches.txt the code patches of plugins no longer loaded (turned off,
+    removed, or another build of one, under a new module name): compiled into the game, they'd go on
+    changing its code for a plugin that isn't there (Smashline 2.0.0's, left after going back to
+    1.6.8, crashed every match). A line without its plugin (from before the runtime named it) is kept
+    if the standard plugins' seed has it, else dropped: a loaded plugin's is listed again as it runs."""
+    path = os.path.join(p.skyline, "patches.txt")
+    if not os.path.exists(path):
+        return
+    seed = os.path.join(SEED, "patches.txt")
+    seed = set(open(seed, encoding="utf-8").read().splitlines()) if os.path.exists(seed) else set()
+    lines = open(path, encoding="utf-8").read().splitlines()
+    keep, dropped = [], {}
+    for line in lines:
+        parts = line.split()
+        if len(parts) == 5 and parts[4] not in live and parts[4] != "?":
+            dropped[parts[4]] = dropped.get(parts[4], 0) + 1
+        elif len(parts) == 4 and line not in seed:
+            dropped["no plugin named"] = dropped.get("no plugin named", 0) + 1
+        elif line.strip():
+            keep.append(line)
+    if dropped:
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.writelines(l + "\n" for l in keep)
+        log("code patches of plugins no longer loaded dropped (the next build leaves them out): "
+            + ", ".join(f"{n} ({k})" for n, k in sorted(dropped.items())))
+
+
 def sync(tree, log=print):
     """Recompile the turned-on mods' plugins and list them to load; returns the list."""
     p = Paths(tree)
@@ -202,6 +255,7 @@ def sync(tree, log=print):
         if name not in names:
             names.append(name)
             log(f"{mod}: plugin {os.path.basename(source)} -> {name}")
+    prune_patches(p, set(names), log)
     with open(p.record, "w", encoding="utf-8") as f:
         json.dump(record, f, indent=1)
     import mods
@@ -266,7 +320,7 @@ def plugin_state(tree, mod, rels):
     record = load_record(Paths(tree))
     out = []
     for rel in rels:
-        if os.path.basename(rel).lower() in NATIVE:
+        if os.path.basename(rel).lower() in NATIVE or smashline_copy(os.path.join(tree, "mods", mod, rel)):
             continue
         try:
             entry = record.get(Module(os.path.join(tree, "mods", mod, rel)).build_id)
@@ -307,8 +361,8 @@ def patch_lines(p):
     if os.path.exists(path):
         for line in open(path, encoding="utf-8"):
             parts = line.split()
-            if len(parts) == 4:
-                out[parts[0]] = out.get(parts[0], "") + " ".join(parts[1:]) + "\n"
+            if len(parts) in (4, 5):   # (the plugin that made it, the fifth: not in recomp.py's record)
+                out[parts[0]] = out.get(parts[0], "") + " ".join(parts[1:4]) + "\n"
     return out
 
 
@@ -403,6 +457,31 @@ def probe_and_apply(tree, log=print):
         mods.apply(mods.Tree(tree), log)
 
 
+def run_logged(cmd, log, keep=60):
+    """Run the game's build with its output in `log` (the Mods app's window and manager.log - its
+    pythonw.exe has no console, and a failed build said nothing of why): what reads as a problem as
+    it comes, and when it fails, its last `keep` lines; and every 15 s or so, how far the compile is."""
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                            errors="replace", bufsize=1)
+    tail, shown = [], 0.0
+    for line in proc.stdout:
+        line = line.rstrip()
+        if not line:
+            continue
+        tail = (tail + [line])[-keep:]
+        if re.search(r"error|failed|warning: .*(undeclared|implicit)|did not compile|LNK\d", line, re.I):
+            log(line[:400])
+        elif re.search(r"\d+/\d+ compiled|compiling \S+: [\d,]+ of|^link|linking|linked", line) and time.monotonic() - shown > 15:
+            shown = time.monotonic()   # (where it is, now and then: a long compile doesn't look stuck)
+            log(line[:200])
+    rc = proc.wait()
+    if rc:
+        log(f"the build stopped (code {rc}); its last lines:")
+        for line in tail:
+            log("  " + line[:400])
+    return rc
+
+
 def build(tree, jobs, log=print, again=True):
     """sync, the C of the modules with new hook targets, the compile and link, then the probe and
     (if the plugins' characters changed) the mods applied again; then once more if that start listed
@@ -420,7 +499,7 @@ def build(tree, jobs, log=print, again=True):
         cmd = [sys.executable, os.path.join(HERE, "recomp.py"), "all", exefs, "--out", os.path.join(tree, "build"),
                "--jobs", str(jobs), "--tree", tree]
     log(" ".join(cmd))
-    rc = subprocess.call(cmd)
+    rc = run_logged(cmd, log)
     if rc:
         return rc
     probe_and_apply(tree, log)
@@ -431,8 +510,9 @@ def build(tree, jobs, log=print, again=True):
 
 
 # What isn't part of the game's program: an update that changes only these needs no build (the Mods
-# app's files are read as it runs; the tools here run as they are)
-NOT_BUILT = ("tools/modmanager/", "tools/dev/", "tools/mods.py", "tools/std_plugins.py", "tools/csk.py", "tools/miis.py",
+# app's files are read as it runs; the tools here run as they are; source_version.txt is the commit an
+# update's ZIP names, rewritten by every update)
+NOT_BUILT = ("tools/source_version.txt", "tools/modmanager/", "tools/dev/", "tools/mods.py", "tools/std_plugins.py", "tools/csk.py", "tools/miis.py",
              "tools/unlock_all.py", "tools/install_windowsmash.ps1", "tools/update.py", "tools/arc.py", "tools/prc.py",
              "tools/msbt.py", "tools/ssbu_online_lobby.py", "tools/ssbu_relay.py", "tools/skyline.py")
 

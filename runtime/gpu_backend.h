@@ -26,6 +26,10 @@ void gfx_dispatch(const u32 *regs, const u32 *qmd);
 int gfx_copy_resident(u64 dst_va, u64 src_va, u64 bytes);
 void gfx_resident_flush(u64 va, u64 bytes);
 void gfx_resident_written(u64 va, u64 bytes);
+/* A render target drawn at va (colour, the game's height rows of row_bytes bytes): its pixels into
+ * out, rows at the game's size, as the GPU stored them (1); 0 when there is no such target. The
+ * copy engine writes them back to guest memory before it reads a target (gpu.c: target_to_guest). */
+int gfx_read_target(u64 va, u32 row_bytes, u32 height, void *out);
 /* The command stream itself wrote guest memory (constant buffer loads, inline-to-memory). */
 void gfx_stream_wrote(u64 va, u64 bytes);
 /* Other writes of the GPU to guest memory (semaphores, copies into block-linear surfaces;

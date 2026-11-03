@@ -1,7 +1,8 @@
 /* The freeze watchdog: when no frame has been presented for 5 seconds, a report of what every
  * thread is doing goes to reports\freeze_<time>.txt (and one line to the log), with a minidump;
- * again at 30 s and 120 s of the same freeze. It starts with the first presented frame, and
- * waits while the software keyboard's dialog is open or a debugger is attached.
+ * again at 30 s and 120 s of the same freeze. It starts with the program (watchdog_start): before
+ * the first frame, a boot that shows none in BOOT_MS gets one report. It waits while the software
+ * keyboard's dialog is open or a debugger is attached.
  *
  * A report: how long, the owners of the locks presenting depends on (the renderer's, the
  * present queue's, the kernel's, the GPU channel's), the shader compiles in flight, the guest
@@ -62,6 +63,8 @@ static void write_report(U64 since, int first) {
     fputs(text, stderr);
 }
 
+#define BOOT_MS 180000   /* (the first frame: shaders, plugins and mods first, which take minutes on a slow PC) */
+
 static DWORD WINAPI watchdog(void *unused) {
     (void)unused;
     SetThreadDescription(GetCurrentThread(), L"freeze watchdog");
@@ -71,6 +74,10 @@ static DWORD WINAPI watchdog(void *unused) {
         Sleep(500);
         U64 now = GetTickCount64(), since = now - last_present;
         if (paused || IsDebuggerPresent()) continue;
+        if (!presented) {   /* (the boot: one report) */
+            if (!reports && since >= BOOT_MS) write_report(since, 1), reports = 3;
+            continue;
+        }
         if (since < 5000) {
             if (reports) { fprintf(stderr, "[watchdog] frames are presented again\n"); reports = 0; }
             continue;
@@ -79,14 +86,19 @@ static DWORD WINAPI watchdog(void *unused) {
     }
 }
 
+/* At start-up (host.c), so that a boot which never shows a frame is reported too. */
+void watchdog_start(void) {
+    if (started >= 0) return;
+    const char *v = getenv("SSBU_WATCHDOG");
+    last_present = GetTickCount64();
+    started = !v || atoi(v) != 0;
+    if (started) CloseHandle(CreateThread(NULL, 0, watchdog, NULL, 0, NULL));
+}
+
 void watchdog_present(void) {
     last_present = GetTickCount64();
     presented++;
-    if (started < 0) {   /* the first frame: start (once) */
-        const char *v = getenv("SSBU_WATCHDOG");
-        started = !v || atoi(v) != 0;
-        if (started) CloseHandle(CreateThread(NULL, 0, watchdog, NULL, 0, NULL));
-    }
+    if (started < 0) watchdog_start();
     static double freeze_at = -1;
     if (freeze_at == -1) freeze_at = getenv("SSBU_FREEZE_TEST") ? atof(getenv("SSBU_FREEZE_TEST")) : -2;
     static U64 t0;

@@ -167,6 +167,79 @@ static void debug_at(Cpu *c, u64 at) {
     }
 }
 
+/* ---- when plugins hand the CSK Collection their characters, and when it reads them ---------- */
+/* One line each, with the time and thread: a character added after the hook that builds the
+ * select screen's list is missing from it (a friend's PC lost several; a Mac one now and then). */
+static u64 csk_add_original;
+static void csk_adding(void);
+static int env_int(const char *name, int otherwise);
+static void csk_add_traced(Cpu *c) {
+    char who[96];
+    static int delay = -1;
+    if (delay < 0) delay = env_int("SSBU_CSK_ADD_DELAY", 0);
+    if (delay) Sleep((DWORD)delay);
+    csk_adding();
+    fprintf(stderr, "[skyline] t=%.3f thread %lu: a character added to the CSK Collection by %s\n", rt_now_ns() / 1e9,
+            (unsigned long)GetCurrentThreadId(), rt_describe(c->x[30] - 4, who, sizeof who));
+    rt_call(c, csk_add_original);
+}
+static void csk_trace_hook(u64 at, u64 callback) {   /* (rt_inline_hook: each CSK hook's first run) */
+    static u64 seen[64];
+    static int seen_n;
+    for (int i = 0; i < seen_n; i++) if (seen[i] == at) return;
+    if (seen_n < 64) seen[seen_n++] = at;
+    char where[96], who[96];
+    fprintf(stderr, "[skyline] t=%.3f thread %lu: first run of the CSK Collection's hook at %s (%s)\n", rt_now_ns() / 1e9,
+            (unsigned long)GetCurrentThreadId(), rt_describe(at, where, sizeof where), rt_describe(callback, who, sizeof who));
+}
+
+/* ---- the game waits for ARCropolis' "mods mounted" callbacks ---------------------------- */
+/* ARCropolis queues ModFilesystemMounted as it mounts mods: (its initial_loading hook), and a
+ * thread of its own runs the plugins' callbacks for it a moment later (api/event.rs: a round of
+ * callbacks, then a 20 ms sleep), the game not waiting. Plugins add their characters to the CSK
+ * Collection there. On a Mac they are all in within half a second, some 2 s before the CSK
+ * Collection's hooks read them; on a friend's slower PC several came after, and were left off the
+ * select screen. So from the mount on (hle_fs.c), the CSK Collection's hooks wait for that round
+ * to end: the thread that added the first character sleeping (3 s for one to come at all, 20 s
+ * at most). */
+static volatile int mods_gate;          /* 1: mounted, the callbacks' round not over; 2: over */
+static volatile unsigned long csk_thread;   /* the thread adding characters (the callbacks') */
+static u64 mount_ns;
+void skyline_mods_mounted(void) {
+    fprintf(stderr, "[skyline] t=%.3f thread %lu: ARCropolis mounted mods:\n", rt_now_ns() / 1e9, (unsigned long)GetCurrentThreadId());
+    if (mods_gate) return;
+    mount_ns = rt_now_ns();
+    __atomic_store_n(&mods_gate, 1, __ATOMIC_RELEASE);
+}
+static void csk_adding(void) {   /* (csk_add_traced: a character, on the callbacks' thread) */
+    if (__atomic_load_n(&mods_gate, __ATOMIC_ACQUIRE) == 1 && !csk_thread) csk_thread = GetCurrentThreadId();
+}
+void skyline_note_sleep(void) {   /* (kernel.c: SleepThread) - the callbacks' round over */
+    if (csk_thread && csk_thread == GetCurrentThreadId() && __atomic_load_n(&mods_gate, __ATOMIC_ACQUIRE) == 1) {
+        fprintf(stderr, "[skyline] t=%.3f: the plugins' mods-mounted callbacks are done\n", rt_now_ns() / 1e9);
+        __atomic_store_n(&mods_gate, 2, __ATOMIC_RELEASE);
+    }
+}
+/* (for testing: SSBU_CSK_ADD_DELAY=<ms> makes each character that much slower to add - a slow
+ * PC - and SSBU_MODS_GATE=0 leaves the wait out) */
+static int env_int(const char *name, int otherwise) { const char *v = getenv(name); return v && *v ? atoi(v) : otherwise; }
+void skyline_mods_gate(const char *what) {
+    static int on = -1;
+    if (on < 0) on = env_int("SSBU_MODS_GATE", 1);
+    if (!on || __atomic_load_n(&mods_gate, __ATOMIC_ACQUIRE) != 1 || GetCurrentThreadId() == csk_thread) return;
+    u64 start = rt_now_ns();
+    while (__atomic_load_n(&mods_gate, __ATOMIC_ACQUIRE) == 1) {
+        u64 now = rt_now_ns();
+        if (!csk_thread && now - mount_ns > 3000000000ull) break;   /* (no plugin adds characters) */
+        if (now - start > 20000000000ull) break;
+        Sleep(2);
+    }
+    int done = __atomic_load_n(&mods_gate, __ATOMIC_ACQUIRE) == 2;
+    if (__atomic_exchange_n(&mods_gate, 2, __ATOMIC_ACQ_REL) == 1 || done)
+        LOG("%s waited %.0f ms for the plugins' mods-mounted callbacks%s", what, (rt_now_ns() - start) / 1e6,
+            done ? "" : csk_thread ? " (gave up after 20 s)" : " (none added characters)");
+}
+
 /* (generated code, at an inline point) skyline-rs' InlineCtx: x0-x30, sp, then q0-q31. */
 void rt_inline_hook(Cpu *c, u64 at) {
     debug_at(c, at);
@@ -174,6 +247,13 @@ void rt_inline_hook(Cpu *c, u64 at) {
     for (u32 i = 0; i < n; i++) {
         if (inline_hooks[i].at != at) continue;
         if (inline_hooks[i].native) { inline_hooks[i].native(c, inline_hooks[i].arg); continue; }
+        {
+            char who[96];
+            if (!strncmp(rt_describe(inline_hooks[i].callback, who, sizeof who), "the_csk_collection+", 19)) {
+                csk_trace_hook(at, inline_hooks[i].callback);
+                if (__atomic_load_n(&mods_gate, __ATOMIC_ACQUIRE) == 1) skyline_mods_gate("a CSK Collection hook");
+            }
+        }
         Cpu saved = *c;
         u64 ctx = (c->sp - 0x400) & ~15ull;
         for (int r = 0; r < 31; r++) *P(u64, ctx + 8ull * r) = c->x[r];
@@ -191,7 +271,8 @@ void rt_inline_hook(Cpu *c, u64 at) {
 /* sky_memcpy(dest, src, n): plugins patch code and read-only data with it. Data changes work at
  * once. A change to code means nothing to the recompiled function until the next build lifts the
  * new instructions: each changed word goes into <data dir>/../skyline/patches.txt, "<module>
- * <offset> <old word> <new word>" (tools/recomp.py code_patches, tools/skyline.py stale_hooks). */
+ * <offset> <old word> <new word> <plugin>" - the plugin the call came from, so a build drops the
+ * patches of a plugin no longer loaded (tools/recomp.py code_patches, tools/skyline.py prune_patches). */
 const char *rt_code_offset(u64 addr, u64 *off);   /* (host.c) */
 /* Smashline's inline hooks in lua2cpp_common: it writes a `bl` at the hooked call to a code cave
  * (the original branch, as a `b`, after some nops) and inline-hooks the cave. Recompiled code runs
@@ -209,8 +290,10 @@ static u64 cave_site(u64 at) {
     return 0;
 }
 
-static void note_code_patch(u64 dest, u64 src, u64 n) {
-    char path[1200], line[160], have[160];
+static void note_code_patch(u64 dest, u64 src, u64 n, u64 caller) {
+    char path[1200], line[240], have[240];
+    u64 at;
+    const char *by = rt_code_offset(caller, &at);
     snprintf(path, sizeof path, "%s/../skyline/patches.txt", rt_data_dir);
     for (u64 w = dest & ~3ull; w < dest + n; w += 4) {
         u64 off;
@@ -221,7 +304,7 @@ static void note_code_patch(u64 dest, u64 src, u64 n) {
             if (w + b >= dest && w + b < dest + n) now = (now & ~(0xFFu << 8 * b)) | (u32)*P(u8, src + (w + b - dest)) << 8 * b;
         if (now == old) continue;
         note_cave(w, now);
-        snprintf(line, sizeof line, "%s %llx %08x %08x\n", mod, (unsigned long long)off, old, now);
+        snprintf(line, sizeof line, "%s %llx %08x %08x %s\n", mod, (unsigned long long)off, old, now, by ? by : "?");
         FILE *f = fopen(path, "r");
         int seen = 0;
         while (f && !seen && fgets(have, sizeof have, f)) seen = !strcmp(have, line);
@@ -233,7 +316,7 @@ HLE(sky_memcpy) {
     char a[96];
     u64 to = c->x[0];
     LOG("sky_memcpy %#llx bytes to %s", (unsigned long long)c->x[2], rt_describe(to, a, sizeof a));
-    note_code_patch(to, c->x[1], c->x[2]);
+    note_code_patch(to, c->x[1], c->x[2], c->x[30]);
     memcpy(G2H(to), G2H(c->x[1]), c->x[2]);
     c->x[0] = 0;
 }
@@ -1438,5 +1521,7 @@ void skyline_load_plugins(Cpu *c) {
         else { fprintf(stderr, "[skyline] probe done\n"); fflush(stderr); ExitProcess(0); }
     }
     fprintf(stderr, "[skyline] plugins installed %u acmd scripts, %u status scripts, %u line callbacks\n", acmd_n, status_n, line_n);
+    u64 csk_add = rt_symbol("add_chara_db_entry_info");
+    if (csk_add && !csk_add_original) csk_add_original = rt_hook_function(csk_add, rt_native(csk_add_traced, "csk add_chara_db_entry_info"));
     memcpy(c->x, saved, sizeof saved);
 }

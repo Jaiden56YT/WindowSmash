@@ -137,6 +137,27 @@ static void dma_surface(Engine *e, DmaSurface *s, u64 base, int pitch_linear, u3
     if (s->bd > 5) s->bd = 5;
 }
 
+/* A render target's pixels are the renderer's, on the host; guest memory under it is whatever was
+ * there before. A copy out of one (the game renders a Mii's face, or its fighter portrait, and
+ * copies it out to keep: blank, or old memory, without this) has them written back first, in the
+ * copy's source layout. */
+static void target_to_guest(const DmaSurface *s) {
+    if (s->pitch_linear || s->layer || s->depth > 1 || !s->width || !s->height || (u64)s->width * s->height > (64u << 20)) return;
+    u8 *pixels = malloc((size_t)s->width * s->height);
+    if (!pixels) return;
+    if (gfx_read_target(s->base, s->width, s->height, pixels)) {
+        DmaSurface whole = *s;
+        whole.ox = whole.oy = 0;
+        for (u32 y = 0; y < s->height; y++)
+            for (u32 x = 0; x < s->width; x += 16) {   /* (16 bytes stay together in a GOB) */
+                u64 g = guest(dma_address(&whole, x, y));
+                u32 n = s->width - x < 16 ? s->width - x : 16;
+                if (g) memcpy(P(void, g), pixels + (size_t)y * s->width + x, n);
+            }
+    }
+    free(pixels);
+}
+
 static void dma_launch(Engine *e, u32 arg) {
     u64 src_va = (u64)e->regs[0x100] << 32 | e->regs[0x101], dst_va = (u64)e->regs[0x102] << 32 | e->regs[0x103];
     u32 line = e->regs[0x106], lines = (arg >> 9) & 1 ? e->regs[0x107] : 1;
@@ -171,6 +192,7 @@ static void dma_launch(Engine *e, u32 arg) {
             }
         } else if (identity) {
             if (src_span) gfx_resident_flush(src.base, src_span);   /* to or from block linear: in runs that stay within 16 bytes */
+            target_to_guest(&src);
             u32 bytes = line * src_bpe;
             for (u32 y = 0; y < lines; y++)
                 for (u32 x = 0; x < bytes;) {
@@ -184,6 +206,7 @@ static void dma_launch(Engine *e, u32 arg) {
                 }
         } else {   /* remapped components, constants included: element by element */
             if (src_span) gfx_resident_flush(src.base, src_span);
+            target_to_guest(&src);
             for (u32 y = 0; y < lines; y++)
                 for (u32 x = 0; x < line; x++) {
                     u8 in[16] = {0}, out[16];

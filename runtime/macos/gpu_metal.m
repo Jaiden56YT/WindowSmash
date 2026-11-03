@@ -24,6 +24,7 @@
  * thread that calls (but the command stream's pending writes, below: kept_flush). */
 #define _CRT_SECURE_NO_WARNINGS
 #include "gpu_metal.h"
+#include "kernel_watch.h"   /* (kernel_write_watch) */
 #include <dirent.h>
 #include <math.h>
 #include <mach/mach.h>
@@ -435,6 +436,10 @@ struct Surface {
     float clear_color[4], clear_depth;
     u32 clear_stencil;
     u64 used;
+    u64 last_drawn, steady_from;           /* colour: the frame (gfx_stat_presented) last drawn to, and since when every frame */
+    u64 written;                           /* depth surfaces: draws and clears that changed it so far (snap_written: as copied) */
+    id<MTLTexture> snap, snap_srv[2][2];   /* a copy of a depth surface, for the draws that read it while testing against it */
+    u64 snap_written;
 };
 
 static Surface surfaces[2048];
@@ -944,7 +949,11 @@ static LONG compile_msl(struct Compiler *me, const char *msl, int stage, const c
                         id<MTLFunction> *fn_out, id<MTLComputePipelineState> *cs_out) {
     me->step = STEP_COMPILE;
     NSError *err = nil;
+    static int log_ms = -1;   /* debug: SSBU_LOG_COMPILE_MS, each library's compile time (Metal's own cache: ~1 ms) */
+    if (log_ms < 0) log_ms = getenv("SSBU_LOG_COMPILE_MS") != NULL;
+    u64 t0 = log_ms ? GetTickCount64() : 0;
     id<MTLLibrary> lib = [dev newLibraryWithSource:@(msl) options:msl_options() error:&err];
+    if (log_ms) fprintf(stderr, "[gfx] compile %s: %llu ms\n", name, GetTickCount64() - t0);
     if (!lib) {
         fprintf(stderr, "[gfx] shader %s failed to compile:\n%.2000s\n", name, first_error(err));
         return 2;
@@ -1267,7 +1276,14 @@ static DWORD WINAPI prewarm_main(void *unused) {
     prewarm_table = table;
     Job *head = NULL, *tail = NULL;
     u32 queued = 0;
-    for (u32 i = 0; i < n && table; i++) {
+    /* Only the newest ones (SSBU_SHADER_PREWARM_MAX, 4000): Metal's own cache holds about 1.2 GB of
+     * libraries, about as much as every program the game has ever used (13,000 after the bench had
+     * played each character). Compiling all of them at each start pushed out of it the ones a match
+     * was about to ask for, and each of those then took ~1 s to compile again: the stage and the
+     * fighters were skipped for a minute or more (the "GO!" with nothing behind it). */
+    const char *max_env = getenv("SSBU_SHADER_PREWARM_MAX");
+    u32 limit = max_env ? (u32)strtoul(max_env, NULL, 10) : 4000;
+    for (u32 i = 0; i < n && table && queued < limit; i++) {
         unsigned version, vs_outputs;
         char stage_name[4];
         unsigned long long hash, tables;
@@ -1736,7 +1752,9 @@ static WatchChunk *watch_chunks[ALIAS_SIZE / (WATCH_CHUNK * 0x1000ull)];
 static u64 watch_clock;   /* stamps given so far */
 
 /* Take the write watch's news for guest pages [lo, hi) (4 KiB aligned, watched): resetting the
- * bits as they are read (under the shim's lock: a write is either reported now or news next time). */
+ * bits as they are read (under the shim's lock: a write is either reported now or news next time).
+ * (Through the kernel, which shares the system's bits with the rollback ring when that is on:
+ * kernel_watch.h.) */
 static void watch_take(u64 lo, u64 hi) {
     static void *pages[65536];   /* (256 MB: the largest range asked about, in one call) */
     void *first;
@@ -1744,10 +1762,10 @@ static void watch_take(u64 lo, u64 hi) {
     ULONG granularity;
     /* (asking is cheap, resetting is not - it protects the host pages again, even where nothing
      * was written: so ask first) */
-    if (GetWriteWatch(0, G2H(lo), hi - lo, &first, &count, &granularity) != 0 || !count) return;
+    if (kernel_write_watch(WATCH_RENDERER, 0, G2H(lo), hi - lo, &first, &count, &granularity) != 0 || !count) return;
     for (u64 at = H2G(first); at < hi;) {
         count = 65536;
-        if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, G2H(at), hi - at, pages, &count, &granularity) != 0 || !count) return;
+        if (kernel_write_watch(WATCH_RENDERER, WRITE_WATCH_FLAG_RESET, G2H(at), hi - at, pages, &count, &granularity) != 0 || !count) return;
         u64 stamp = ++watch_clock;
         for (ULONG_PTR k = 0; k < count; k++) {
             u64 p = (H2G(pages[k]) - ALIAS_BASE) >> 12;
@@ -2950,7 +2968,7 @@ static struct {
     __unsafe_unretained id pso, ds;
     MTLViewport vp;
     MTLScissorRect scissor;
-    int cull, winding, fill, known;
+    int cull, winding, fill, clip, known;
     u32 stencil_ref[2];
     float blend[4];
     int bytes_known[2];      /* params and binds below are what each stage (vertex, pixel) has */
@@ -3002,6 +3020,61 @@ typedef struct StageBinds {
 } StageBinds;
 
 /* Bind a stage's constant buffers and textures. */
+/* A draw that reads the depth buffer it is tested against (soft particles: depth test on, writes
+ * off; the console reads it fine). Metal leaves reading a pass's own attachment undefined (Apple
+ * GPUs keep it in tile memory), so set_resources binds a stand-in of zeros for an attached surface
+ * - the scene "in front" of everything, which faded out the fire of Sephiroth's victory screens
+ * entirely. The draw reads a copy instead, made again only when the surface was written since
+ * (draws writing its depth or stencil, clears). */
+static id<MTLTexture> depth_snapshot(Surface *s, id<MTLTexture> bound) {
+    int o = -1, a = 0;
+    for (int i = 0; i < 2 && o < 0; i++)
+        for (int j = 0; j < 2; j++) if (bound == s->srv[i][j]) { o = i; a = j; break; }
+    if (o < 0 && bound == s->tex) o = 1;   /* (the compared reading of one layer is the texture itself) */
+    if (o < 0 || !s->tex) return bound;
+    if (!s->snap) {
+        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:s->tex.pixelFormat width:s->tex.width
+                                                                                     height:s->tex.height mipmapped:NO];
+        td.storageMode = MTLStorageModePrivate;
+        td.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
+        if (!(s->snap = [dev newTextureWithDescriptor:td])) return bound;
+        s->snap_written = ~0ull;
+    }
+    if (s->snap_written != s->written) {
+        settle(s);   /* (its clears first) */
+        [blits() copyFromTexture:s->tex toTexture:s->snap];
+        s->snap_written = s->written;
+    }
+    if (!s->snap_srv[o][a]) {
+        MTLTextureType type = a ? MTLTextureType2DArray : MTLTextureType2D;
+        if (!o) {
+            MTLTextureSwizzleChannels red = {MTLTextureSwizzleRed, MTLTextureSwizzleZero, MTLTextureSwizzleZero, MTLTextureSwizzleOne};
+            s->snap_srv[o][a] = [s->snap newTextureViewWithPixelFormat:bound.pixelFormat textureType:type levels:NSMakeRange(0, 1)
+                                                                slices:NSMakeRange(0, 1) swizzle:red];
+        } else s->snap_srv[o][a] = a ? [s->snap newTextureViewWithPixelFormat:bound.pixelFormat textureType:type levels:NSMakeRange(0, 1)
+                                                                        slices:NSMakeRange(0, 1)] : s->snap;
+    }
+    return s->snap_srv[o][a] ? s->snap_srv[o][a] : bound;
+}
+
+/* A texture header's swizzle, as it applies to the texture bound. A depth buffer read as a texture is
+ * its depth in red (surface_srv), but the hardware's S8Z24 (format 0x29: red the stencil, an unsigned
+ * integer; green the depth) has its depth in green, which the game's swizzle selects (0xedb: green,
+ * green, green, one): green reads red here, and red (the stencil, which the view does not hold) 0.
+ * The soft-particle fade of Sephiroth's victory flames reads it so (ps_88ca9e0946b2b55c). */
+static u32 depth_swizzle(const u32 *tic, const Surface *rt) {
+    u32 swz = (tic[0] >> 19) & 0xFFF;
+    u32 r_type = (tic[0] >> 7) & 7, g_type = (tic[0] >> 10) & 7;
+    if (!rt || !rt->depth || r_type != 4 || g_type == 4 || g_type == 3) return swz;   /* (4 uint, 3 sint) */
+    u32 out = 0;
+    for (u32 c = 0; c < 4; c++) {
+        u32 sel = (swz >> (3 * c)) & 7;
+        sel = sel == 3 ? 2 : sel == 2 ? 0 : sel;   /* green: the depth, in red; red: the stencil, 0 */
+        out |= sel << (3 * c);
+    }
+    return out;
+}
+
 static void bind_resources(const u32 *regs, const CbBinding cb[STAGES][18], int stage, const Shader *s, DrawParams *params, StageBinds *out) {
     int mstage = stage == SHADER_VERTEX ? STAGE_VERTEX : STAGE_FRAGMENT;
     static u8 data[0x10000];
@@ -3114,7 +3187,7 @@ static void bind_resources(const u32 *regs, const CbBinding cb[STAGES][18], int 
         int shadow = s->info.tex[k].shadow != 0;
         out->tex[k] = get_texture(tic, shader_msl_texture(&s->info.tex[k]), shadow);
         if (k < nsmp) out->smp[k] = get_sampler(tsc, shadow, out->tex[k].integer);
-        params->swz[stage][k] = (tic[0] >> 19) & 0xFFF;
+        params->swz[stage][k] = depth_swizzle(tic, out->tex[k].surface);
         /* Before macOS 26 a sampler has no LOD bias: the TSC's (13 bits, signed, 1/256ths) goes to
          * the shader above the swizzle's 12 bits, for the translator to apply (its swizzle reads
          * only those 12) */
@@ -3307,6 +3380,32 @@ static int index_data(const u32 *regs, GBuf **buf, u32 *offset, MTLIndexType *ty
 
 static void save_sampled(void);
 
+/* A draw whose shaders are still compiling is skipped, and the frame goes on without it - unless
+ * its target is not drawn every frame: a target drawn once (the game draws a Mii's face and its
+ * portrait once, as the Mii loads) would keep the gap for good, so such a draw waits for its
+ * shaders (SHADER_WAIT_MS at most; SSBU_SHADER_WAIT=<ms>, 0: never). */
+#define SHADER_WAIT_MS 2000
+#define STEADY_FRAMES 60   /* (drawn every frame for this long: a target of every frame) */
+static int steady_target(const u32 *regs) {
+    u32 sel = regs[M_CT_SELECT];
+    if (!(sel & 15)) return 1;   /* (depth only: shadow maps) */
+    u32 ct = (sel >> 4) & 7;
+    u64 g = gpu_va_to_guest((u64)regs[M_CT(ct)] << 32 | regs[M_CT(ct) + 1]);
+    for (u32 i = 0; i < nsurfaces; i++) {
+        Surface *s = &surfaces[i];
+        if (s->tex && !s->depth && s->guest == g && s->width == regs[M_CT(ct) + 2] && s->height == regs[M_CT(ct) + 3])
+            return s->last_drawn + 1 >= gfx_stat_presented && gfx_stat_presented - s->steady_from >= STEADY_FRAMES;
+    }
+    return 0;
+}
+
+static int shader_wait_until(const u32 *regs, u64 *until) {   /* (whether to wait on, now: the first ask decides) */
+    static int ms = -1;
+    if (ms < 0) ms = getenv("SSBU_SHADER_WAIT") ? atoi(getenv("SSBU_SHADER_WAIT")) : SHADER_WAIT_MS;
+    if (!*until) *until = ms && !steady_target(regs) ? GetTickCount64() + (u64)ms : 1;
+    return *until > 1 && GetTickCount64() < *until;
+}
+
 void gfx_draw(const u32 *regs, const CbBinding cb[STAGES][18], int indexed) {
     if (!enter()) return;
     kept_flush();
@@ -3323,6 +3422,8 @@ void gfx_draw(const u32 *regs, const CbBinding cb[STAGES][18], int indexed) {
     u64 ps_g = regs[M_PIPELINE(5)] & 1 ? gpu_va_to_guest(region + regs[M_PIPELINE(5) + 1]) : 0;
     /* the pixel shader is asked for once the vertex shader is translated (its outputs are the
      * pixel shader's inputs), not once it is compiled: both compile at the same time */
+    u64 wait_until = 0;
+again:;
     Shader *vs_e = vs_g ? find_shader_ex(vs_g, SHADER_VERTEX, 0, cb[STAGE_VERTEX], NULL, 0, 0) : NULL;
     Shader *ps_e = vs_e && state_of(&vs_e->state) != 2 && ps_g ? find_shader_ex(ps_g, SHADER_PIXEL, vs_e->info.outputs, cb[STAGE_FRAGMENT], NULL, 0, 0) : NULL;
     /* The fixed-function alpha test (ui2d's alpha compare: the main menu's stencil masks are cut
@@ -3334,7 +3435,13 @@ void gfx_draw(const u32 *regs, const CbBinding cb[STAGES][18], int indexed) {
     Shader *vs = vs_e && state_of(&vs_e->state) == 1 ? vs_e : NULL;
     Shader *ps = pa_e && state_of(&pa_e->state) == 1 ? pa_e : ps_e && state_of(&ps_e->state) == 1 ? ps_e : NULL;
     /* no fragment stage (depth only: shadow maps, depth pre-passes) draws with no pixel shader */
+    int compiling = !vs_e || state_of(&vs_e->state) == 0 || (ps_g && (!ps_e || state_of(&ps_e->state) == 0)) || (pa_e && state_of(&pa_e->state) == 0);
+    if ((!vs || (ps_g && !ps)) && topo && compiling && shader_wait_until(regs, &wait_until)) { Sleep(1); goto again; }
     if (!vs || (ps_g && !ps) || !topo) {
+        if (draw_logging)   /* (F4: what a skipped draw waits for) */
+            fprintf(stderr, "[draw] SKIP shader: vs %s (state %ld) ps %s (state %ld)%s topo %u\n", vs_e ? vs_e->name : "-",
+                    vs_e ? (long)state_of(&vs_e->state) : -1L, ps_e ? ps_e->name : "-", ps_e ? (long)state_of(&ps_e->state) : -1L,
+                    pa_e ? " (alpha-tested variant)" : "", topo);
         gfx_stat_skipped++;
         if (!topo) gfx_skip_topology++; else gfx_skip_shader++;
         leave();
@@ -3359,6 +3466,10 @@ void gfx_draw(const u32 *regs, const CbBinding cb[STAGES][18], int indexed) {
         if (sf) { tg.depth = sf; if (!rt_w) { rt_w = sf->width; rt_h = sf->height; rt_sx = sf->sx; rt_sy = sf->sy; } }
     }
     if (!rt_w) { gfx_stat_skipped++; gfx_skip_target++; leave(); return; }
+    if (tg.color[0] && tg.color[0]->last_drawn != gfx_stat_presented) {   /* (steady_target) */
+        if (tg.color[0]->last_drawn + 1 != gfx_stat_presented) tg.color[0]->steady_from = gfx_stat_presented;
+        tg.color[0]->last_drawn = gfx_stat_presented;
+    }
     tg.scratch_depth = !tg.depth && ps_used && ps_used->info.writes_depth;
 
     /* viewport and the clip-space fix-up */
@@ -3417,6 +3528,11 @@ void gfx_draw(const u32 *regs, const CbBinding cb[STAGES][18], int indexed) {
     if (gfx_debug() & 4) cull = MTLCullModeNone;
     int front_ccw = (regs[M_FRONT_FACE] == 0x901) != flipped;
     MTLTriangleFillMode fill = regs[M_FILL_MODE] == 0x1B01 ? MTLTriangleFillModeLines : MTLTriangleFillModeFill;
+    /* Depth outside the near and far planes is clamped, not clipped, unless VIEWPORT_CLIP_CONTROL's
+     * geometry clip (bits 11-13) is PASSTHRU, FRUSTUM_XYZ or FRUSTUM_Z (as yuzu reads it): Duck Hunt's
+     * sky reaches past the far plane, and clipped it left a dark slab at the screen's right edge. */
+    u32 gclip = regs[M_VIEWPORT_CLIP_CONTROL] >> 11 & 7;
+    MTLDepthClipMode clip = gclip == 1 || gclip == 3 || gclip == 5 ? MTLDepthClipModeClip : MTLDepthClipModeClamp;
 
     /* Two-sided stencil: Metal has a reference and masks for each face. Which face is which
      * differs from culling: WINDOW_ORIGIN.FLIP_Y swaps the front face for culling (see the facing
@@ -3472,16 +3588,18 @@ void gfx_draw(const u32 *regs, const CbBinding cb[STAGES][18], int indexed) {
         if (!ps_used || !(ps_used->info.color_mask >> i & 1)) rgba = 0;   /* (a target the program does not write is left as it is) */
         pk.mask[i] = (u8)write_mask(rgba);
         if (!(regs[M_BLEND_ENABLE(i)] & 1) || (gfx_debug() & 8) || s->kind) continue;   /* (integer targets do not blend) */
+        /* The alpha op and factors apply as written, whatever the "separate for alpha" flag says (as
+         * gpu_d3d11.c's, and yuzu/Eden): the game never sets that flag. Copying the colour ones into alpha
+         * made a Mii's face mask opaque - its alpha pass begins with a full-target quad whose alpha factors
+         * are ZERO/ZERO (its colour ones ONE/ZERO): the face came out as a black box. */
         u32 base = regs[M_BLEND_STATE_PER_TARGET] & 1 ? M_BLEND_PER_TARGET(i) + 1 : 0;
         u32 cop, csrc, cdst, aop, asrc, adst;
         if (base) {
             cop = regs[base]; csrc = regs[base + 1]; cdst = regs[base + 2]; aop = regs[base + 3]; asrc = regs[base + 4]; adst = regs[base + 5];
-            if (!(regs[base - 1] & 1)) { aop = cop; asrc = csrc; adst = cdst; }   /* the target's own "separate alpha" */
         }
         else {
             cop = regs[M_BLEND_COLOR_OP]; csrc = regs[M_BLEND_COLOR_SRC]; cdst = regs[M_BLEND_COLOR_DST];
             aop = regs[M_BLEND_ALPHA_OP]; asrc = regs[M_BLEND_ALPHA_SRC]; adst = regs[M_BLEND_ALPHA_DST];
-            if (!(regs[M_BLEND_SEPARATE_ALPHA] & 1)) { aop = cop; asrc = csrc; adst = cdst; }
         }
         u8 *bl = pk.blend[i];
         bl[0] = 1;
@@ -3495,7 +3613,9 @@ void gfx_draw(const u32 *regs, const CbBinding cb[STAGES][18], int indexed) {
     } else if (tg.scratch_depth) pk.depth = (u16)MTLPixelFormatDepth32Float;
     float blend_const[4] = {f32_of(regs[M_BLEND_CONST(0)]), f32_of(regs[M_BLEND_CONST(1)]), f32_of(regs[M_BLEND_CONST(2)]), f32_of(regs[M_BLEND_CONST(3)])};
     Pipeline *pipe = get_pipeline(&pk);
+    while (!pipe && shader_wait_until(regs, &wait_until)) { Sleep(1); pipe = get_pipeline(&pk); }
     if (!pipe) {   /* (made by the compiler threads: skipped until then) */
+        if (draw_logging) fprintf(stderr, "[draw] SKIP pipeline: %s + %s\n", vs->name, ps ? ps->name : "-");
         gfx_stat_skipped++;
         gfx_skip_shader++;
         leave();
@@ -3591,6 +3711,18 @@ void gfx_draw(const u32 *regs, const CbBinding cb[STAGES][18], int indexed) {
 
     bind_resources(regs, cb, SHADER_VERTEX, vs, &params, vbind);
     if (ps) bind_resources(regs, cb, SHADER_PIXEL, ps, &params, pbind);
+    if (tg.depth) {   /* (depth_snapshot: its depth read while tested against) */
+        if (dk.depth_write || (dk.stencil_on && (dk.write[0] || dk.write[1]))) tg.depth->written++;
+        for (int st = 0; st < 2; st++) {
+            const Shader *sh = st ? ps : vs;
+            StageBinds *sb = st ? pbind : vbind;
+            for (u32 k = 0; sh && k < sh->info.ntex; k++)
+                if (sb->tex[k].surface == tg.depth) {
+                    id<MTLTexture> copy = depth_snapshot(tg.depth, sb->tex[k].tex);
+                    if (copy != sb->tex[k].tex) { sb->tex[k].tex = copy; sb->tex[k].surface = NULL; }   /* (not attached: set_resources binds it, not the stand-in) */
+                }
+        }
+    }
     GBuf *ibuf = NULL;
     u32 ioff = 0;
     MTLIndexType itype = MTLIndexTypeUInt16;
@@ -3613,7 +3745,7 @@ void gfx_draw(const u32 *regs, const CbBinding cb[STAGES][18], int indexed) {
         }
         cur.vp.width = -1;
         cur.scissor.width = (NSUInteger)-1;
-        cur.cull = cur.winding = cur.fill = -1;
+        cur.cull = cur.winding = cur.fill = cur.clip = -1;
         cur.stencil_ref[0] = cur.stencil_ref[1] = ~0u;
         cur.blend[0] = NAN;
         cur.bytes_known[0] = cur.bytes_known[1] = 0;
@@ -3629,6 +3761,7 @@ void gfx_draw(const u32 *regs, const CbBinding cb[STAGES][18], int indexed) {
     if (cur.cull != (int)cull) { [e setCullMode:cull]; cur.cull = (int)cull; }
     if (cur.winding != front_ccw) { [e setFrontFacingWinding:front_ccw ? MTLWindingCounterClockwise : MTLWindingClockwise]; cur.winding = front_ccw; }
     if (cur.fill != (int)fill) { [e setTriangleFillMode:fill]; cur.fill = (int)fill; }
+    if (cur.clip != (int)clip) { [e setDepthClipMode:clip]; cur.clip = (int)clip; }
     if (memcmp(&cur.vp, &vp, sizeof vp)) { [e setViewport:vp]; cur.vp = vp; }
     /* (Metal wants the scissor inside the targets) */
     i32 l = sc[0] < 0 ? 0 : sc[0], t = sc[1] < 0 ? 0 : sc[1], r = sc[2] > (i32)pass.w ? (i32)pass.w : sc[2], b = sc[3] > (i32)pass.h ? (i32)pass.h : sc[3];
@@ -3789,6 +3922,7 @@ void gfx_clear(const u32 *regs, u32 arg) {
         Surface *s = surface(gpu_va_to_guest(va), regs[0x48A], regs[0x48B], regs[0x3FA], 1);
         if (s) {
             if (attached(s)) end_encoding();
+            s->written++;
             float z = f32_of(regs[0x364]);
             if (arg & 1) { s->clear |= 2; s->clear_depth = z > 0 ? (z < 1 ? z : 1) : 0; }   /* (as Direct3D's: within [0, 1]) */
             if ((arg & 2) && s->stencil) { s->clear |= 4; s->clear_stencil = regs[0x368] & 0xFF; }
@@ -4040,6 +4174,31 @@ int gfx_metal_read_surface(u64 guest, int depth, void *out, u32 size, u32 *w, u3
     size_t n = (size_t)row * s->hh;
     memcpy(out, buf.contents, n < size ? n : size);
     *w = s->hw; *h = s->hh; *format = (u32)s->storage;
+    leave();
+    return 1;
+}
+
+int gfx_read_target(u64 va, u32 row_bytes, u32 height, void *out) {
+    if (!enter()) return 0;
+    u64 guest = gpu_va_to_guest(va);
+    Surface *s = NULL;
+    for (u32 i = 0; i < nsurfaces; i++)
+        if (surfaces[i].tex && !surfaces[i].depth && surfaces[i].guest == guest && (!s || surfaces[i].used > s->used)) s = &surfaces[i];
+    u32 bpp = s ? pixel_bytes(s->storage) : 0;
+    if (!s || s->width * bpp != row_bytes || s->height != height) { leave(); return 0; }
+    settle(s);
+    u32 row = s->hw * bpp;
+    id<MTLBuffer> buf = [dev newBufferWithLength:(NSUInteger)row * s->hh options:MTLResourceStorageModeShared];
+    [blits() copyFromTexture:s->tex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(s->hw, s->hh, 1)
+                    toBuffer:buf destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:(NSUInteger)row * s->hh];
+    submit(1);
+    const u8 *in = buf.contents;
+    for (u32 y = 0; y < height; y++) {   /* (a scaled target: its nearest host pixels) */
+        const u8 *r = in + (size_t)((u64)y * s->hh / height) * row;
+        u8 *o = (u8 *)out + (size_t)y * row_bytes;
+        if (s->hw == s->width) memcpy(o, r, row_bytes);
+        else for (u32 x = 0; x < s->width; x++) memcpy(o + x * bpp, r + (size_t)((u64)x * s->hw / s->width) * bpp, bpp);
+    }
     leave();
     return 1;
 }
@@ -4516,6 +4675,19 @@ void gfx_present(u64 guest, u32 width, u32 height) {
         snprintf(screen, sizeof screen, "%s/screen.bmp", f4_dir);
         save_bmp(final_tex, NULL, screen);
         fprintf(stderr, "[draw] -- frame start (F4)\n");
+        {   /* (what the shader compilers are at: the draws skipped for shaders wait on them) */
+            u32 len[3] = {0};
+            AcquireSRWLockExclusive(&jobs_lock);
+            for (int q = 0; q < 3; q++) for (Job *j = job_queue[q].head; j; j = j->next_job) len[q]++;
+            ReleaseSRWLockExclusive(&jobs_lock);
+            fprintf(stderr, "[draw] compilers: %ld pending; queued %u loads, %u compiles, %u prewarm; prewarm %ld/%ld done\n", (long)compiles_pending,
+                    len[0], len[1], len[2], (long)prewarm_done, (long)prewarm_total);
+            for (u32 i = 0; i < ncompilers; i++) {
+                Job *j = compilers[i].job;
+                fprintf(stderr, "[draw]   compiler %u: step %ld, %s for %llu ms\n", i, (long)compilers[i].step,
+                        !j ? "-" : j->kind == JOB_PIPELINE ? "a pipeline" : ((Shader *)j)->name, GetTickCount64() - compilers[i].since_ms);
+            }
+        }
     }
     if (keys & 16) {   /* F5: depth buffers sampled as textures, or not */
         if (depth_sampling < 0) depth_sampling = !getenv("SSBU_NO_DEPTH_SAMPLING");

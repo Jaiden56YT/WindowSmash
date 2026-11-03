@@ -69,6 +69,7 @@ import sys
 import tempfile
 import time
 import zlib
+import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
@@ -119,6 +120,12 @@ ROOTS = TOP | PLUGIN_DATA
 # ARCropolis' patch files: merged into the game's file of the same name (or a mod's whole one) when
 # mods are applied - .xmsbt into an .msbt (text), .prcx and .prcxml into a .prc (params)
 PATCHES = {".xmsbt": ".msbt", ".prcx": ".prc", ".prcxml": ".prc"}
+# ARCropolis' region files: msg_name+us_en.xmsbt is msg_name.xmsbt for the game in that region only. The
+# game here runs in American English (runtime/hle_env.c): +us_en is its file (over the mod's one with no
+# region), the other regions' are left out
+REGION = "us_en"
+REGION_SUFFIX = re.compile(r"\+(jp_ja|us_en|us_fr|us_es|eu_en|eu_fr|eu_es|eu_de|eu_nl|eu_it|eu_ru|kr_ko|zh_cn|zh_tw)"
+                           r"(?=\.[^./]+$)", re.I)
 SKIP_FILES = {"info.toml", "config.json", "preview.webp", "preview.png", "preview.jpg", "readme.txt", "readme.md"}
 GAMEBANANA = "https://gamebanana.com/apiv11"
 
@@ -202,7 +209,7 @@ def mod_files(folder):
     """(arc path, file) of every file a mod's folder holds (not its code plugins: plugins())."""
     out = []
     for dp, dirs, files in os.walk(folder):
-        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and not is_junk(d))
         for n in sorted(files):
             if n.startswith(".") or n.lower() in SKIP_FILES:
                 continue
@@ -220,12 +227,49 @@ def is_plugin(path):
     return path.lower().endswith(".nro") and not path.startswith("prebuilt:")
 
 
+# What a zip made on a Mac carries besides the mod: __MACOSX/ (the files' resource forks, each
+# "._<name>" - a friend's mods/Springtrap/__MACOSX/Springtrap/._plugin.nro stopped the plugin build:
+# "not an NSO") and .DS_Store. Never part of a mod: left out wherever a mod's files are looked at,
+# and deleted when a mod is installed or the mods are applied (mac_junk).
+JUNK_DIRS = {"__macosx"}
+
+
+def is_junk(name):
+    return name.lower() in JUNK_DIRS or name.startswith("._") or name == ".DS_Store"
+
+
+def mac_junk(folder):
+    """The __MACOSX folders and ._* / .DS_Store files under `folder`."""
+    out = []
+    for dp, dirs, files in os.walk(folder):
+        out += [os.path.join(dp, d) for d in dirs if d.lower() in JUNK_DIRS]
+        dirs[:] = [d for d in dirs if d.lower() not in JUNK_DIRS]
+        out += [os.path.join(dp, f) for f in files if is_junk(f)]
+    return out
+
+
+def remove_mac_junk(folder):
+    """Deletes mac_junk(folder); how many there were."""
+    junk = mac_junk(folder)
+    for path in junk:
+        if os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    return len(junk)
+
+
 def plugins(folder):
     """The code plugins a mod's folder holds (paths in it)."""
     out = []
     for dp, dirs, files in os.walk(folder):
-        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        dirs[:] = [d for d in dirs if not d.startswith(".") and not is_junk(d)]
         for n in files:
+            if is_junk(n):
+                continue
             rel = os.path.relpath(os.path.join(dp, n), folder)
             if is_plugin(arc_path(rel)):
                 out.append(rel.replace(os.sep, "/"))
@@ -238,6 +282,7 @@ def find_roots(top):
     are mods of their own (install copies each without the others: nested_roots)."""
     roots = []
     for dp, dirs, _files in os.walk(top):
+        dirs[:] = [d for d in dirs if not is_junk(d)]
         if any(d.lower() in ROOTS for d in dirs):
             roots.append(dp)
         dirs[:] = [d for d in dirs if d.lower() not in ROOTS]   # (a mod's own data folders are not other mods)
@@ -300,6 +345,7 @@ def install(tree, archive, name=None, meta=None):
         else:
             os.makedirs(os.path.join(tmp, "x"))
             extract(archive, os.path.join(tmp, "x"))
+        remove_mac_junk(os.path.join(tmp, "x"))
         roots = find_roots(os.path.join(tmp, "x"))
         if not roots and plugins(os.path.join(tmp, "x")):   # (only code: a moveset or gameplay plugin, recompiled into the game)
             roots = [os.path.join(tmp, "x")]
@@ -307,16 +353,33 @@ def install(tree, archive, name=None, meta=None):
             raise Error(f"{os.path.basename(archive)} has no files laid out as the game's (fighter/, ui/, sound/, stream;/ ...) "
                         "and no Skyline plugin (.nro)")
         base = safe_name(name or os.path.splitext(os.path.basename(archive))[0])
+        on = []   # (the game files of each of this pack's mods turned on)
         for root in roots:
             leaf = os.path.basename(root)
             label = base if len(roots) == 1 else f"{base} - {safe_name(leaf)}"
             final, k = label, 2
+            old = None
             while os.path.exists(os.path.join(tree.mods, final)):
+                # (the same download again - the same file, by its checksum: it replaces the copy there,
+                # turned on or off as it was, not a second copy "(2)" turned on beside it, the two
+                # changing the same files: Knuckles' 914)
+                if (meta or {}).get("md5") and state["mods"].get(final, {}).get("md5") == meta["md5"]:
+                    old = state["mods"][final]
+                    shutil.rmtree(os.path.join(tree.mods, final))
+                    break
                 final, k = f"{label} ({k})", k + 1
             inner = {os.path.normcase(r) for r in nested_roots(root, roots)}
             shutil.copytree(root, os.path.join(tree.mods, final),
                             ignore=lambda d, names: [n for n in names if os.path.normcase(os.path.join(d, n)) in inner])
-            entry = {"enabled": True}
+            # (a pack's choices - a moveset's Battle and Modern styles, one victory pose of several: a
+            # mod most of whose files another of the pack's turned-on mods changes too is the other's
+            # alternative, installed turned off; an add-on shares few. Both on, the later one's files
+            # won, and both movesets' plugins ran on the one fighter)
+            files = {p.lower() for p, _src in mod_files(os.path.join(tree.mods, final))}
+            choice = files and any(len(files & other) >= len(files) / 2 for other in on)
+            entry = {"enabled": old.get("enabled", True) if old else not choice}
+            if entry["enabled"]:
+                on.append(files)
             entry.update(meta or {})
             state = tree.load()
             state["mods"][final] = entry
@@ -337,32 +400,66 @@ def gamebanana_get(path):
         return json.load(r), ctx
 
 
-def gamebanana_install(tree, mod_id, file_id=None, progress=None):
+def gamebanana_install(tree, mod_id, file_id=None, progress=None, log=None):
     data, ctx = gamebanana_get(f"/Mod/{int(mod_id)}?_csvProperties=_sName,_aFiles,_aPreviewMedia,_aSubmitter,_aCategory")
     files = data.get("_aFiles") or []
     if not files:
         raise Error("this mod has no files to download on GameBanana")
-    f = next((x for x in files if str(x.get("_idRow")) == str(file_id)), None) if file_id else files[0]
+    # (no file named - a pasted link: the one most people downloaded, not the first listed, which is
+    # often an add-on: Dixie Kong's page lists its extra effects before the model)
+    f = next((x for x in files if str(x.get("_idRow")) == str(file_id)), None) if file_id else \
+        max(files, key=lambda x: (x.get("_nDownloadCount") or 0, x.get("_nFilesize") or 0))
     if not f:
         raise Error(f"the mod has no file {file_id}")
+    if not file_id and len(files) > 1 and log:
+        log(f"  {len(files)} files on its page: {f.get('_sFile')} (the most downloaded); the others: "
+            + ", ".join(x.get("_sFile", "?") for x in files if x is not f))
     if f.get("_sAvResult") not in (None, "", "clean"):
         raise Error(f"GameBanana's virus scan of {f.get('_sFile')} says: {f.get('_sAvResult')}. Not installed.")
     images = (data.get("_aPreviewMedia") or {}).get("_aImages") or []
     image = f"{images[0]['_sBaseUrl']}/{images[0].get('_sFile530') or images[0]['_sFile']}" if images else ""
     with tempfile.TemporaryDirectory(prefix="windowsmash-dl-") as tmp:
         target = os.path.join(tmp, os.path.basename(f["_sFile"]))
-        req = urllib.request.Request(f["_sDownloadUrl"], headers={"User-Agent": "WindowSmash mod manager"})
-        md5 = hashlib.md5()
-        with urllib.request.urlopen(req, timeout=60, context=ctx) as r, open(target, "wb") as out:
-            total, done = int(r.headers.get("Content-Length") or f.get("_nFilesize") or 0), 0
-            while chunk := r.read(1 << 20):
-                out.write(chunk)
-                md5.update(chunk)
-                done += len(chunk)
-                if progress:
-                    progress(done, total)
-        if f.get("_sMd5Checksum") and md5.hexdigest() != f["_sMd5Checksum"].lower():
-            raise Error(f"{f['_sFile']} did not download whole (its checksum differs): try again")
+        # (a large download can stop short on a slow or busy connection: it's tried again, from where it
+        # stopped when the server allows that, before giving up)
+        tries = 4
+        for attempt in range(1, tries + 1):
+            have = os.path.getsize(target) if os.path.exists(target) else 0
+            headers = {"User-Agent": "WindowSmash mod manager"}
+            if have:
+                headers["Range"] = f"bytes={have}-"
+            try:
+                with urllib.request.urlopen(urllib.request.Request(f["_sDownloadUrl"], headers=headers), timeout=60, context=ctx) as r:
+                    resumed = have and r.status == 206
+                    total = (have if resumed else 0) + int(r.headers.get("Content-Length") or 0) or int(f.get("_nFilesize") or 0)
+                    with open(target, "ab" if resumed else "wb") as out:
+                        done = have if resumed else 0
+                        while chunk := r.read(1 << 20):
+                            out.write(chunk)
+                            done += len(chunk)
+                            if progress:
+                                progress(done, total)
+            except urllib.error.HTTPError as e:
+                if not (have and e.code == 416):   # (416: nothing after what's there, so it's all there: checked below)
+                    raise Error(f"{f['_sFile']} didn't download (GameBanana said {e.code} {e.reason}): try again later")
+            except (OSError, urllib.error.URLError) as e:   # (a connection dropped: tried again)
+                if attempt == tries:
+                    raise Error(f"{f['_sFile']} didn't download ({e}): try again")
+                if log:
+                    log(f"  the download stopped ({e}); trying again ({attempt + 1} of {tries})")
+                time.sleep(2 * attempt)
+                continue
+            md5 = hashlib.md5()
+            with open(target, "rb") as got:
+                while chunk := got.read(1 << 20):
+                    md5.update(chunk)
+            if not f.get("_sMd5Checksum") or md5.hexdigest() == f["_sMd5Checksum"].lower():
+                break
+            os.remove(target)   # (a wrong file is downloaded again from the start)
+            if attempt == tries:
+                raise Error(f"{f['_sFile']} did not download whole (its checksum differs, {tries} tries): try again later")
+            if log:
+                log(f"  {f['_sFile']} came down incomplete (its checksum differs); downloading it again ({attempt + 1} of {tries})")
         meta = {"gamebanana": int(mod_id), "title": data.get("_sName", ""), "image": image,
                 "author": (data.get("_aSubmitter") or {}).get("_sName", ""),
                 "category": (data.get("_aCategory") or {}).get("_sName", ""), "file": f["_sFile"], "file_id": f["_idRow"],
@@ -420,7 +517,7 @@ def replace_file(tmp, path):
     try:
         os.replace(tmp, path)
     except PermissionError:
-        raise Error(f"{os.path.basename(path)} is open in another program (the game, or another WindowSmash Mods window): "
+        raise Error(f"{os.path.basename(path)} is open in another program (the game, or another OpenSmash Ultimate Mods window): "
                     "close it and apply again")
 
 
@@ -1527,6 +1624,11 @@ def apply(tree, log=print):
         # sd:/ultimate/mods (runtime/hle_fs.c) as the game loads, so the game keeps its own data
         select_screen_room(tree, on, log)
         characters_mod(tree, log)
+        hide_shadowed_sources(tree, on, log)
+        hide_smashline_copies(tree, on, log)
+        junk = sum(remove_mac_junk(os.path.join(tree.mods, n)) for n in on)
+        if junk:
+            log(f"{junk} macOS zip leftover(s) (__MACOSX, ._ files) deleted from the mods' folders")
         missing_shares(tree, on, log)
         sync_plugins(tree, log)
         shutil.copyfile(tree.vanilla_cfg, tree.cfg)
@@ -1648,6 +1750,46 @@ def characters_mod(tree, log):
         log("the new characters' select-screen files include these mods' own copies: " + ", ".join(hidden))
 
 
+def hide_shadowed_sources(tree, on, log):
+    """A mod that ships a file both whole and as ARCropolis' text source next to it - Knuckles'
+    fighter/sonic/motion/body/c120/motion_list.bin and motion_list.yml - has ARCropolis build the
+    file from the text, and a .yml of an older format than this ARCropolis reads (missing a field)
+    then left the file unloaded and the match crashed. The whole file is what the mod's author
+    tested: its .yml is added to dump/skyline/hidden.txt (runtime/hle_fs.c hides it from ARCropolis)."""
+    hidden_path = os.path.join(tree.root, "dump", "skyline", "hidden.txt")
+    shadowed = []
+    for name in on:
+        for root in find_roots(os.path.join(tree.mods, name)) or [os.path.join(tree.mods, name)]:
+            for dp, _dirs, files in os.walk(root):
+                lower = {f.lower() for f in files}
+                for f in files:
+                    stem, ext = os.path.splitext(f)
+                    if ext.lower() == ".yml" and (stem + ".bin").lower() in lower:
+                        shadowed.append(os.path.relpath(os.path.join(dp, f), tree.mods).replace(os.sep, "/"))
+    if not shadowed:
+        return
+    with open(hidden_path, "a", encoding="utf-8", newline="\n") as f:
+        f.writelines(h + "\n" for h in shadowed)
+    log(f"{len(shadowed)} text source(s) left to the whole file beside them (ARCropolis would build that "
+        "file from the text): " + ", ".join(shadowed[:5]) + (" ..." if len(shadowed) > 5 else ""))
+
+
+def hide_smashline_copies(tree, on, log):
+    """A mod's plugin that is a copy of Smashline itself (tools/skyline.py smashline_copy: one built for
+    an older game patched the middle of 13.0.5's functions, and the boot stopped) is left out: added to
+    dump/skyline/hidden.txt, as ARCropolis would chainload it from the mod's folder (runtime/hle_fs.c
+    hides it). The game's own Smashline runs the mods' movesets."""
+    import skyline
+    copies = [f"{name}/{rel}" for name in on for rel in plugins(os.path.join(tree.mods, name))
+              if skyline.smashline_copy(os.path.join(tree.mods, name, rel))]
+    if not copies:
+        return
+    with open(os.path.join(tree.root, "dump", "skyline", "hidden.txt"), "a", encoding="utf-8", newline="\n") as f:
+        f.writelines(c + "\n" for c in copies)
+    log("left out, a copy of Smashline itself (the game's own Smashline is used; one made for another "
+        "game version stops the game at start): " + ", ".join(copies))
+
+
 ARRANGEMENT = ("ui", "param", "menu", "chara_icon_arrangement.prc")
 LAYOUT_FIX_ID, LAYOUT_FIX_FILE = 468582, 1055469   # (the GameBanana mod and its file without Squad Strike)
 LAYOUT_FIX = f"gamebanana.com/mods/{LAYOUT_FIX_ID} (CSS 91+ Layout Fix)"
@@ -1705,7 +1847,9 @@ def missing_shares(tree, on, log):
     """With the real ARCropolis: files a mod's config.json lists as a new costume's (new-dir-files) that
     the mod doesn't ship and nothing shares to it (Sans' c120 lists Palutena's wings and portal and
     ships neither: their weapons' set-up then reads a model that never loaded, a crash). Each is shared
-    from the game's own file of the base costume (c00), in mods/.characters/config.json."""
+    from the game's own file of the base costume (c00), in mods/.characters/config.json. Not textures:
+    one a mod leaves out is drawn with the game's default texture, as on the console - c00's in its place
+    turned Sans' skull (his face material: Palutena's alp_palutena_002_col, her green hair) green."""
     shares, found = {}, 0
     image = RomfsImage(tree.vanilla_cfg)
     try:
@@ -1724,7 +1868,7 @@ def missing_shares(tree, on, log):
                           for v in (cfg.get(key) or {}).values() for t in (v if isinstance(v, list) else [v])}
                 for files in cfg["new-dir-files"].values():
                     for path in files if isinstance(files, list) else []:
-                        if path in shared or os.path.isfile(os.path.join(root, *path.split("/"))):
+                        if path in shared or path.lower().endswith(".nutexb") or os.path.isfile(os.path.join(root, *path.split("/"))):
                             continue
                         m = SLOT.search(path)
                         source = path[:m.start()] + "/c00/" + path[m.end():] if m and int(m.group(1)) >= 8 else None
@@ -1775,7 +1919,13 @@ def _apply(tree, image, lines, state, on, log):
         for plugin in plugins(os.path.join(tree.mods, name)):
             log(f"{name}: {plugin} is a Skyline code plugin (a moveset, a new character...): recompiled into the game "
                 "(tools/skyline.py)")
-        for path, src in mod_files(os.path.join(tree.mods, name)):
+        # (a region's file after the mod's others, so it wins over the one with no region)
+        for path, src in sorted(mod_files(os.path.join(tree.mods, name)), key=lambda f: bool(REGION_SUFFIX.search(f[0]))):
+            m = REGION_SUFFIX.search(path)
+            if m:
+                if m.group(1).lower() != REGION:
+                    continue
+                path = path[:m.start()] + path[m.end():]
             stem, ext = os.path.splitext(path)
             if ext.lower() in PATCHES:
                 patches.setdefault((stem + PATCHES[ext.lower()]).lower(), []).append((path, src, name))

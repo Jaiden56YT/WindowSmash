@@ -130,7 +130,9 @@ HLE(_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE) {
     u64 work = ld64(arg + 0x4D0);
     u32 offset = ld32(arg + 0x3C0), length = ld32(arg + 0x3C4);
     if (work && length) guest_text(k.text, 1024, work + offset, length < 1000 ? length : 1000);
-    int ok = ask_text(&k);
+    /* SSBU_KEYBOARD_TEXT (test runs): that text, as if typed and OK'd, with no dialog */
+    const char *typed = getenv("SSBU_KEYBOARD_TEXT");
+    int ok = typed ? MultiByteToWideChar(CP_UTF8, 0, typed, -1, k.text, 1024) > 0 : ask_text(&k);
     /* the text (also on Cancel: what the box held, as the console's keyboard reports it) */
     u64 ptr = out ? ld64(out) : 0, size = out ? ld64(out + 8) : 0;
     if (ptr && size >= (utf8 ? 1u : 2u)) {
@@ -272,6 +274,11 @@ static int ask_text_now(const char *prompt, const char *initial, int multiline, 
 }
 
 static int ask_text(const char *prompt, const char *initial, int multiline, char *text, size_t cap) {
+    const char *typed = getenv("SSBU_KEYBOARD_TEXT");   /* (test runs: that text, as if typed and OK'd, with no dialog) */
+    if (typed) {
+        snprintf(text, cap, "%s", typed);
+        return 1;
+    }
     watchdog_pause(1);   /* (the game waits for the dialog: no frames meanwhile) */
     int ok = ask_text_now(prompt, initial, multiline, text, cap);
     watchdog_pause(0);
