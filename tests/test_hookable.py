@@ -114,8 +114,8 @@ def emit(outdir, funcs=FUNCS, base=MAIN, **lists):
     image.write_bytes(hl.assemble(funcs))
     with warnings.catch_warnings():   # (_init leaves its file to the mmap, as a worker does)
         warnings.simplefilter('ignore', ResourceWarning)
-        recomp._init(str(image), set(funcs), base, lists.pop('forward', {}), set(), {}, lists.get('exact_callees'),
-                     lists.get('exact_callers'), lists.get('hookable'))
+        recomp._init(str(image), set(funcs), base, lists.pop('forward', {}), set(), {}, exact_callees=lists.get('exact_callees'),
+                     exact_callers=lists.get('exact_callers'), hookable=lists.get('hookable'))
     cached, lift.REGCACHE = lift.REGCACHE, True
     try:
         name, *_rest, problems = recomp._emit((0, sorted((o, 4 * len(w)) for o, w in funcs.items()), str(outdir)))

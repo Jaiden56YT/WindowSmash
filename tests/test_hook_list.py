@@ -182,7 +182,7 @@ class Lifting(unittest.TestCase):
             path.write_bytes(image())
             with warnings.catch_warnings():   # (_init leaves its file to the mmap, as a worker does)
                 warnings.simplefilter('ignore', ResourceWarning)
-                recomp._init(str(path), set(FUNCS), BASE, {}, set(), PADS, {0x40}, {0x80})
+                recomp._init(str(path), set(FUNCS), BASE, {}, set(), PADS, exact_callees={0x40}, exact_callers={0x80})
             try:
                 lifter = recomp._lifter()
                 self.assertEqual((lifter.exact_callees, lifter.exact_callers), ({0x40}, {0x80}))

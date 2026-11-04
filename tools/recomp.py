@@ -1166,6 +1166,8 @@ def _build(mod, found, funcs, path, outdir, jobs, per_file, imports=None):
     wrapped_hooks = [off for off in plugin_hooks(name) if off in sizes and isinstance(forward.get(off), tuple)
                      and forward[off][0] == "wrap"]
     forward.update({off: (*forward[off], "hooked") for off in wrapped_hooks})
+    write_if_changed(os.path.join(outdir, "hooks_skipped.txt"),   # (no function there, one replaced natively, or one with
+                     "".join(f"{off:x}\n" for off in plugin_hooks(name) if off not in hooks))   # no f_<address>_orig; stale_hooks)
     exact_callees, exact_callers = resolve_hooks(mod, base, dict(funcs), name, set(found), imports, native_only(forward))
     from eh import landing_pads
     pads = landing_pads(mod)

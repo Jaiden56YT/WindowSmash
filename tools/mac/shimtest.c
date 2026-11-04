@@ -1260,6 +1260,11 @@ int input_seq_on(void) { return 0; }   /* (hle_hid.c's SSBU_SEQ, and hle_movie_s
 void input_seq_mark(const char *what) { (void)what; }
 void movie_test_start(void) {}
 void test_fight_start(void) {}   /* (hle_fight_test.c's switches: none here) */
+void discord_init(void) {}   /* (macos/discord.c: no Discord here) */
+void watchdog_start(void) {}   /* (debug_watchdog.c) */
+void rtld_module_loaded(u64 base, u64 size) { (void)base; (void)size; }   /* (hle_rtld.c: nn::ro's lists) */
+void skyline_module_loaded(const char *name, u64 base) { (void)name; (void)base; }   /* (hle_skyline.c: no plugins here) */
+void skyline_note_sleep(void) {}
 void fiber_counts(u32 *slots, u32 *finalized, u64 *made) { *slots = *finalized = 0; *made = 0; }
 void *ipc_connect(const char *port) { return !strcmp(port, "sm:") ? (void *)&checks : NULL; }
 u32 ipc_request(Cpu *c, void *session, u64 message, u64 size) { (void)c; (void)session; (void)message; (void)size; return 0; }
