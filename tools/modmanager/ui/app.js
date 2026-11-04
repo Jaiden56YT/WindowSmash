@@ -81,7 +81,7 @@ function render(lib) {
   $("#hdr-toggle").hidden = !hdr.installed;
   $("#hdr-on").checked = !!hdr.on;
   $("#hdr-on").disabled = lib.game_running;
-  $("#hdr-toggle-state").textContent = hdr.on ? "On: applied with your mods" : "Off";
+  $("#hdr-toggle-state").textContent = hdr.on ? "On (only works with every other mod off)" : "Off";
   if ($("#view-hdr").classList.contains("active")) renderHdr();
   const gs = $("#game-state");
   gs.textContent = lib.game_running ? "● Game is open" : "Game closed";
@@ -146,13 +146,14 @@ function groupRow(key, g, parts, draggable) {
         <div class="about">${esc(parts.map((p) => p.part).join(" · "))}</div>
       </div>
       <div class="end">
-        <label class="switch${on > 0 && on < parts.length ? " mixed" : ""}" title="All its parts on / off"><input type="checkbox" ${on === parts.length ? "checked" : ""}><span></span></label>
+        <label class="switch" title="${on ? "Turn its parts off" : "Turn its parts back on (the ones that were on)"}"><input type="checkbox" ${on ? "checked" : ""}><span></span></label>
       </div>
     </div>
     <div class="parts"></div>`;
-  const all = $(".head .switch input", box);
-  all.indeterminate = on > 0 && on < parts.length;
-  all.addEventListener("change", (e) => setEnabled(parts.map((p) => p.name), e.target.checked));
+  // (on while any part is: off remembers which were, on brings back those - a pack's alternatives stay off)
+  $(".head .switch input", box).addEventListener("change", async (e) => {
+    try { render(await api("/api/group", { names: parts.map((p) => p.name), on: e.target.checked })); } catch (err) { fail(err); }
+  });
   const toggle = () => {
     box.classList.toggle("open");
     box.classList.contains("open") ? openGroups.add(key) : openGroups.delete(key);
@@ -257,6 +258,12 @@ $("#check").addEventListener("click", async () => {
   try { renderIssues((await api("/api/check", {})).issues); } catch (e) { fail(e); }
 });
 
+for (const [id, on] of [["#all-on", true], ["#all-off", false]]) {
+  $(id).addEventListener("click", async () => {
+    try { render(await api("/api/all", { on })); } catch (e) { fail(e); }
+  });
+}
+
 $("#apply").addEventListener("click", async () => {
   try {
     const { issues } = await api("/api/check", {});
@@ -305,6 +312,14 @@ function renderHdr() {
 }
 $("#hdr-on").addEventListener("change", async (e) => {
   try {
+    const others = (state.lib.mods || []).filter((m) => m.enabled && !state.lib.hdr.mods.includes(m.name)).length;
+    if (e.target.checked && others) {
+      if (!confirm(`HewDraw Remix only works with every other mod turned off.\n\nTurn your ${others} other mod${others > 1 ? "s" : ""} off now? (All on, in My mods, brings back the ones that were on.)`)) {
+        e.target.checked = false;
+        return;
+      }
+      await api("/api/all", { on: false });
+    }
     render(await api("/api/hdr/enable", { on: e.target.checked }));
     toast(e.target.checked ? "HewDraw Remix on: press Apply to game" : "HewDraw Remix off: press Apply to game");
   } catch (err) { e.target.checked = !e.target.checked; fail(err); }

@@ -302,8 +302,6 @@ input[type=checkbox].pick { width: 16px; height: 16px; accent-color: var(--gold)
 .mod.part .thumb { display: none; }
 .mod .about { color: var(--text); opacity: .78; font-size: 12.5px; margin-top: 4px; line-height: 1.4; }
 .group > .head .about { color: var(--dim); opacity: 1; }
-.switch.mixed span { background: linear-gradient(90deg, rgba(139, 61, 255, .55), var(--line)); }
-.switch.mixed span::after { transform: translateX(10px); }
 
 /* HewDraw Remix: its switch above Apply, and its tab */
 .rail-switch { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line); cursor: pointer; }
@@ -327,3 +325,9 @@ input[type=checkbox].pick { width: 16px; height: 16px; accent-color: var(--gold)
 .hdr-cols ul li { margin-bottom: 6px; }
 .hdr-credits p { max-width: 90ch; }
 @media (max-width: 900px) { .hdr-hero, .hdr-cols { grid-template-columns: 1fr; } }
+.hdr-warn { border-color: var(--red); }
+.hdr-warn h3 { color: var(--red); }
+.hdr-only { display: inline-block; margin: 0 0 14px; padding: 7px 12px; border-radius: 8px; background: rgba(255, 61, 110, .14); border: 1px solid var(--red); color: var(--warn-head); }
+.seg-pair { display: inline-flex; }
+.seg-pair button:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.seg-pair button:last-child { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: 0; }
