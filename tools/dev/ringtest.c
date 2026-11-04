@@ -60,8 +60,8 @@ void ipc_close(void *session) { (void)session; }
 void gpu_memory_unmapping(u64 addr, u64 size) { (void)addr; (void)size; }
 #ifdef __APPLE__
 void rt_upnp_remove(void) {}
-void skyline_note_sleep(void) {}   /* (hle_skyline.c: the plugins' callbacks, at a SleepThread) */
 #endif
+void skyline_note_sleep(void) {}   /* (hle_skyline.c: the plugins' callbacks, at a SleepThread) */
 
 /* The frame hooks (hle_each_frame.c): what the ring registered, from its constructor. */
 static int hooks_added, hook_point, hook_order;
