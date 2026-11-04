@@ -45,6 +45,13 @@ void rt_fatal(const char *fmt, ...) {
     exit(3);
 }
 void account_save_id(u64 uid[2]) { (void)uid; }
+/* (hle_skyline.c and host.c: the Skyline plugins, which this test loads none of) */
+void skyline_load_plugins(Cpu *c) { (void)c; }
+int skyline_provides(const char *path) { (void)path; return 0; }
+void skyline_mods_mounted(void) {}
+u64 rt_symbol(const char *name) { (void)name; return 0; }
+u64 rt_native(GuestFn *fn, const char *name) { (void)fn; (void)name; return 0; }
+u64 rt_hook_function(u64 target, u64 replace) { (void)target; (void)replace; return 0; }
 
 static int failures, checks;
 static int is(const char *text, const char *want) { return text && !strcmp(text, want); }   /* (NULL: not there) */

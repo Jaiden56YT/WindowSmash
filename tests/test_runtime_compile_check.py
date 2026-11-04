@@ -270,5 +270,29 @@ class Run(Folder):
         self.assertFalse(os.path.exists(self.tree))
 
 
+
+class GameLibrary(unittest.TestCase):
+    """--game-dll: the program has the runtime's objects (and its manifest, which tools/cc.py links in as
+    a .res), the library the modules'."""
+    def objects(self, tree, host):
+        rt = check.runtime_folder(tree, host)
+        program = [os.path.join(rt, 'host.obj'), os.path.join(tree, 'build', 'ssbu.res')]
+        library = [os.path.join(check.module_folder(tree, host, m), 'g0.obj') for m in check.MODULES]
+        return program, library
+
+    def test_the_manifest_is_the_programs_own(self):
+        tree = os.path.join(tempfile.gettempdir(), 'made-up game')
+        program, library = self.objects(tree, 'windows')
+        self.assertEqual(check.library_problems(str(ROOT / 'runtime'), tree, 'windows', program, library), [])
+
+    def test_a_modules_object_in_the_program_is_named(self):
+        tree = os.path.join(tempfile.gettempdir(), 'made-up game')
+        program, library = self.objects(tree, 'windows')
+        program.append(library[0])
+        problems = check.library_problems(str(ROOT / 'runtime'), tree, 'windows', program, library)
+        self.assertEqual(len(problems), 1)
+        self.assertIn('the program has g0.obj', problems[0])
+
+
 if __name__ == '__main__':
     unittest.main()
